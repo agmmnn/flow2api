@@ -9,10 +9,10 @@ import re
 from urllib.parse import urlparse
 
 from curl_cffi.requests import AsyncSession
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from ..core.auth import verify_api_key_flexible
+from ..core.auth import AuthManager, verify_api_key_flexible
 from ..core.logger import debug_logger
 from ..core.model_resolver import get_base_model_aliases, resolve_model_name
 from ..core.models import (
@@ -23,7 +23,6 @@ from ..core.models import (
 )
 from ..services.generation_handler import MODEL_CONFIG, GenerationHandler
 from ..services.browser_captcha_extension import ExtensionCaptchaService
-from fastapi import WebSocket, WebSocketDisconnect
 
 router = APIRouter()
 
@@ -486,6 +485,7 @@ async def _collect_non_stream_result(
     model: str,
     prompt: str,
     images: List[bytes],
+    base_url_override: Optional[str] = None,
     video_media_id: Optional[str] = None,
 ) -> str:
     handler = _ensure_generation_handler()
@@ -495,6 +495,7 @@ async def _collect_non_stream_result(
         prompt=prompt,
         images=images if images else None,
         stream=False,
+        base_url_override=base_url_override,
         video_media_id=video_media_id,
     ):
         result = chunk
@@ -723,6 +724,7 @@ async def _iterate_openai_stream(
         prompt=normalized.prompt,
         images=normalized.images if normalized.images else None,
         stream=True,
+        base_url_override=base_url_override,
         video_media_id=normalized.video_media_id,
     ):
         if chunk.startswith("data: "):
@@ -746,6 +748,7 @@ async def _iterate_gemini_stream(
         prompt=normalized.prompt,
         images=normalized.images if normalized.images else None,
         stream=True,
+        base_url_override=base_url_override,
         video_media_id=normalized.video_media_id,
     ):
         if chunk.startswith("data: "):
@@ -874,6 +877,7 @@ async def create_chat_completion(
                 normalized.model,
                 normalized.prompt,
                 normalized.images,
+                base_url_override=request_base_url,
                 video_media_id=normalized.video_media_id,
             )
         )
@@ -907,7 +911,8 @@ async def generate_content(
                     normalized.model,
                     normalized.prompt,
                     normalized.images,
-                    request_base_url,
+                    base_url_override=request_base_url,
+                    video_media_id=normalized.video_media_id,
                 )
             )
         )
@@ -970,6 +975,20 @@ async def stream_generate_content(
 @router.websocket("/captcha_ws")
 async def captcha_websocket_endpoint(websocket: WebSocket):
     from ..core.logger import debug_logger
+    api_key = (
+        websocket.query_params.get("key")
+        or websocket.query_params.get("api_key")
+        or websocket.headers.get("x-goog-api-key")
+        or ""
+    ).strip()
+    authorization = (websocket.headers.get("authorization") or "").strip()
+    if authorization.lower().startswith("bearer "):
+        api_key = authorization[7:].strip()
+
+    if not api_key or not AuthManager.verify_api_key(api_key):
+        await websocket.close(code=1008)
+        return
+
     service = await ExtensionCaptchaService.get_instance()
     await service.connect(websocket)
     try:

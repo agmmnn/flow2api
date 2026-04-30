@@ -62,7 +62,7 @@ class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
     async def test_generate_video_text_uses_v2_payload_for_lite(self):
         captured = {}
 
-        async def fake_make_request(method, url, json_data, use_at, at_token):
+        async def fake_make_request(method, url, json_data, use_at, at_token, **kwargs):
             captured["url"] = url
             captured["json_data"] = json_data
             return {"operations": [{"operation": {"name": "task-1"}}]}
@@ -92,7 +92,7 @@ class VeoLiteFlowClientTests(unittest.IsolatedAsyncioTestCase):
     async def test_generate_video_start_end_uses_v2_payload_for_interpolation_lite(self):
         captured = {}
 
-        async def fake_make_request(method, url, json_data, use_at, at_token):
+        async def fake_make_request(method, url, json_data, use_at, at_token, **kwargs):
             captured["url"] = url
             captured["json_data"] = json_data
             return {"operations": [{"operation": {"name": "task-2"}}]}

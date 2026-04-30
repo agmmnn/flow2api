@@ -213,14 +213,6 @@ class FlowClient:
                 headers["sec-ch-ua-platform"] = "\"Windows\""
                 headers["sec-ch-ua-mobile"] = "?0"
 
-        if 'aisandbox' in url:
-            print(f"[DEBUG-DEEP] API REQUEST to: {url[:80]}")
-            print(f"[DEBUG-DEEP] fingerprint: {fingerprint}")
-            print(f"[DEBUG-DEEP] proxy_url: {proxy_url}")
-            print(f"[DEBUG-DEEP] UA: {headers.get('User-Agent', '')[:100]}")
-            print(f"[DEBUG-DEEP] sec-ch-ua-platform: {headers.get('sec-ch-ua-platform', 'NOT SET')}")
-            print(f"[DEBUG-DEEP] sec-ch-ua-mobile: {headers.get('sec-ch-ua-mobile', 'NOT SET')}")
-
         # Log request
         if config.debug_enabled:
             if isinstance(fingerprint, dict):
@@ -1946,7 +1938,6 @@ class FlowClient:
             ]
         }
         
-        print(f"[CONCAT] 提交拼接: original={original_media_id}, extend={extend_media_id}", flush=True)
         debug_logger.log_info(f"[CONCAT] 提交拼接任务: original={original_media_id[:12]}..., extend={extend_media_id[:12]}...")
         
         result = await self._make_request(
@@ -1956,7 +1947,7 @@ class FlowClient:
             use_at=True,
             at_token=at
         )
-        print(f"[CONCAT] 提交结果: {json.dumps(result, ensure_ascii=False)[:500]}", flush=True)
+        debug_logger.log_info(f"[CONCAT] 拼接任务已提交: {json.dumps(result, ensure_ascii=False)[:300]}")
         return result
 
     async def poll_concatenation_status(
@@ -2006,11 +1997,14 @@ class FlowClient:
             ev_len = len(encoded_video) if encoded_video else 0
             elapsed = int(time.time() - start_time)
             all_keys = list(result.keys())
-            print(f"[CONCAT] 状态: {status}, outputUri: {'有:'+output_uri[:40] if output_uri else 'N/A'}, encodedVideo: {ev_len} chars, elapsed: {elapsed}s, keys: {all_keys}", flush=True)
+            debug_logger.log_info(
+                f"[CONCAT] 状态: {status}, outputUri={'yes' if output_uri else 'no'}, "
+                f"encodedVideo={ev_len} chars, elapsed={elapsed}s, keys={all_keys}"
+            )
             
             # 优先检查 outputUri
             if output_uri:
-                print(f"[CONCAT] 拼接完成 (outputUri): {output_uri[:120]}", flush=True)
+                debug_logger.log_info(f"[CONCAT] 拼接完成 (outputUri): {output_uri[:120]}")
                 return result
             
             # Google API 返回 encodedVideo（base64 编码的 MP4）而不是 outputUri
@@ -2030,26 +2024,26 @@ class FlowClient:
                     
                     # 构造 URL：FastAPI 挂载了 /tmp -> /app/tmp/
                     serve_url = f"/tmp/{video_filename}"
-                    print(f"[CONCAT] 拼接完成 (encodedVideo): 保存 {len(video_bytes)} bytes -> {serve_url}", flush=True)
+                    debug_logger.log_info(f"[CONCAT] 拼接完成 (encodedVideo): 保存 {len(video_bytes)} bytes -> {serve_url}")
                     
                     result["outputUri"] = serve_url
                     result["local_file"] = save_path
                     return result
                 except Exception as e:
-                    print(f"[CONCAT] 解码 encodedVideo 失败: {e}", flush=True)
+                    debug_logger.log_error(f"[CONCAT] 解码 encodedVideo 失败: {e}")
                     raise Exception(f"解码拼接视频失败: {e}")
             
             # SUCCESSFUL but neither outputUri nor encodedVideo
             if "SUCCESSFUL" in status:
-                print(f"[CONCAT] SUCCESSFUL 但无 outputUri/encodedVideo，完整响应: {json.dumps(result, ensure_ascii=False)[:500]}", flush=True)
-            
+                debug_logger.log_warning(f"[CONCAT] SUCCESSFUL 但无 outputUri/encodedVideo: {json.dumps(result, ensure_ascii=False)[:300]}")
+
             if "FAILED" in status or "ERROR" in status:
-                print(f"[CONCAT] 失败: {status}, 响应: {json.dumps(result, ensure_ascii=False)[:300]}", flush=True)
+                debug_logger.log_error(f"[CONCAT] 失败: {status}, 响应: {json.dumps(result, ensure_ascii=False)[:300]}")
                 raise Exception(f"视频拼接失败: {status}")
             
             await asyncio.sleep(poll_interval)
         
-        print(f"[CONCAT] 超时 ({timeout}s)，放弃拼接", flush=True)
+        debug_logger.log_error(f"[CONCAT] 超时 ({timeout}s)，放弃拼接")
         raise Exception(f"视频拼接超时 ({timeout}s)")
 
     # ========== 视频放大 (Video Upsampler) ==========
@@ -2662,13 +2656,12 @@ class FlowClient:
             - 其他模式: browser_id 为 None
         """
         captcha_method = config.captcha_method
-        print(f"[DEBUG] _get_recaptcha_token called: captcha_method={captcha_method}, project_id={project_id}, action={action}")
+        debug_logger.log_info(f"[reCAPTCHA] 开始获取 token: method={captcha_method}, project_id={project_id}, action={action}")
 
         if captcha_method == "extension":
             try:
                 from .browser_captcha_extension import ExtensionCaptchaService
                 service = await ExtensionCaptchaService.get_instance(self.db)
-                print(f"[DEBUG-EXTENSION] get_token requested, active_connections length: {len(service.active_connections)}")
                 extension_timeout = 45 if action == "VIDEO_GENERATION" else 25
                 token = await service.get_token(
                     project_id,
@@ -2680,7 +2673,6 @@ class FlowClient:
                 return token, None
             except Exception as e:
                 debug_logger.log_error(f"[reCAPTCHA Extension] 错误: {str(e)}")
-                print(f"[DEBUG-EXTENSION] EXCEPTION IN get_token: {e}")
                 self._set_request_fingerprint(None)
                 return None, None
 
@@ -2695,8 +2687,6 @@ class FlowClient:
                 token = await service.get_token(project_id, action)
                 debug_logger.log_info(f"[reCAPTCHA] get_token 返回: {token[:50] if token else None}...")
                 fingerprint = service.get_last_fingerprint() if token else None
-                print(f"[DEBUG-DEEP] personal token obtained: {bool(token)}, token_prefix={str(token)[:40] if token else 'None'}")
-                print(f"[DEBUG-DEEP] personal fingerprint: {fingerprint}")
                 self._set_request_fingerprint(fingerprint if token else None)
                 return token, None
             except RuntimeError as e:
@@ -2772,11 +2762,10 @@ class FlowClient:
                     proxy_url = await self.proxy_manager.get_request_proxy_url()
                     if proxy_url:
                         self._set_request_fingerprint({"proxy_url": proxy_url})
-                        print(f"[DEBUG] API captcha using proxy: {proxy_url[:60]}...")
                     else:
                         self._set_request_fingerprint(None)
                 except Exception as e:
-                    print(f"[DEBUG] Failed to get proxy for API captcha: {e}")
+                    debug_logger.log_warning(f"[reCAPTCHA] Failed to get proxy for API captcha: {e}")
                     self._set_request_fingerprint(None)
             else:
                 self._set_request_fingerprint(None)
@@ -2832,22 +2821,15 @@ class FlowClient:
             if self.proxy_manager:
                 try:
                     proxy_url = await self.proxy_manager.get_request_proxy_url()
-                    print(f"[DEBUG] Got proxy_url: {proxy_url[:60] if proxy_url else None}")
                     if proxy_url:
                         if proxy_url.startswith("socks5://"):
                             # curl_cffi 对 SOCKS5 使用 proxy 参数
                             proxy = proxy_url
-                            print(f"[DEBUG] Using SOCKS5 proxy for CapSolver: {proxy[:60]}...")
                         else:
                             # HTTP/HTTPS 代理使用 proxies 字典
                             proxies = {"http": proxy_url, "https": proxy_url}
-                            print(f"[DEBUG] Using HTTP proxy for CapSolver: {proxy_url[:60]}...")
                 except Exception as e:
-                    print(f"[DEBUG] Failed to get proxy: {e}")
                     debug_logger.log_warning(f"[reCAPTCHA {method}] Failed to get proxy: {e}")
-
-            print(f"[DEBUG] CapSolver request: method={method}, project_id={project_id}, action={action}")
-            print(f"[DEBUG] CapSolver API Key: {client_key[:20]}...")
             
             async with AsyncSession() as session:
                 create_url = f"{base_url}/createTask"
@@ -2861,21 +2843,15 @@ class FlowClient:
                     }
                 }
 
-                # 根据代理类型使用不同参数
-                print(f"[DEBUG] Sending createTask request to {create_url}")
                 if proxy:
-                    print(f"[DEBUG] Using proxy param: {proxy[:60]}...")
                     result = await session.post(create_url, json=create_data, impersonate="chrome124", proxy=proxy)
                 else:
-                    print(f"[DEBUG] Using proxies dict or no proxy")
                     result = await session.post(create_url, json=create_data, impersonate="chrome124", proxies=proxies)
-                
-                print(f"[DEBUG] createTask response status: {result.status_code}")
+
                 debug_logger.log_info(f"[reCAPTCHA {method}] createTask response status: {result.status_code}")
                 result_json = result.json()
                 task_id = result_json.get('taskId')
 
-                print(f"[DEBUG] createTask response: {result_json}")
                 debug_logger.log_info(f"[reCAPTCHA {method}] created task_id: {task_id}, response: {result_json}")
 
                 if not task_id:
@@ -2896,29 +2872,21 @@ class FlowClient:
                         result = await session.post(get_url, json=get_data, impersonate="chrome124", proxies=proxies)
                     result_json = result.json()
 
-                    print(f"[DEBUG] getTaskResult polling #{i+1}: status={result_json.get('status')}, response={result_json}")
                     debug_logger.log_info(f"[reCAPTCHA {method}] polling #{i+1}: {result_json}")
 
                     status = result_json.get('status')
                     if status == 'ready':
                         solution = result_json.get('solution', {})
                         response = solution.get('gRecaptchaResponse')
-                        print(f"[DEBUG] Got solution: {solution}")
-                        print(f"[DEBUG] Got gRecaptchaResponse: {response[:50] if response else None}")
                         if response:
-                            print(f"[DEBUG] Token获取成功")
                             debug_logger.log_info(f"[reCAPTCHA {method}] Token获取成功")
                             return response
 
                     await asyncio.sleep(3)
 
-                print(f"[DEBUG] Timeout waiting for token after 40 retries")
                 debug_logger.log_error(f"[reCAPTCHA {method}] Timeout waiting for token")
                 return None
 
         except Exception as e:
-            print(f"[DEBUG] Exception in _get_api_captcha_token: {type(e).__name__}: {str(e)}")
             debug_logger.log_error(f"[reCAPTCHA {method}] error: {str(e)}")
-            import traceback
-            traceback.print_exc()
             return None

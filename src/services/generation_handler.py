@@ -818,6 +818,7 @@ class GenerationHandler:
         prompt: str,
         images: Optional[List[bytes]] = None,
         stream: bool = False,
+        base_url_override: Optional[str] = None,
         video_media_id: Optional[str] = None,
     ) -> AsyncGenerator:
         """统一生成入口
@@ -1688,7 +1689,6 @@ class GenerationHandler:
                 debug_logger.log_info(f"[EXTEND] 续写视频: {video_media_id}")
                 if stream:
                     yield self._create_stream_chunk(f"视频续写任务提交中，源视频: {video_media_id[:8]}...\n")
-                print(f"[EXTEND-DEBUG] Calling generate_video_extend with video_media_id={video_media_id}")
                 result = await self.flow_client.generate_video_extend(
                     at=token.at,
                     project_id=project_id,
@@ -1755,7 +1755,17 @@ class GenerationHandler:
 
             # 如果是 extend，传入源视频 media_id 用于后续拼接
             extend_source_id = video_media_id if video_type == "extend" else None
-            async for chunk in self._poll_video_result(token, project_id, operations, stream, upsample_config, generation_result, request_log_state, extend_source_media_id=extend_source_id):
+            async for chunk in self._poll_video_result(
+                token,
+                project_id,
+                operations,
+                stream,
+                upsample_config,
+                generation_result,
+                response_state,
+                request_log_state,
+                extend_source_media_id=extend_source_id,
+            ):
                 yield chunk
 
         finally:
@@ -1769,6 +1779,7 @@ class GenerationHandler:
         stream: bool,
         upsample_config: Optional[Dict] = None,
         generation_result: Optional[Dict[str, Any]] = None,
+        response_state: Optional[Dict[str, Any]] = None,
         request_log_state: Optional[Dict[str, Any]] = None,
         extend_source_media_id: Optional[str] = None,
     ) -> AsyncGenerator:
@@ -1826,7 +1837,6 @@ class GenerationHandler:
                     import re as _re
                     _uuid_match = _re.search(r'/video/([0-9a-f-]{36})', video_url or '')
                     video_media_id = _uuid_match.group(1) if _uuid_match else video_info.get("mediaGenerationId", "")
-                    print(f"[POLL-DEBUG] fifeUrl={str(video_url)[:80]}, video_media_id={video_media_id}")
                     aspect_ratio = video_info.get("aspectRatio", "VIDEO_ASPECT_RATIO_LANDSCAPE")
 
                     if not video_url:
@@ -1862,7 +1872,14 @@ class GenerationHandler:
                                 
                                 # 递归轮询放大结果（不再放大）
                                 async for chunk in self._poll_video_result(
-                                    token, project_id, upsample_operations, stream, None, generation_result, response_state, request_log_state
+                                    token,
+                                    project_id,
+                                    upsample_operations,
+                                    stream,
+                                    None,
+                                    generation_result,
+                                    response_state,
+                                    request_log_state,
                                 ):
                                     yield chunk
                                 return
@@ -1875,12 +1892,10 @@ class GenerationHandler:
                                 yield self._create_stream_chunk(f"⚠️ 放大失败: {str(e)}，返回原始视频\n")
 
                     # ========== Extend 视频拼接 ==========
-                    print(f"[CONCAT-DEBUG] extend_source_media_id={extend_source_media_id}, video_media_id={video_media_id}", flush=True)
                     if extend_source_media_id and video_media_id:
                         try:
                             if stream:
                                 yield self._create_stream_chunk("\n视频续写完成，正在拼接完整视频...\n")
-                            print(f"[CONCAT] 开始拼接: original={extend_source_media_id[:40]}..., extend={video_media_id[:40]}...", flush=True)
                             debug_logger.log_info(f"[CONCAT] 开始拼接: original={extend_source_media_id[:12]}..., extend={video_media_id[:12]}...")
                             
                             # 提交拼接任务
@@ -1926,9 +1941,8 @@ class GenerationHandler:
                                     yield self._create_stream_chunk("⚠️ 拼接任务创建失败，返回续写片段\n")
                         except Exception as e:
                             import traceback
-                            print(f"[CONCAT] ❌ 拼接异常: {str(e)}", flush=True)
-                            print(f"[CONCAT] traceback: {traceback.format_exc()}", flush=True)
                             debug_logger.log_error(f"[CONCAT] 拼接失败: {str(e)}")
+                            debug_logger.log_error(f"[CONCAT] traceback: {traceback.format_exc()}")
                             if stream:
                                 yield self._create_stream_chunk(f"⚠️ 拼接失败: {str(e)}，返回续写片段\n")
                             # 拼接失败不影响返回，继续使用 extend 片段的 URL
