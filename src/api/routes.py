@@ -9,7 +9,7 @@ import re
 from urllib.parse import urlparse
 
 from curl_cffi.requests import AsyncSession
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..core.auth import verify_api_key_flexible
@@ -22,6 +22,8 @@ from ..core.models import (
     GeminiGenerateContentRequest,
 )
 from ..services.generation_handler import MODEL_CONFIG, GenerationHandler
+from ..services.browser_captcha_extension import ExtensionCaptchaService
+from fastapi import WebSocket, WebSocketDisconnect
 
 router = APIRouter()
 
@@ -837,3 +839,18 @@ async def stream_generate_content(
             status_code=500,
             content=_build_gemini_error_payload(500, str(exc)),
         )
+
+@router.websocket("/captcha_ws")
+async def captcha_websocket_endpoint(websocket: WebSocket):
+    from ..core.logger import debug_logger
+    service = await ExtensionCaptchaService.get_instance()
+    await service.connect(websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            await service.handle_message(websocket, data)
+    except WebSocketDisconnect:
+        service.disconnect(websocket)
+    except Exception as e:
+        debug_logger.log_error(f"WebSocket error: {e}")
+        service.disconnect(websocket)

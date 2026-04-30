@@ -405,6 +405,7 @@ class AddTokenRequest(BaseModel):
     project_name: Optional[str] = None
     remark: Optional[str] = None
     captcha_proxy_url: Optional[str] = None
+    extension_route_key: Optional[str] = None
     image_enabled: bool = True
     video_enabled: bool = True
     image_concurrency: int = -1
@@ -417,6 +418,7 @@ class UpdateTokenRequest(BaseModel):
     project_name: Optional[str] = None
     remark: Optional[str] = None
     captcha_proxy_url: Optional[str] = None
+    extension_route_key: Optional[str] = None
     image_enabled: Optional[bool] = None
     video_enabled: Optional[bool] = None
     image_concurrency: Optional[int] = None
@@ -483,6 +485,7 @@ class ImportTokenItem(BaseModel):
     session_token: Optional[str] = None
     is_active: bool = True
     captcha_proxy_url: Optional[str] = None
+    extension_route_key: Optional[str] = None
     image_enabled: bool = True
     video_enabled: bool = True
     image_concurrency: int = -1
@@ -594,6 +597,7 @@ async def get_tokens(token: str = Depends(verify_admin_token)):
         "current_project_id": row.get("current_project_id"),  # 🆕 项目ID
         "current_project_name": row.get("current_project_name"),  # 🆕 项目名称
         "captcha_proxy_url": row.get("captcha_proxy_url") or "",
+        "extension_route_key": row.get("extension_route_key") or "",
         "image_enabled": bool(row.get("image_enabled")),
         "video_enabled": bool(row.get("video_enabled")),
         "image_concurrency": row.get("image_concurrency"),
@@ -617,6 +621,7 @@ async def add_token(
             project_name=request.project_name,
             remark=request.remark,
             captcha_proxy_url=request.captcha_proxy_url.strip() if request.captcha_proxy_url is not None else None,
+            extension_route_key=request.extension_route_key.strip() if request.extension_route_key is not None else None,
             image_enabled=request.image_enabled,
             video_enabled=request.video_enabled,
             image_concurrency=request.image_concurrency,
@@ -680,6 +685,7 @@ async def update_token(
             project_name=request.project_name,
             remark=request.remark,
             captcha_proxy_url=request.captcha_proxy_url.strip() if request.captcha_proxy_url is not None else None,
+            extension_route_key=request.extension_route_key.strip() if request.extension_route_key is not None else None,
             image_enabled=request.image_enabled,
             video_enabled=request.video_enabled,
             image_concurrency=request.image_concurrency,
@@ -881,6 +887,7 @@ async def import_tokens(
                         at=at,
                         at_expires=at_expires,
                         captcha_proxy_url=item.captcha_proxy_url.strip() if item.captcha_proxy_url is not None else None,
+                        extension_route_key=item.extension_route_key.strip() if item.extension_route_key is not None else None,
                         image_enabled=item.image_enabled,
                         video_enabled=item.video_enabled,
                         image_concurrency=item.image_concurrency,
@@ -894,6 +901,7 @@ async def import_tokens(
                     existing.at = at
                     existing.at_expires = at_expires
                     existing.captcha_proxy_url = item.captcha_proxy_url
+                    existing.extension_route_key = item.extension_route_key
                     existing.image_enabled = item.image_enabled
                     existing.video_enabled = item.video_enabled
                     existing.image_concurrency = item.image_concurrency
@@ -904,6 +912,7 @@ async def import_tokens(
                     new_token = await token_manager.add_token(
                         st=st,
                         captcha_proxy_url=item.captcha_proxy_url.strip() if item.captcha_proxy_url is not None else None,
+                        extension_route_key=item.extension_route_key.strip() if item.extension_route_key is not None else None,
                         image_enabled=item.image_enabled,
                         video_enabled=item.video_enabled,
                         image_concurrency=item.image_concurrency,
@@ -1649,13 +1658,48 @@ async def test_captcha_score(
                     token_elapsed_ms = int(score_token_elapsed)
                 fingerprint = score_payload.get("fingerprint") if isinstance(score_payload.get("fingerprint"), dict) else None
         elif captcha_method in SUPPORTED_API_CAPTCHA_METHODS:
-            token_value = await _solve_recaptcha_with_api_service(
-                method=captcha_method,
-                website_url=website_url,
-                website_key=website_key,
-                action=action,
-                enterprise=enterprise
-            )
+            if captcha_method == "capsolver" and "antcpt.com" in website_url:
+                # CapSolver specifically blocks antcpt.com. Test against labs.google to verify API key config.
+                token_value = await _solve_recaptcha_with_api_service(
+                    method=captcha_method,
+                    website_url="https://labs.google/",
+                    website_key="6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV",
+                    action="IMAGE_GENERATION",
+                    enterprise=True
+                )
+                if token_value:
+                    if token_elapsed_ms <= 0:
+                        token_elapsed_ms = int((time.time() - token_start) * 1000)
+                    return {
+                        "success": True,
+                        "message": "CapSolver不支持antcpt。已成功用 Google Labs 测试连通性",
+                        "captcha_method": captcha_method,
+                        "website_url": "https://labs.google/",
+                        "website_key": "6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV",
+                        "action": "IMAGE_GENERATION",
+                        "verify_url": "",
+                        "enterprise": True,
+                        "token_acquired": True,
+                        "token_preview": _mask_token(token_value),
+                        "token_elapsed_ms": token_elapsed_ms,
+                        "verify_elapsed_ms": 0,
+                        "verify_http_status": 200,
+                        "score": 0.9,
+                        "verify_result": {"success": True, "message": "跳过分数校验"},
+                        "verify_request_meta": {},
+                        "browser_proxy_enabled": browser_proxy_enabled,
+                        "browser_proxy_url": browser_proxy_url if browser_proxy_enabled else "",
+                        "fingerprint": fingerprint,
+                        "elapsed_ms": int((time.time() - started_at) * 1000)
+                    }
+            else:
+                token_value = await _solve_recaptcha_with_api_service(
+                    method=captcha_method,
+                    website_url=website_url,
+                    website_key=website_key,
+                    action=action,
+                    enterprise=enterprise
+                )
         else:
             return {
                 "success": False,

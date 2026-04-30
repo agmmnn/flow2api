@@ -311,14 +311,14 @@ MODEL_CONFIG = {
     "veo_3_1_t2v_portrait": {
         "type": "video",
         "video_type": "t2v",
-        "model_key": "veo_3_1_t2v_portrait",
+        "model_key": "veo_3_1_t2v_fast_portrait",
         "aspect_ratio": "VIDEO_ASPECT_RATIO_PORTRAIT",
         "supports_images": False
     },
     "veo_3_1_t2v_landscape": {
         "type": "video",
         "video_type": "t2v",
-        "model_key": "veo_3_1_t2v",
+        "model_key": "veo_3_1_t2v_fast",
         "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
         "supports_images": False
     },
@@ -690,6 +690,25 @@ MODEL_CONFIG = {
         "requires_video_id": True,
     },
 }
+
+
+def _known_video_model_keys() -> set[str]:
+    return {
+        cfg["model_key"]
+        for cfg in MODEL_CONFIG.values()
+        if cfg.get("type") == "video" and cfg.get("model_key")
+    }
+
+
+def _resolve_tier_two_model_key(model_key: str) -> str:
+    """Only upgrade to an ultra key when that exact upstream key is known valid."""
+    if "ultra" in model_key:
+        return model_key
+    if "_fl" in model_key:
+        candidate = model_key.replace("_fl", "_ultra_fl")
+    else:
+        candidate = model_key + "_ultra"
+    return candidate if candidate in _known_video_model_keys() else model_key
 
 
 class GenerationHandler:
@@ -1425,38 +1444,33 @@ class GenerationHandler:
             # TIER_TWO 账号需要使用 ultra 版本的模型
             if user_tier == "PAYGATE_TIER_TWO":
                 # 如果模型 key 不包含 ultra，自动添加
-                if "ultra" not in model_key and not is_extend:
-                    # veo_3_1_i2v_s_fast_fl -> veo_3_1_i2v_s_fast_ultra_fl
-                    # veo_3_1_i2v_s_fast_portrait_fl -> veo_3_1_i2v_s_fast_portrait_ultra_fl
-                    # veo_3_1_t2v_fast -> veo_3_1_t2v_fast_ultra
-                    # veo_3_1_t2v_fast_portrait -> veo_3_1_t2v_fast_portrait_ultra
-                    # veo_3_1_r2v_fast_landscape -> veo_3_1_r2v_fast_landscape_ultra
-                    if "_fl" in model_key:
-                        model_key = model_key.replace("_fl", "_ultra_fl")
-                    else:
-                        # 直接在末尾添加 _ultra
-                        model_key = model_key + "_ultra"
-                    
+                if "ultra" not in model_key:
+                    original_model_key = model_key
+                    model_key = _resolve_tier_two_model_key(model_key)
                     if stream:
-                        yield self._create_stream_chunk(f"TIER_TWO 账号自动切换到 ultra 模型: {model_key}\n")
-                    debug_logger.log_info(f"[VIDEO] TIER_TWO 账号，模型自动调整: {model_config['model_key']} -> {model_key}")
+                        if model_key != original_model_key:
+                            yield self._create_stream_chunk(f"TIER_TWO 账号自动切换到 ultra 模型: {model_key}\n")
+                        else:
+                            yield self._create_stream_chunk(f"TIER_TWO 账号保持当前模型: {model_key}\n")
+                    if model_key != original_model_key:
+                        debug_logger.log_info(f"[VIDEO] TIER_TWO 账号，模型自动调整: {original_model_key} -> {model_key}")
+                    else:
+                        debug_logger.log_info(f"[VIDEO] TIER_TWO 账号，未找到有效 ultra 变体，保持模型: {model_key}")
 
-            # TIER_ONE 账号需要使用非 ultra 版本（但 extend 跳过，因为只有 ultra 版本有效）
+
+            # TIER_ONE 账号需要使用非 ultra 版本
             elif user_tier == "PAYGATE_TIER_ONE":
                 # 如果模型 key 包含 ultra，需要移除（避免用户误用）
-                if "ultra" in model_key and not is_extend:
+                if "ultra" in model_key:
                     # veo_3_1_i2v_s_fast_ultra_fl -> veo_3_1_i2v_s_fast_fl
                     # veo_3_1_t2v_fast_ultra -> veo_3_1_t2v_fast
                     # veo_3_1_r2v_fast_landscape_ultra -> veo_3_1_r2v_fast_landscape
+                    # veo_3_1_extend_fast_portrait_ultra -> veo_3_1_extend_fast_portrait
                     model_key = model_key.replace("_ultra_fl", "_fl").replace("_ultra", "")
                     
                     if stream:
                         yield self._create_stream_chunk(f"TIER_ONE 账号自动切换到标准模型: {model_key}\n")
                     debug_logger.log_info(f"[VIDEO] TIER_ONE 账号，模型自动调整: {model_config['model_key']} -> {model_key}")
-
-            # Extend 模型强制使用 PAYGATE_TIER_TWO（只有 ultra 版本有效）
-            if is_extend:
-                normalized_tier = "PAYGATE_TIER_TWO"
 
             # 更新 model_config 中的 model_key
             model_config = dict(model_config)  # 创建副本避免修改原配置
@@ -1930,6 +1944,16 @@ class GenerationHandler:
                     await self._fail_video_task(checked_operations, error_msg)
                     self._mark_generation_failed(generation_result, error_msg)
                     yield self._create_error_response(error_msg, status_code=502)
+                    return
+                    
+                elif status == "MEDIA_GENERATION_STATUS_ACTIVE" and attempt > 80:
+                    # 如果持续4分钟（80次 * 3秒 = 240秒）依然是 ACTIVE 状态，则判定为卡死
+                    error_msg = "视频生成超时 (上游卡顿超过4分钟，已自动取消)"
+                    await self._fail_video_task(checked_operations, error_msg)
+                    self._mark_generation_failed(generation_result, error_msg)
+                    if stream:
+                        yield self._create_stream_chunk(f"❌ {error_msg}\n")
+                    yield self._create_error_response(error_msg, status_code=504)
                     return
 
             except Exception as e:
