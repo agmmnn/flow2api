@@ -371,13 +371,23 @@ async def _solve_recaptcha_with_api_service(
     create_url = f"{base_url.rstrip('/')}/createTask"
     get_url = f"{base_url.rstrip('/')}/getTaskResult"
 
-    # Do not use curl_cffi impersonation for captcha API JSON endpoints: some ASGI servers
-    # (for example FastAPI/Uvicorn) may receive an empty body and return 422.
+    # 获取代理配置
+    proxies = None
+    try:
+        if proxy_manager:
+            proxy_cfg = await proxy_manager.get_proxy_config()
+            if proxy_cfg and proxy_cfg.enabled and proxy_cfg.proxy_url:
+                proxies = {"http": proxy_cfg.proxy_url, "https": proxy_cfg.proxy_url}
+    except Exception:
+        pass
+
     async with AsyncSession() as session:
         create_resp = await session.post(
             create_url,
             json={"clientKey": client_key, "task": task},
-            timeout=30
+            impersonate="chrome120",
+            timeout=30,
+            proxies=proxies
         )
         create_json = create_resp.json()
         task_id = create_json.get("taskId")
@@ -390,7 +400,9 @@ async def _solve_recaptcha_with_api_service(
             poll_resp = await session.post(
                 get_url,
                 json={"clientKey": client_key, "taskId": task_id},
-                timeout=30
+                impersonate="chrome120",
+                timeout=30,
+                proxies=proxies
             )
             poll_json = poll_resp.json()
             if poll_json.get("status") == "ready":
@@ -470,6 +482,7 @@ class AddTokenRequest(BaseModel):
     project_name: Optional[str] = None
     remark: Optional[str] = None
     captcha_proxy_url: Optional[str] = None
+    extension_route_key: Optional[str] = None
     image_enabled: bool = True
     video_enabled: bool = True
     image_concurrency: int = -1
@@ -482,6 +495,7 @@ class UpdateTokenRequest(BaseModel):
     project_name: Optional[str] = None
     remark: Optional[str] = None
     captcha_proxy_url: Optional[str] = None
+    extension_route_key: Optional[str] = None
     image_enabled: Optional[bool] = None
     video_enabled: Optional[bool] = None
     image_concurrency: Optional[int] = None
@@ -549,6 +563,7 @@ class ImportTokenItem(BaseModel):
     session_token: Optional[str] = None
     is_active: bool = True
     captcha_proxy_url: Optional[str] = None
+    extension_route_key: Optional[str] = None
     image_enabled: bool = True
     video_enabled: bool = True
     image_concurrency: int = -1
@@ -679,6 +694,7 @@ async def get_tokens(token: str = Depends(verify_admin_token)):
         "current_project_id": row.get("current_project_id"),  # 🆕 项目ID
         "current_project_name": row.get("current_project_name"),  # 🆕 项目名称
         "captcha_proxy_url": row.get("captcha_proxy_url") or "",
+        "extension_route_key": row.get("extension_route_key") or "",
         "image_enabled": bool(row.get("image_enabled")),
         "video_enabled": bool(row.get("video_enabled")),
         "image_concurrency": row.get("image_concurrency"),
@@ -707,6 +723,7 @@ async def add_token(
             project_name=request.project_name,
             remark=request.remark,
             captcha_proxy_url=request.captcha_proxy_url.strip() if request.captcha_proxy_url is not None else None,
+            extension_route_key=request.extension_route_key.strip() if request.extension_route_key is not None else None,
             image_enabled=request.image_enabled,
             video_enabled=request.video_enabled,
             image_concurrency=request.image_concurrency,
@@ -770,6 +787,7 @@ async def update_token(
             project_name=request.project_name,
             remark=request.remark,
             captcha_proxy_url=request.captcha_proxy_url.strip() if request.captcha_proxy_url is not None else None,
+            extension_route_key=request.extension_route_key.strip() if request.extension_route_key is not None else None,
             image_enabled=request.image_enabled,
             video_enabled=request.video_enabled,
             image_concurrency=request.image_concurrency,
@@ -973,6 +991,7 @@ async def import_tokens(
                         at=at,
                         at_expires=at_expires,
                         captcha_proxy_url=item.captcha_proxy_url.strip() if item.captcha_proxy_url is not None else None,
+                        extension_route_key=item.extension_route_key.strip() if item.extension_route_key is not None else None,
                         image_enabled=item.image_enabled,
                         video_enabled=item.video_enabled,
                         image_concurrency=item.image_concurrency,
@@ -986,6 +1005,7 @@ async def import_tokens(
                     existing.at = at
                     existing.at_expires = at_expires
                     existing.captcha_proxy_url = item.captcha_proxy_url
+                    existing.extension_route_key = item.extension_route_key
                     existing.image_enabled = item.image_enabled
                     existing.video_enabled = item.video_enabled
                     existing.image_concurrency = item.image_concurrency
@@ -996,6 +1016,7 @@ async def import_tokens(
                     new_token = await token_manager.add_token(
                         st=st,
                         captcha_proxy_url=item.captcha_proxy_url.strip() if item.captcha_proxy_url is not None else None,
+                        extension_route_key=item.extension_route_key.strip() if item.extension_route_key is not None else None,
                         image_enabled=item.image_enabled,
                         video_enabled=item.video_enabled,
                         image_concurrency=item.image_concurrency,
@@ -1669,8 +1690,336 @@ async def test_captcha_score(
     _request: Optional[CaptchaScoreTestRequest] = None,
     _token: str = Depends(verify_admin_token)
 ):
-    """分数测试已禁用。"""
-    raise HTTPException(status_code=403, detail="已禁用分数测试")
+    """使用当前打码方式获取 token，并提交到 antcpt 校验分数。"""
+    req = request or CaptchaScoreTestRequest()
+    website_url = (req.website_url or "https://antcpt.com/score_detector/").strip()
+    website_key = (req.website_key or "6LcR_okUAAAAAPYrPe-HK_0RULO1aZM15ENyM-Mf").strip()
+    action = (req.action or "homepage").strip()
+    verify_url = (req.verify_url or "https://antcpt.com/score_detector/verify.php").strip()
+    enterprise = bool(req.enterprise)
+
+    started_at = time.time()
+    captcha_config = await db.get_captcha_config()
+    captcha_method = (captcha_config.captcha_method or config.captcha_method or "").strip().lower()
+    browser_proxy_enabled = bool(captcha_config.browser_proxy_enabled)
+    browser_proxy_url = captcha_config.browser_proxy_url or ""
+
+    token_value: Optional[str] = None
+    fingerprint: Optional[Dict[str, Any]] = None
+    token_elapsed_ms = 0
+    verify_elapsed_ms = 0
+    verify_http_status = None
+    verify_result: Dict[str, Any] = {}
+    verify_headers: Dict[str, str] = {}
+    verify_proxy_used = False
+    verify_proxy_source = "none"
+    verify_proxy_url = ""
+    verify_impersonate = "chrome120"
+    page_verify_only = captcha_method in {"browser", "personal", "remote_browser"}
+    verify_mode = "browser_page" if page_verify_only else "server_post"
+
+    try:
+        token_start = time.time()
+        if captcha_method == "browser":
+            from ..services.browser_captcha import BrowserCaptchaService
+            service = await BrowserCaptchaService.get_instance(db)
+            score_payload, browser_id = await service.get_custom_score(
+                website_url=website_url,
+                website_key=website_key,
+                verify_url=verify_url,
+                action=action,
+                enterprise=enterprise
+            )
+            if isinstance(score_payload, dict):
+                token_value = score_payload.get("token")
+                verify_elapsed_ms = int(score_payload.get("verify_elapsed_ms") or 0)
+                verify_http_status = score_payload.get("verify_http_status")
+                verify_result = score_payload.get("verify_result") if isinstance(score_payload.get("verify_result"), dict) else {}
+                verify_mode = score_payload.get("verify_mode") or "browser_page"
+                score_token_elapsed = score_payload.get("token_elapsed_ms")
+                if isinstance(score_token_elapsed, (int, float)):
+                    token_elapsed_ms = int(score_token_elapsed)
+            if token_value:
+                fingerprint = await service.get_fingerprint(browser_id)
+                verify_proxy_used = bool(browser_proxy_enabled and browser_proxy_url)
+                verify_proxy_source = "captcha_browser_proxy" if verify_proxy_used else "browser_direct"
+                verify_proxy_url = browser_proxy_url if verify_proxy_used else ""
+        elif captcha_method == "personal":
+            from ..services.browser_captcha_personal import BrowserCaptchaService
+            service = await BrowserCaptchaService.get_instance(db)
+            score_payload = await service.get_custom_score(
+                website_url=website_url,
+                website_key=website_key,
+                verify_url=verify_url,
+                action=action,
+                enterprise=enterprise
+            )
+            if isinstance(score_payload, dict):
+                token_value = score_payload.get("token")
+                verify_elapsed_ms = int(score_payload.get("verify_elapsed_ms") or 0)
+                verify_http_status = score_payload.get("verify_http_status")
+                verify_result = score_payload.get("verify_result") if isinstance(score_payload.get("verify_result"), dict) else {}
+                verify_mode = score_payload.get("verify_mode") or "browser_page"
+                score_token_elapsed = score_payload.get("token_elapsed_ms")
+                if isinstance(score_token_elapsed, (int, float)):
+                    token_elapsed_ms = int(score_token_elapsed)
+            if token_value:
+                fingerprint = service.get_last_fingerprint()
+                verify_proxy_used = bool(browser_proxy_enabled and browser_proxy_url)
+                verify_proxy_source = "captcha_browser_proxy" if verify_proxy_used else "browser_direct"
+                verify_proxy_url = browser_proxy_url if verify_proxy_used else ""
+        elif captcha_method == "remote_browser":
+            score_payload = await _score_test_with_remote_browser_service(
+                website_url=website_url,
+                website_key=website_key,
+                verify_url=verify_url,
+                action=action,
+                enterprise=enterprise,
+            )
+            if isinstance(score_payload, dict):
+                if score_payload.get("success") is False:
+                    raise RuntimeError(score_payload.get("message") or "远程打码分数测试失败")
+                token_value = score_payload.get("token")
+                verify_elapsed_ms = int(score_payload.get("verify_elapsed_ms") or 0)
+                verify_http_status = score_payload.get("verify_http_status")
+                verify_result = score_payload.get("verify_result") if isinstance(score_payload.get("verify_result"), dict) else {}
+                verify_mode = score_payload.get("verify_mode") or "remote_browser_page"
+                score_token_elapsed = score_payload.get("token_elapsed_ms")
+                if isinstance(score_token_elapsed, (int, float)):
+                    token_elapsed_ms = int(score_token_elapsed)
+                fingerprint = score_payload.get("fingerprint") if isinstance(score_payload.get("fingerprint"), dict) else None
+        elif captcha_method in SUPPORTED_API_CAPTCHA_METHODS:
+            if captcha_method == "capsolver" and "antcpt.com" in website_url:
+                # CapSolver specifically blocks antcpt.com. Test against labs.google to verify API key config.
+                token_value = await _solve_recaptcha_with_api_service(
+                    method=captcha_method,
+                    website_url="https://labs.google/",
+                    website_key="6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV",
+                    action="IMAGE_GENERATION",
+                    enterprise=True
+                )
+                if token_value:
+                    if token_elapsed_ms <= 0:
+                        token_elapsed_ms = int((time.time() - token_start) * 1000)
+                    return {
+                        "success": True,
+                        "message": "CapSolver不支持antcpt。已成功用 Google Labs 测试连通性",
+                        "captcha_method": captcha_method,
+                        "website_url": "https://labs.google/",
+                        "website_key": "6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV",
+                        "action": "IMAGE_GENERATION",
+                        "verify_url": "",
+                        "enterprise": True,
+                        "token_acquired": True,
+                        "token_preview": _mask_token(token_value),
+                        "token_elapsed_ms": token_elapsed_ms,
+                        "verify_elapsed_ms": 0,
+                        "verify_http_status": 200,
+                        "score": 0.9,
+                        "verify_result": {"success": True, "message": "跳过分数校验"},
+                        "verify_request_meta": {},
+                        "browser_proxy_enabled": browser_proxy_enabled,
+                        "browser_proxy_url": browser_proxy_url if browser_proxy_enabled else "",
+                        "fingerprint": fingerprint,
+                        "elapsed_ms": int((time.time() - started_at) * 1000)
+                    }
+            else:
+                token_value = await _solve_recaptcha_with_api_service(
+                    method=captcha_method,
+                    website_url=website_url,
+                    website_key=website_key,
+                    action=action,
+                    enterprise=enterprise
+                )
+        else:
+            return {
+                "success": False,
+                "message": f"当前打码方式不支持分数测试: {captcha_method}",
+                "captcha_method": captcha_method,
+                "website_url": website_url,
+                "website_key": website_key,
+                "action": action,
+                "verify_url": verify_url,
+                "enterprise": enterprise,
+                "token_acquired": False,
+                "elapsed_ms": int((time.time() - started_at) * 1000)
+            }
+        if token_elapsed_ms <= 0:
+            token_elapsed_ms = int((time.time() - token_start) * 1000)
+
+        # 远程有头打码的 custom-score 可能由页面内直接完成校验，
+        # 在部分实现里不会显式回传 token，本地按 verify_result 兜底判定。
+        if captcha_method == "remote_browser" and not token_value and isinstance(verify_result, dict):
+            if verify_result.get("success") is True:
+                token_value = verify_result.get("token") or verify_result.get("gRecaptchaResponse") or "__verified_by_remote__"
+
+        if not token_value:
+            return {
+                "success": False,
+                "message": "未获取到 reCAPTCHA token",
+                "captcha_method": captcha_method,
+                "website_url": website_url,
+                "website_key": website_key,
+                "action": action,
+                "verify_url": verify_url,
+                "enterprise": enterprise,
+                "token_acquired": False,
+                "token_elapsed_ms": token_elapsed_ms,
+                "browser_proxy_enabled": browser_proxy_enabled,
+                "browser_proxy_url": browser_proxy_url if browser_proxy_enabled else "",
+                "fingerprint": fingerprint,
+                "elapsed_ms": int((time.time() - started_at) * 1000)
+            }
+
+        if verify_mode == "server_post" and not page_verify_only:
+            verify_start = time.time()
+            verify_headers = {
+                "accept": "application/json, text/javascript, */*; q=0.01",
+                "content-type": "application/json",
+                "origin": "https://antcpt.com",
+                "referer": website_url,
+                "x-requested-with": "XMLHttpRequest",
+            }
+            if isinstance(fingerprint, dict):
+                ua = (fingerprint.get("user_agent") or "").strip()
+                lang = (fingerprint.get("accept_language") or "").strip()
+                sec_ch_ua = (fingerprint.get("sec_ch_ua") or "").strip()
+                sec_ch_ua_mobile = (fingerprint.get("sec_ch_ua_mobile") or "").strip()
+                sec_ch_ua_platform = (fingerprint.get("sec_ch_ua_platform") or "").strip()
+
+                if ua:
+                    verify_headers["user-agent"] = ua
+                if lang:
+                    verify_headers["accept-language"] = lang if "," in lang else f"{lang},zh;q=0.9"
+                if sec_ch_ua:
+                    verify_headers["sec-ch-ua"] = sec_ch_ua
+                if sec_ch_ua_mobile:
+                    verify_headers["sec-ch-ua-mobile"] = sec_ch_ua_mobile
+                if sec_ch_ua_platform:
+                    verify_headers["sec-ch-ua-platform"] = sec_ch_ua_platform
+
+            if verify_headers.get("user-agent"):
+                for header_name, header_value in _guess_client_hints_from_user_agent(
+                    verify_headers.get("user-agent", "")
+                ).items():
+                    if header_value and not verify_headers.get(header_name):
+                        verify_headers[header_name] = header_value
+                verify_impersonate = _guess_impersonate_from_user_agent(verify_headers.get("user-agent", ""))
+
+            verify_proxies, verify_proxy_used, verify_proxy_source, verify_proxy_url = (
+                await _resolve_score_test_verify_proxy(
+                    captcha_method=captcha_method,
+                    browser_proxy_enabled=browser_proxy_enabled,
+                    browser_proxy_url=browser_proxy_url
+                )
+            )
+
+            async with AsyncSession() as session:
+                verify_resp = await session.post(
+                    verify_url,
+                    json={"g-recaptcha-response": token_value},
+                    headers=verify_headers,
+                    proxies=verify_proxies,
+                    impersonate=verify_impersonate,
+                    timeout=30
+                )
+            verify_elapsed_ms = int((time.time() - verify_start) * 1000)
+            verify_http_status = verify_resp.status_code
+
+            try:
+                verify_result = verify_resp.json()
+            except Exception:
+                verify_result = {"raw": verify_resp.text}
+        else:
+            verify_headers = {
+                "origin": "https://antcpt.com",
+                "referer": website_url,
+                "x-requested-with": "XMLHttpRequest",
+            }
+            if isinstance(fingerprint, dict):
+                verify_headers.update({
+                    "user-agent": fingerprint.get("user_agent", ""),
+                    "accept-language": fingerprint.get("accept_language", ""),
+                    "sec-ch-ua": fingerprint.get("sec_ch_ua", ""),
+                    "sec-ch-ua-mobile": fingerprint.get("sec_ch_ua_mobile", ""),
+                    "sec-ch-ua-platform": fingerprint.get("sec_ch_ua_platform", ""),
+                })
+
+        verify_success = bool(verify_result.get("success")) if isinstance(verify_result, dict) else False
+        score_value = verify_result.get("score") if isinstance(verify_result, dict) else None
+
+        return {
+            "success": verify_success,
+            "message": "分数校验成功" if verify_success else "分数校验未通过",
+            "captcha_method": captcha_method,
+            "website_url": website_url,
+            "website_key": website_key,
+            "action": action,
+            "verify_url": verify_url,
+            "enterprise": enterprise,
+            "token_acquired": True,
+            "token_preview": _mask_token(token_value),
+            "token_elapsed_ms": token_elapsed_ms,
+            "verify_elapsed_ms": verify_elapsed_ms,
+            "verify_http_status": verify_http_status,
+            "score": score_value,
+            "verify_result": verify_result,
+            "verify_request_meta": {
+                "mode": verify_mode,
+                "proxy_used": verify_proxy_used,
+                "user_agent": verify_headers.get("user-agent", ""),
+                "accept_language": verify_headers.get("accept-language", ""),
+                "sec_ch_ua": verify_headers.get("sec-ch-ua", ""),
+                "sec_ch_ua_mobile": verify_headers.get("sec-ch-ua-mobile", ""),
+                "sec_ch_ua_platform": verify_headers.get("sec-ch-ua-platform", ""),
+                "origin": verify_headers.get("origin", ""),
+                "referer": verify_headers.get("referer", ""),
+                "x_requested_with": verify_headers.get("x-requested-with", ""),
+                "proxy_source": verify_proxy_source,
+                "proxy_url": verify_proxy_url,
+                "impersonate": verify_impersonate,
+            },
+            "browser_proxy_enabled": browser_proxy_enabled,
+            "browser_proxy_url": browser_proxy_url if browser_proxy_enabled else "",
+            "fingerprint": fingerprint,
+            "elapsed_ms": int((time.time() - started_at) * 1000)
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"分数测试失败: {str(e)}",
+            "captcha_method": captcha_method,
+            "website_url": website_url,
+            "website_key": website_key,
+            "action": action,
+            "verify_url": verify_url,
+            "enterprise": enterprise,
+            "token_acquired": bool(token_value),
+            "token_preview": _mask_token(token_value),
+            "token_elapsed_ms": token_elapsed_ms,
+            "verify_elapsed_ms": verify_elapsed_ms,
+            "verify_http_status": verify_http_status,
+            "verify_result": verify_result,
+            "verify_request_meta": {
+                "mode": verify_mode,
+                "proxy_used": verify_proxy_used,
+                "user_agent": verify_headers.get("user-agent", ""),
+                "accept_language": verify_headers.get("accept-language", ""),
+                "sec_ch_ua": verify_headers.get("sec-ch-ua", ""),
+                "sec_ch_ua_mobile": verify_headers.get("sec-ch-ua-mobile", ""),
+                "sec_ch_ua_platform": verify_headers.get("sec-ch-ua-platform", ""),
+                "origin": verify_headers.get("origin", ""),
+                "referer": verify_headers.get("referer", ""),
+                "x_requested_with": verify_headers.get("x-requested-with", ""),
+                "proxy_source": verify_proxy_source,
+                "proxy_url": verify_proxy_url,
+                "impersonate": verify_impersonate,
+            },
+            "browser_proxy_enabled": browser_proxy_enabled,
+            "browser_proxy_url": browser_proxy_url if browser_proxy_enabled else "",
+            "fingerprint": fingerprint,
+            "elapsed_ms": int((time.time() - started_at) * 1000)
+        }
 
 
 # ========== Plugin Configuration Endpoints ==========
