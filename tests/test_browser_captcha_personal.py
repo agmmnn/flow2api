@@ -13,6 +13,14 @@ class _FakeTab:
         return self._result
 
 
+class _ClosableFakeTab:
+    def __init__(self):
+        self.closed = False
+
+    async def close(self):
+        self.closed = True
+
+
 class BrowserCaptchaPersonalTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.service = BrowserCaptchaService()
@@ -57,6 +65,32 @@ class BrowserCaptchaPersonalTests(unittest.IsolatedAsyncioTestCase):
         resident_info = await self.service._create_resident_tab("slot-1", project_id="project-1")
 
         self.assertIsNone(resident_info)
+
+    async def test_close_clears_resident_tabs_when_warmup_task_attr_missing(self):
+        tab = _ClosableFakeTab()
+        self.service._resident_tabs["slot-1"] = ResidentTabInfo(tab=tab, slot_id="slot-1")
+        if hasattr(self.service, "_resident_warmup_task"):
+            delattr(self.service, "_resident_warmup_task")
+
+        await self.service.close()
+
+        self.assertEqual(self.service._resident_tabs, {})
+        self.assertTrue(tab.closed)
+
+    async def test_create_resident_tab_cleans_tab_when_initialization_fails(self):
+        tab = _ClosableFakeTab()
+        self.service.browser = types.SimpleNamespace(stopped=False)
+        self.service._create_isolated_context_tab = AsyncMock(return_value=(tab, "context-1"))
+        self.service._tab_evaluate = AsyncMock(return_value="complete")
+        self.service._apply_token_cookie_binding = AsyncMock(side_effect=RuntimeError("cookie failed"))
+        self.service._dispose_browser_context_quietly = AsyncMock()
+        self.service._close_tab_quietly = AsyncMock()
+
+        resident_info = await self.service._create_resident_tab("slot-1", project_id="project-1")
+
+        self.assertIsNone(resident_info)
+        self.service._dispose_browser_context_quietly.assert_awaited_once_with("context-1")
+        self.service._close_tab_quietly.assert_awaited_once_with(tab)
 
     async def test_restart_browser_for_project_reuses_recent_healthy_runtime(self):
         resident_info = ResidentTabInfo(tab=object(), slot_id="slot-1", project_id="project-1")
