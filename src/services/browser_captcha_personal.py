@@ -1422,6 +1422,7 @@ class BrowserCaptchaService:
         self._runtime_last_active_at = time.time()
         self._successful_solves_since_browser_start = 0
         self._fresh_profile_restart_pending = False
+        self._fresh_profile_restart_task: Optional[asyncio.Task] = None
         self._browser_launch_failure_streak = 0
         self._browser_launch_cooldown_until = 0.0
         self._browser_launch_last_error = ""
@@ -1997,24 +1998,52 @@ class BrowserCaptchaService:
             self._fresh_profile_restart_pending_reason = ""
             return False
 
-        await self._wait_for_browser_work_to_drain(source=source)
+        existing_task = getattr(self, "_fresh_profile_restart_task", None)
+        if existing_task is not None and not existing_task.done():
+            return False
 
-        async with self._runtime_recover_lock:
-            if not self._fresh_profile_restart_pending:
+        async def _runner() -> bool:
+            try:
+                await self._wait_for_browser_work_to_drain(source=source)
+
+                async with self._runtime_recover_lock:
+                    if not self._fresh_profile_restart_pending:
+                        return False
+                    if await self._has_active_browser_work():
+                        debug_logger.log_info(
+                            "[BrowserCaptcha] fresh profile 后台轮换发现新任务活跃，延后到下一轮 "
+                            f"(project_id={project_id}, source={source})"
+                        )
+                        return False
+
+                    debug_logger.log_warning(
+                        "[BrowserCaptcha] 执行计划中的 fresh profile 轮换重启 "
+                        f"(project_id={project_id}, source={source}, reason={self._fresh_profile_restart_pending_reason})"
+                    )
+                    restarted = await self._restart_browser_for_project_unlocked(
+                        project_id,
+                        token_id=token_id,
+                        fresh_profile=True,
+                    )
+                    if restarted:
+                        self._mark_runtime_restart()
+                    return restarted
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                debug_logger.log_warning(
+                    f"[BrowserCaptcha] fresh profile 后台轮换失败 (project_id={project_id}, source={source}): {e}"
+                )
                 return False
+            finally:
+                if self._fresh_profile_restart_task is asyncio.current_task():
+                    self._fresh_profile_restart_task = None
 
-            debug_logger.log_warning(
-                "[BrowserCaptcha] 执行计划中的 fresh profile 轮换重启 "
-                f"(project_id={project_id}, source={source}, reason={self._fresh_profile_restart_pending_reason})"
-            )
-            restarted = await self._restart_browser_for_project_unlocked(
-                project_id,
-                token_id=token_id,
-                fresh_profile=True,
-            )
-            if restarted:
-                self._mark_runtime_restart()
-            return restarted
+        self._fresh_profile_restart_task = asyncio.create_task(_runner())
+        debug_logger.log_info(
+            f"[BrowserCaptcha] fresh profile 轮换已转入后台等待空闲执行 (project_id={project_id}, source={source})"
+        )
+        return False
 
     def _requires_virtual_display(self) -> bool:
         """仅在显式有头模式下要求 Docker/Linux 提供 DISPLAY/虚拟显示。"""
@@ -5818,7 +5847,8 @@ class BrowserCaptchaService:
                 token_id=token_id,
                 available_only=reserve_for_solve,
             )
-            if reserve_for_solve and not force_create and (resident_info is None or not slot_id):
+            at_capacity = len(self._resident_tabs) >= self._max_resident_tabs
+            if reserve_for_solve and not force_create and at_capacity and (resident_info is None or not slot_id):
                 preferred_wait_slot_id = self._resolve_token_affinity_slot_locked(
                     token_id,
                     available_only=False,
@@ -5852,7 +5882,7 @@ class BrowserCaptchaService:
             if not should_create:
                 return wrap(slot_id, resident_info)
 
-            if len(self._resident_tabs) >= self._max_resident_tabs:
+            if at_capacity:
                 if not token_key:
                     return wrap(slot_id, resident_info)
 
@@ -5918,24 +5948,7 @@ class BrowserCaptchaService:
                 if len(self._resident_tabs) >= self._max_resident_tabs:
                     return wrap(slot_id, resident_info)
 
-                if reserve_for_solve and not force_create and (resident_info is None or not slot_id):
-                    deferred_wait_slot_id = self._resolve_token_affinity_slot_locked(
-                        token_id,
-                        available_only=False,
-                    ) or self._resolve_affinity_slot_locked(
-                        project_id,
-                        available_only=False,
-                    )
-                    if deferred_wait_slot_id:
-                        debug_logger.log_info(
-                            "[BrowserCaptcha] 命中忙碌 affinity slot，优先等待现有热 tab "
-                            f"(project_id={project_id or '<empty>'}, token_id={token_id}, slot={deferred_wait_slot_id})"
-                        )
-                        created_slot_id = None
-                    else:
-                        created_slot_id = self._next_resident_slot_id()
-                else:
-                    created_slot_id = self._next_resident_slot_id()
+                created_slot_id = self._next_resident_slot_id()
 
             if created_slot_id is not None:
                 created_resident_info = await self._create_resident_tab(
@@ -6524,6 +6537,9 @@ class BrowserCaptchaService:
             resident_warmup_task = getattr(self, "_resident_warmup_task", None)
             if resident_warmup_task is not None:
                 candidate_tasks.append(resident_warmup_task)
+            fresh_restart_task = getattr(self, "_fresh_profile_restart_task", None)
+            if fresh_restart_task is not None:
+                candidate_tasks.append(fresh_restart_task)
             candidate_tasks.extend(self._resident_rebuild_tasks.values())
             candidate_tasks.extend(self._resident_recovery_tasks.values())
 
@@ -6535,6 +6551,7 @@ class BrowserCaptchaService:
             self._resident_rebuild_tasks.clear()
             self._resident_recovery_tasks.clear()
             self._resident_warmup_task = None
+            self._fresh_profile_restart_task = None
 
         if not tasks_to_cancel:
             return
@@ -8785,6 +8802,10 @@ class BrowserCaptchaService:
             f"browser_solve_count={browser_solve_count}"
             "）"
         )
+        await self._maybe_execute_pending_fresh_profile_restart(
+            project_id,
+            source="resident_solve_success",
+        )
         return token
 
     # ========== 主要 API ==========
@@ -8825,12 +8846,6 @@ class BrowserCaptchaService:
             f"[BrowserCaptcha] get_token 开始: project_id={project_id}, token_id={token_id}, action={action}, 当前标签页数={len(self._resident_tabs)}/{self._max_resident_tabs}"
         )
         self._mark_runtime_active()
-
-        await self._maybe_execute_pending_fresh_profile_restart(
-            project_id,
-            token_id=token_id,
-            source="get_token",
-        )
 
         # 确保浏览器已初始化
         await self.initialize()
@@ -9368,11 +9383,6 @@ class BrowserCaptchaService:
             reCAPTCHA token字符串，如果获取失败返回None
         """
         max_attempts = 2
-        await self._maybe_execute_pending_fresh_profile_restart(
-            project_id,
-            token_id=token_id,
-            source="legacy_get_token",
-        )
         async with self._legacy_lock:
             for attempt in range(max_attempts):
                 if not self._initialized or not self.browser:
@@ -9438,6 +9448,11 @@ class BrowserCaptchaService:
                         debug_logger.log_info(
                             "[BrowserCaptcha] [Legacy] ✅ Token获取成功"
                             f"（耗时 {duration_ms:.0f}ms, browser_solve_count={browser_solve_count}）"
+                        )
+                        await self._maybe_execute_pending_fresh_profile_restart(
+                            project_id,
+                            token_id=token_id,
+                            source="legacy_solve_success",
                         )
                         return token
 
@@ -10936,25 +10951,6 @@ class _PersonalBrowserPoolService:
                     preferred_affinity_worker_index = candidate
                     break
 
-            if preferred_affinity_worker_index is not None:
-                selected_worker_index = preferred_affinity_worker_index
-                self._worker_dispatch_reservations[selected_worker_index] = (
-                    int(self._worker_dispatch_reservations.get(selected_worker_index, 0) or 0) + 1
-                )
-                normalized_project_key = self._normalize_project_key(project_id)
-                if normalized_project_key:
-                    self._project_worker_affinity[normalized_project_key] = selected_worker_index
-                    self._trim_affinity_cache(self._project_worker_affinity)
-                self._round_robin_index = (selected_worker_index + 1) % max(len(self._workers), 1)
-                debug_logger.log_info(
-                    "[BrowserCaptchaPool] worker 已选中(affinity收口) "
-                    f"(project_id={project_id or '<empty>'}, token_id={token_id}, "
-                    f"selected={selected_worker_index + 1}, "
-                    f"reservations={self._worker_dispatch_reservations.get(selected_worker_index, 0)}, "
-                    f"elapsed={time.monotonic() - acquire_started_at:.3f}s)"
-                )
-                return selected_worker_index, self._workers[selected_worker_index]
-
             candidate_indexes = [
                 worker_index
                 for worker_index in self._resolve_worker_candidate_indexes(
@@ -10977,7 +10973,14 @@ class _PersonalBrowserPoolService:
                 for worker_index in candidate_indexes
                 if int(getattr(self._workers[worker_index], "_max_resident_tabs", 0) or 0) > 0
             ] or candidate_indexes
-            selected_worker_index = selectable_indexes[0]
+            selected_worker_index = min(
+                selectable_indexes,
+                key=lambda worker_index: self._worker_dispatch_score(
+                    worker_index,
+                    self._workers[worker_index],
+                    affinity_preferred=worker_index == preferred_affinity_worker_index,
+                ),
+            )
             self._worker_dispatch_reservations[selected_worker_index] = (
                 int(self._worker_dispatch_reservations.get(selected_worker_index, 0) or 0) + 1
             )
@@ -10991,6 +10994,7 @@ class _PersonalBrowserPoolService:
                 f"(project_id={project_id or '<empty>'}, token_id={token_id}, "
                 f"selected={selected_worker_index + 1}, candidates={[index + 1 for index in candidate_indexes]}, "
                 f"selectable={[index + 1 for index in selectable_indexes]}, "
+                f"affinity={(preferred_affinity_worker_index + 1) if preferred_affinity_worker_index is not None else None}, "
                 f"reservations={self._worker_dispatch_reservations.get(selected_worker_index, 0)}, "
                 f"elapsed={time.monotonic() - acquire_started_at:.3f}s)"
             )

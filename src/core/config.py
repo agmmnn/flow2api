@@ -406,6 +406,21 @@ class Config:
         self._config["captcha"]["browser_launch_background"] = bool(enabled)
 
     @property
+    def browser_count(self) -> int:
+        """浏览器打码实例数量，browser/personal 模式共用。"""
+        value = self._config.get("captcha", {}).get("browser_count", 1)
+        try:
+            return max(1, min(20, int(value)))
+        except Exception:
+            return 1
+
+    def set_browser_count(self, value: int):
+        """设置浏览器打码实例数量。"""
+        if "captcha" not in self._config:
+            self._config["captcha"] = {}
+        self._config["captcha"]["browser_count"] = max(1, min(20, int(value)))
+
+    @property
     def browser_recaptcha_settle_seconds(self) -> float:
         """有头打码在 reload/clr 就绪后的额外等待秒数。"""
         value = self._config.get("captcha", {}).get("browser_recaptcha_settle_seconds", 3.0)
@@ -466,6 +481,21 @@ class Config:
         if "captcha" not in self._config:
             self._config["captcha"] = {}
         self._config["captcha"]["personal_idle_tab_ttl_seconds"] = max(60, int(value))
+
+    @property
+    def browser_personal_fresh_restart_every_n_solves(self) -> int:
+        """内置浏览器成功打码多少次后使用全新 profile 重启，0 表示禁用。"""
+        value = self._config.get("captcha", {}).get("browser_personal_fresh_restart_every_n_solves", 10)
+        try:
+            return max(0, int(value))
+        except Exception:
+            return 10
+
+    def set_browser_personal_fresh_restart_every_n_solves(self, value: int):
+        """设置内置浏览器 fresh profile 轮换阈值。"""
+        if "captcha" not in self._config:
+            self._config["captcha"] = {}
+        self._config["captcha"]["browser_personal_fresh_restart_every_n_solves"] = max(0, int(value))
 
     @property
     def yescaptcha_api_key(self) -> str:

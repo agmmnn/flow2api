@@ -1596,6 +1596,10 @@ async def update_captcha_config(
     browser_count = request.get("browser_count", 1)
     personal_project_pool_size = request.get("personal_project_pool_size")
     personal_max_resident_tabs = request.get("personal_max_resident_tabs")
+    browser_personal_fresh_restart_every_n_solves = request.get(
+        "browser_personal_fresh_restart_every_n_solves",
+        10,
+    )
     personal_idle_tab_ttl_seconds = request.get("personal_idle_tab_ttl_seconds")
 
     # 验证浏览器代理URL格式
@@ -1614,6 +1618,17 @@ async def update_captcha_config(
         remote_browser_timeout = max(5, int(remote_browser_timeout or 60))
     except Exception:
         return {"success": False, "message": "远程打码超时时间必须是整数秒"}
+    try:
+        browser_count = max(1, min(20, int(browser_count or 1)))
+    except Exception:
+        return {"success": False, "message": "浏览器实例数量必须是整数"}
+    try:
+        browser_personal_fresh_restart_every_n_solves = max(
+            0,
+            int(browser_personal_fresh_restart_every_n_solves if browser_personal_fresh_restart_every_n_solves is not None else 10),
+        )
+    except Exception:
+        return {"success": False, "message": "重置码数必须是整数，0 表示禁用"}
 
     if captcha_method == "remote_browser":
         if not (remote_browser_base_url or "").strip():
@@ -1637,9 +1652,10 @@ async def update_captcha_config(
         remote_browser_timeout=remote_browser_timeout,
         browser_proxy_enabled=browser_proxy_enabled,
         browser_proxy_url=browser_proxy_url if browser_proxy_enabled else None,
-        browser_count=max(1, int(browser_count)) if browser_count else 1,
+        browser_count=browser_count,
         personal_project_pool_size=personal_project_pool_size,
         personal_max_resident_tabs=personal_max_resident_tabs,
+        browser_personal_fresh_restart_every_n_solves=browser_personal_fresh_restart_every_n_solves,
         personal_idle_tab_ttl_seconds=personal_idle_tab_ttl_seconds
     )
 
@@ -1690,6 +1706,7 @@ async def get_captcha_config(token: str = Depends(verify_admin_token)):
         "browser_count": captcha_config.browser_count,
         "personal_project_pool_size": captcha_config.personal_project_pool_size,
         "personal_max_resident_tabs": captcha_config.personal_max_resident_tabs,
+        "browser_personal_fresh_restart_every_n_solves": captcha_config.browser_personal_fresh_restart_every_n_solves,
         "personal_idle_tab_ttl_seconds": captcha_config.personal_idle_tab_ttl_seconds
     }
 

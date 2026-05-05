@@ -2684,7 +2684,15 @@ class FlowClient:
                 debug_logger.log_info(f"[reCAPTCHA] 导入 BrowserCaptchaService 成功")
                 service = await BrowserCaptchaService.get_instance(self.db)
                 debug_logger.log_info(f"[reCAPTCHA] 获取服务实例成功，准备调用 get_token")
-                token = await service.get_token(project_id, action)
+                get_token_with_metadata = getattr(service, "get_token_with_metadata", None)
+                if callable(get_token_with_metadata):
+                    token, _slot_id, _cookie_source_token_id = await get_token_with_metadata(
+                        project_id,
+                        action,
+                        token_id=token_id,
+                    )
+                else:
+                    token = await service.get_token(project_id, action, token_id=token_id)
                 debug_logger.log_info(f"[reCAPTCHA] get_token 返回: {token[:50] if token else None}...")
                 fingerprint = service.get_last_fingerprint() if token else None
                 self._set_request_fingerprint(fingerprint if token else None)
