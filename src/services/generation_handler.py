@@ -1430,8 +1430,12 @@ class GenerationHandler:
             error_msg = f"生成失败: {str(e)}"
             debug_logger.log_error(f"[GENERATION] 生成失败: {error_msg}")
             if token:
-                # 记录错误（所有错误统一处理，不再特殊处理429）
-                await self.token_manager.record_error(token.id)
+                if self._should_count_token_error(e):
+                    await self.token_manager.record_error(token.id)
+                else:
+                    debug_logger.log_info(
+                        f"[GENERATION] 跳过 token 错误计数: token_id={token.id}, reason={str(e)[:200]}"
+                    )
 
             # 先将最终失败状态落库，再返回错误响应，避免日志停在 102。
             duration = time.time() - start_time
@@ -1470,6 +1474,39 @@ class GenerationHandler:
             return "没有可用的Token进行图片生成。所有Token都处于禁用、冷却、锁定或已过期状态。"
         else:
             return "没有可用的Token进行视频生成。所有Token都处于禁用、冷却、配额耗尽或已过期状态。"
+
+    def _should_count_token_error(self, error: Exception) -> bool:
+        """判断失败是否应计入 token 连续错误。
+
+        reCAPTCHA 获取失败、验证码供应商错误、打码资源不足等问题通常不是账号本身异常；
+        若将其纳入连续错误，会在回归测试或代理波动时把 token 自动打成 inactive。
+        """
+        error_text = str(error or "").strip().lower()
+        if not error_text:
+            return True
+
+        non_token_fault_markers = (
+            "failed to obtain recaptcha token",
+            "recaptcha evaluation failed",
+            "recaptcha 验证失败",
+            "recaptcha 错误",
+            "public_error_unusual_activity",
+            "too much traffic",
+            "error_no_slot_available",
+            "打码服务资源不足",
+            "打码服务资源阻塞",
+            "yescaptcha",
+            "capsolver",
+            "capmonster",
+            "ezcaptcha",
+        )
+        if any(marker in error_text for marker in non_token_fault_markers):
+            return False
+
+        if "没有可用的token进行" in error_text:
+            return False
+
+        return True
 
     async def _handle_image_generation(
         self,

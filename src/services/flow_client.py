@@ -6,9 +6,11 @@ import time
 import uuid
 import random
 import base64
+import gzip
 import ssl
+import re
 from typing import Dict, Any, Optional, List, Union, Callable, Awaitable
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, urljoin, urlparse
 import urllib.error
 import urllib.request
 from curl_cffi.requests import AsyncSession
@@ -25,6 +27,10 @@ class FlowClient:
     """VideoFX API客户端"""
 
     FLOW_PUBLIC_API_KEY = "AIzaSyBtrm0o5ab1c-Ec8ZuLcGt3oJAA5VWt3pY"
+    FLOW_BROWSER_CHANNEL_HEADER = "stable"
+    FLOW_BROWSER_COPYRIGHT_HEADER = "Copyright 2026 Google LLC. All Rights Reserved."
+    FLOW_BROWSER_VALIDATION_HEADER = "MRCPrt/rS3JY47x2Yiz9h3ag4U8="
+    FLOW_BROWSER_YEAR_HEADER = "2026"
     FLOW_FRONTEND_EXPERIMENT_IDS = (
         "106184493,106256669,105798603,106281924,106259075,106262194,"
         "105993823,106104244,105484652,1714252,105928947,106238955,"
@@ -82,7 +88,7 @@ class FlowClient:
         rng = random.Random(seed)
         
         # fallback 仅在没有 runtime fingerprint 时兜底，直接与当前上游 Windows Chrome 风格对齐
-        chrome_versions = ["148.0.0.0", "147.0.0.0", "146.0.0.0"]
+        chrome_versions = ["149.0.0.0"]
         ch_version = rng.choice(chrome_versions)
         user_agent = (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -137,7 +143,22 @@ class FlowClient:
         import re
         match = re.search(r"(?:Chrome|Chromium)/(\d+)", ua, re.IGNORECASE)
         major = match.group(1) if match else "124"
-        return f'"Not/A)Brand";v="99", "Chromium";v="{major}"'
+        return f'"Google Chrome";v="{major}", "Chromium";v="{major}", "Not)A;Brand";v="24"'
+
+    def _normalize_sec_ch_ua_header(
+        self,
+        sec_ch_ua: Optional[str],
+        *,
+        user_agent: Optional[str] = None,
+    ) -> str:
+        raw = str(sec_ch_ua or "").strip()
+        inferred = self._infer_sec_ch_ua_from_user_agent(user_agent)
+        if not raw:
+            return inferred
+        ua_text = str(user_agent or "").lower()
+        if "chrome/" in ua_text and "google chrome" not in raw.lower():
+            return inferred
+        return raw or inferred
 
     def _build_fingerprint_from_user_agent(
         self,
@@ -184,7 +205,23 @@ class FlowClient:
         if not raw:
             return fallback
         if "," in raw:
-            return raw
+            normalized_parts: list[str] = []
+            for index, item in enumerate(raw.split(",")):
+                candidate = str(item or "").strip()
+                if not candidate:
+                    continue
+                language = candidate.split(";", 1)[0].strip()
+                if not language:
+                    continue
+                if index == 0:
+                    normalized_parts.append(language)
+                    continue
+                q_match = re.search(r";\s*q=([0-9.]+)", candidate, re.IGNORECASE)
+                q_value = q_match.group(1) if q_match else f"{max(0.1, 1 - (index * 0.1)):.1f}"
+                normalized_parts.append(f"{language};q={q_value}")
+            if normalized_parts:
+                return ",".join(normalized_parts)
+            return fallback
         if "-" in raw:
             primary = raw.split("-", 1)[0].strip()
             if len(primary) == 2 and primary.isalpha():
@@ -199,14 +236,106 @@ class FlowClient:
                 return user_agent
         return self._generate_user_agent(account_id)
 
+    @staticmethod
+    def _should_attach_runtime_session_cookies(url: str) -> bool:
+        host = str(urlparse(str(url or "")).hostname or "").lower()
+        if not host:
+            return False
+        return any(
+            host == candidate or host.endswith(f".{candidate}")
+            for candidate in (
+                "google.com",
+                "labs.google",
+                "recaptcha.net",
+            )
+        )
+
+    @staticmethod
+    def _merge_cookie_header(
+        existing_cookie_header: Optional[str],
+        extra_cookies: Optional[Dict[str, Any]],
+    ) -> Optional[str]:
+        cookie_items: Dict[str, str] = {}
+        raw_existing = str(existing_cookie_header or "").strip()
+        if raw_existing:
+            for part in raw_existing.split(";"):
+                item = str(part or "").strip()
+                if not item or "=" not in item:
+                    continue
+                key, value = item.split("=", 1)
+                key = str(key or "").strip()
+                value = str(value or "").strip()
+                if key:
+                    cookie_items[key] = value
+
+        if isinstance(extra_cookies, dict):
+            for key, value in extra_cookies.items():
+                normalized_key = str(key or "").strip()
+                normalized_value = str(value or "").strip()
+                if normalized_key and normalized_value and normalized_key not in cookie_items:
+                    cookie_items[normalized_key] = normalized_value
+
+        if not cookie_items:
+            return raw_existing or None
+        return "; ".join(f"{key}={value}" for key, value in cookie_items.items())
+
     def _build_flow_project_page_url(self, project_id: str) -> str:
         return f"https://labs.google/fx/tools/flow/project/{project_id}"
+
+    def _build_current_flow_media_headers(
+        self,
+        *,
+        content_type: str = "application/json",
+    ) -> Dict[str, str]:
+        headers = {
+            "Accept": "*/*",
+            "Accept-Encoding": "gzip, deflate, br, zstd",
+            "Accept-Language": self._get_primary_accept_language(fallback="zh-CN,zh;q=0.9"),
+            "Content-Type": content_type,
+            "Origin": "https://labs.google",
+            "Priority": "u=1, i",
+            "Referer": "https://labs.google/",
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "cross-site",
+            "sec-fetch-storage-access": "active",
+        }
+        headers.setdefault("x-browser-channel", self.FLOW_BROWSER_CHANNEL_HEADER)
+        headers.setdefault("x-browser-copyright", self.FLOW_BROWSER_COPYRIGHT_HEADER)
+        headers.setdefault("x-browser-validation", self.FLOW_BROWSER_VALIDATION_HEADER)
+        headers.setdefault("x-browser-year", self.FLOW_BROWSER_YEAR_HEADER)
+        return headers
+
+    def _build_labs_request_context_headers(self, project_id: Optional[str]) -> Dict[str, str]:
+        return self._build_current_flow_media_headers()
 
     def _compact_json_dumps(self, payload: Any) -> str:
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
     def _encode_trpc_input(self, payload: Dict[str, Any]) -> str:
         return quote(self._compact_json_dumps(payload), safe="")
+
+    @staticmethod
+    def _extract_project_id_from_request_payload(payload: Optional[Dict[str, Any]]) -> Optional[str]:
+        if not isinstance(payload, dict):
+            return None
+        client_context = payload.get("clientContext")
+        if isinstance(client_context, dict):
+            project_id = str(client_context.get("projectId") or "").strip()
+            if project_id:
+                return project_id
+        requests = payload.get("requests")
+        if isinstance(requests, list):
+            for item in requests:
+                if not isinstance(item, dict):
+                    continue
+                item_client_context = item.get("clientContext")
+                if not isinstance(item_client_context, dict):
+                    continue
+                project_id = str(item_client_context.get("projectId") or "").strip()
+                if project_id:
+                    return project_id
+        return None
 
     async def _get_token_st_by_id(self, token_id: Optional[int]) -> Optional[str]:
         if not token_id or self.db is None or not hasattr(self.db, "get_token"):
@@ -281,13 +410,16 @@ class FlowClient:
         effective_user_agent = str(fingerprint_user_agent or self._generate_user_agent(account_id)).strip()
         headers.setdefault("Content-Type", "application/json")
         headers.setdefault("User-Agent", effective_user_agent)
-        headers.setdefault("Accept-Language", self._get_primary_accept_language(fallback="en-US"))
+        headers.setdefault("Accept-Language", self._get_primary_accept_language(fallback="zh-CN,zh;q=0.9"))
 
         if isinstance(fingerprint, dict):
             if fingerprint.get("accept_language"):
                 headers.setdefault("Accept-Language", fingerprint["accept_language"])
             if fingerprint.get("sec_ch_ua"):
-                headers["sec-ch-ua"] = fingerprint["sec_ch_ua"]
+                headers["sec-ch-ua"] = self._normalize_sec_ch_ua_header(
+                    fingerprint["sec_ch_ua"],
+                    user_agent=headers.get("User-Agent"),
+                )
             if fingerprint.get("sec_ch_ua_mobile"):
                 headers["sec-ch-ua-mobile"] = fingerprint["sec_ch_ua_mobile"]
             if fingerprint.get("sec_ch_ua_platform"):
@@ -473,21 +605,48 @@ class FlowClient:
         effective_user_agent = str(fingerprint_user_agent or self._generate_user_agent(account_id)).strip()
         headers.setdefault("Content-Type", "application/json")
         headers.setdefault("User-Agent", effective_user_agent)
-        headers.setdefault("Accept-Language", self._get_primary_accept_language(fallback="en-US"))
+        headers.setdefault("Accept-Language", self._get_primary_accept_language(fallback="zh-CN,zh;q=0.9"))
 
         if isinstance(fingerprint, dict):
             if fingerprint.get("accept_language"):
                 headers.setdefault("Accept-Language", fingerprint["accept_language"])
             if fingerprint.get("sec_ch_ua"):
-                headers["sec-ch-ua"] = fingerprint["sec_ch_ua"]
+                headers["sec-ch-ua"] = self._normalize_sec_ch_ua_header(
+                    fingerprint["sec_ch_ua"],
+                    user_agent=headers.get("User-Agent"),
+                )
             if fingerprint.get("sec_ch_ua_mobile"):
                 headers["sec-ch-ua-mobile"] = fingerprint["sec_ch_ua_mobile"]
             if fingerprint.get("sec_ch_ua_platform"):
                 headers["sec-ch-ua-platform"] = fingerprint["sec_ch_ua_platform"]
+            if self._should_attach_runtime_session_cookies(url):
+                origin = str(fingerprint.get("origin") or "").strip() or "https://labs.google"
+                referer = str(fingerprint.get("referer") or "").strip()
+                if not referer:
+                    fingerprint_project_id = str(fingerprint.get("project_id") or "").strip()
+                    if fingerprint_project_id:
+                        referer = self._build_flow_project_page_url(fingerprint_project_id)
+                if origin:
+                    headers.setdefault("Origin", origin)
+                if referer:
+                    headers.setdefault("Referer", referer)
+            if self._should_attach_runtime_session_cookies(url):
+                merged_cookie_header = self._merge_cookie_header(
+                    headers.get("Cookie"),
+                    fingerprint.get("session_cookies"),
+                )
+                if merged_cookie_header:
+                    headers["Cookie"] = merged_cookie_header
 
         if apply_default_client_headers:
             for key, value in self._default_client_headers.items():
                 headers.setdefault(key, value)
+
+        if self._should_attach_runtime_session_cookies(url):
+            derived_project_id = self._extract_project_id_from_request_payload(json_data)
+            headers.setdefault("Origin", "https://labs.google")
+            if derived_project_id:
+                headers.setdefault("Referer", self._build_flow_project_page_url(derived_project_id))
 
         inferred_fingerprint = self._build_fingerprint_from_user_agent(
             headers.get("User-Agent"),
@@ -617,6 +776,7 @@ class FlowClient:
         """使用 urllib 执行 JSON 请求，作为 curl_cffi 的网络回退。"""
         request_headers = dict(headers or {})
         request_headers.setdefault("Accept", "application/json")
+        request_headers["Accept-Encoding"] = "identity"
 
         data = None
         if method.upper() != "GET" and json_data is not None:
@@ -646,14 +806,26 @@ class FlowClient:
             ) as response:
                 payload = response.read()
                 status_code = int(response.getcode() or 0)
+                content_encoding = str(response.headers.get("Content-Encoding") or "").lower()
         except urllib.error.HTTPError as exc:
             payload = exc.read() if hasattr(exc, "read") else b""
             status_code = int(getattr(exc, "code", 500) or 500)
+            content_encoding = str(getattr(exc, "headers", {}).get("Content-Encoding") or "").lower()
+            if content_encoding == "gzip" and payload:
+                try:
+                    payload = gzip.decompress(payload)
+                except Exception:
+                    pass
             body_text = payload.decode("utf-8", errors="replace")
             raise Exception(f"HTTP Error {status_code}: {body_text[:200]}") from exc
         except Exception as exc:
             raise Exception(str(exc)) from exc
 
+        if content_encoding == "gzip" and payload:
+            try:
+                payload = gzip.decompress(payload)
+            except Exception:
+                pass
         body_text = payload.decode("utf-8", errors="replace")
         if status_code >= 400:
             raise Exception(f"HTTP Error {status_code}: {body_text[:200]}")
@@ -739,14 +911,7 @@ class FlowClient:
 
     def _build_realistic_video_submit_headers(self) -> Dict[str, str]:
         """构造当前上游真实抓包风格的视频提交头。"""
-        headers: Dict[str, str] = {
-            "Accept": "*/*",
-            "Accept-Language": self._get_primary_accept_language(fallback="en-US"),
-            "Referer": "https://labs.google/",
-            "Origin": "https://labs.google",
-            "Content-Type": "text/plain;charset=UTF-8",
-        }
-        return headers
+        return self._build_current_flow_media_headers(content_type="text/plain;charset=UTF-8")
 
     def _resolve_runtime_impersonate(self, fallback: str = "chrome124") -> str:
         resolved = self._resolve_impersonate_from_fingerprint(fallback=fallback)
@@ -804,6 +969,7 @@ class FlowClient:
         """视频 API 加硬截止，避免 curl_cffi 底层偶发卡住导致整条请求悬挂。"""
         raw_body = json.dumps(json_data, ensure_ascii=False, separators=(",", ":"))
         headers = self._build_realistic_video_submit_headers()
+        headers.update(self._build_labs_request_context_headers(project_id))
         try:
             return await asyncio.wait_for(
                 self._make_request(
@@ -949,6 +1115,7 @@ class FlowClient:
                     result = await self._make_request(
                         method="POST",
                         url=url,
+                        headers=self._build_labs_request_context_headers(project_id),
                         json_data=json_data,
                         use_at=True,
                         at_token=at,
@@ -2050,19 +2217,27 @@ class FlowClient:
     ) -> Dict[str, str]:
         headers: Dict[str, str] = {
             "Accept": "*/*",
+            "Accept-Encoding": "gzip, deflate, br, zstd",
             "Referer": referer,
             "User-Agent": self._get_effective_request_user_agent(account_id),
-            "Accept-Language": accept_language or self._get_primary_accept_language(fallback="en-US"),
+            "Accept-Language": accept_language or self._get_primary_accept_language(fallback="zh-CN,zh;q=0.9"),
+            "Priority": "u=1, i",
             "sec-fetch-dest": "empty",
             "sec-fetch-mode": "cors",
             "sec-fetch-site": "cross-site",
         }
         if origin:
             headers["Origin"] = origin
+            if origin == "https://labs.google":
+                headers.setdefault("sec-fetch-storage-access", "active")
         if content_type:
             headers["Content-Type"] = content_type
         if api_key:
             headers["x-goog-api-key"] = api_key
+        headers.setdefault("x-browser-channel", self.FLOW_BROWSER_CHANNEL_HEADER)
+        headers.setdefault("x-browser-copyright", self.FLOW_BROWSER_COPYRIGHT_HEADER)
+        headers.setdefault("x-browser-validation", self.FLOW_BROWSER_VALIDATION_HEADER)
+        headers.setdefault("x-browser-year", self.FLOW_BROWSER_YEAR_HEADER)
         return headers
 
     async def _labs_trpc_get_with_st(
@@ -4326,17 +4501,61 @@ class FlowClient:
                 debug_logger.log_info(f"[reCAPTCHA] 导入 BrowserCaptchaService 成功")
                 service = await BrowserCaptchaService.get_instance(self.db)
                 debug_logger.log_info(f"[reCAPTCHA] 获取服务实例成功，准备调用 get_token")
-                get_token_with_metadata = getattr(service, "get_token_with_metadata", None)
-                if callable(get_token_with_metadata):
-                    token, _slot_id, _cookie_source_token_id = await get_token_with_metadata(
+                solve_bundle = None
+                get_token_bundle = getattr(service, "get_token_bundle", None)
+                if callable(get_token_bundle):
+                    solve_bundle = await get_token_bundle(
                         project_id,
                         action,
                         token_id=token_id,
                     )
+                    token = str((solve_bundle or {}).get("token") or "").strip() or None
                 else:
-                    token = await service.get_token(project_id, action, token_id=token_id)
+                    get_token_with_metadata = getattr(service, "get_token_with_metadata", None)
+                    if callable(get_token_with_metadata):
+                        token, _slot_id, _cookie_source_token_id = await get_token_with_metadata(
+                            project_id,
+                            action,
+                            token_id=token_id,
+                        )
+                    else:
+                        token = await service.get_token(project_id, action, token_id=token_id)
+                    solve_bundle = {
+                        "token": token,
+                        "fingerprint": service.get_last_fingerprint() if token else None,
+                    } if token else None
                 debug_logger.log_info(f"[reCAPTCHA] get_token 返回: {token[:50] if token else None}...")
-                fingerprint = service.get_last_fingerprint() if token else None
+                fingerprint = (
+                    solve_bundle.get("fingerprint")
+                    if isinstance(solve_bundle, dict) and isinstance(solve_bundle.get("fingerprint"), dict)
+                    else None
+                )
+                if isinstance(solve_bundle, dict) and token:
+                    session_cookies = solve_bundle.get("session_cookies")
+                    proxy_url = str(solve_bundle.get("proxy_url") or "").strip()
+                    next_fingerprint = dict(fingerprint or {})
+                    if isinstance(session_cookies, dict) and session_cookies:
+                        next_fingerprint["session_cookies"] = dict(session_cookies)
+                    if proxy_url and not str(next_fingerprint.get("proxy_url") or "").strip():
+                        next_fingerprint["proxy_url"] = proxy_url
+                    next_fingerprint["project_id"] = project_id
+                    next_fingerprint.setdefault("origin", "https://labs.google")
+                    next_fingerprint.setdefault("referer", self._build_flow_project_page_url(project_id))
+                    fingerprint = next_fingerprint or None
+                if token:
+                    effective_ua = str((fingerprint or {}).get("user_agent") or "").strip()
+                    effective_lang = str((fingerprint or {}).get("accept_language") or "").strip()
+                    if not effective_ua:
+                        debug_logger.log_warning(
+                            "[reCAPTCHA Personal] 已拿到 token，但未提取到浏览器指纹 UA；"
+                            "为避免协议提交与打码环境失配，丢弃本次 token 并触发重试"
+                        )
+                        self._set_request_fingerprint(None)
+                        return None, None
+                    debug_logger.log_info(
+                        "[reCAPTCHA Personal] 使用浏览器指纹: "
+                        f"UA={effective_ua[:120]}, Accept-Language={effective_lang or '<empty>'}"
+                    )
                 self._set_request_fingerprint(fingerprint if token else None)
                 return token, None
             except RuntimeError as e:
