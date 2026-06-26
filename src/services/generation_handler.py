@@ -2199,6 +2199,40 @@ class GenerationHandler:
                     video_info = resolved_video["video_info"]
 
                     if not video_url:
+                        media_name_for_fetch = (
+                            operation.get("mediaName")
+                            or operation["operation"].get("name", "")
+                        )
+                        if media_name_for_fetch:
+                            if stream:
+                                yield self._create_stream_chunk("视频生成完成，正在下载视频文件...\n")
+                            try:
+                                media_result = await self.flow_client.get_media(
+                                    token.at, media_name_for_fetch
+                                )
+                                encoded_video = (
+                                    media_result.get("video", {}).get("encodedVideo", "")
+                                )
+                                if encoded_video:
+                                    cached_filename = await self.file_cache.cache_base64_video(
+                                        encoded_video
+                                    )
+                                    video_url = f"{self._get_base_url(response_state)}/tmp/{cached_filename}"
+                                    video_info["fifeUrl"] = video_url
+                                    debug_logger.log_info(
+                                        f"[VIDEO] Video fetched via get_media and cached: {cached_filename}"
+                                    )
+                                else:
+                                    debug_logger.log_error(
+                                        "[VIDEO] get_media returned empty encodedVideo"
+                                    )
+                            except Exception as fetch_err:
+                                debug_logger.log_error(
+                                    f"[VIDEO] Failed to fetch video via get_media: {fetch_err}"
+                                )
+
+                    if not video_url:
+                        error_msg = "视频生成失败: 视频URL为空"
                         error_msg = "视频生成成功但未获取到媒体地址"
                         await self._fail_video_task(checked_operations, error_msg)
                         self._mark_generation_failed(generation_result, error_msg)
