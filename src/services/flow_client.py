@@ -1970,6 +1970,7 @@ class FlowClient:
         embedded_url = self._extract_video_url_from_media(media)
         if embedded_url:
             video_metadata["embeddedUrl"] = embedded_url
+            video_metadata["fifeUrl"] = embedded_url
 
         return video_metadata
 
