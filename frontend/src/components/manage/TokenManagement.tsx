@@ -954,10 +954,8 @@ export function TokenManagement() {
               {profileBusyId === "new" ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Plus className="h-4 w-4 mr-2" />}
               Browser profile
             </Button>
-            <Button size="sm" variant="outline" asChild title="Open Fluxbox desktop through noVNC">
-              <a href={buildNoVncUrl()} target="_blank" rel="noreferrer">
-                <ExternalLink className="h-4 w-4 mr-2" /> Open Fluxbox
-              </a>
+            <Button size="sm" variant="outline" render={<a href={buildNoVncUrl()} target="_blank" rel="noreferrer" />} title="Open Fluxbox desktop through noVNC">
+              <ExternalLink className="h-4 w-4 mr-2" /> Open Fluxbox
             </Button>
           </div>
         </CardHeader>
