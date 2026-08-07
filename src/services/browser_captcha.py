@@ -6,6 +6,8 @@ import os
 import sys
 import subprocess
 import signal
+import shutil
+from pathlib import Path
 # 修复 Windows 上 playwright 的 asyncio 兼容性问题
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
 
@@ -91,11 +93,17 @@ DOCKER_HEADED_BLOCKED = IS_DOCKER and not ALLOW_DOCKER_HEADED
 
 
 # ==================== playwright 自动安装 ====================
-def _run_pip_install(package: str, use_mirror: bool = False) -> bool:
-    """运行 pip install 命令"""
-    cmd = [sys.executable, '-m', 'pip', 'install', package]
+def _run_uv_sync(package: str, use_mirror: bool = False) -> bool:
+    """使用 uv 从锁定的项目环境安装依赖。"""
+    uv = shutil.which("uv")
+    if not uv:
+        debug_logger.log_warning("[BrowserCaptcha] uv 不可用，无法同步项目依赖")
+        return False
+
+    project_root = Path(__file__).resolve().parents[2]
+    cmd = [uv, "sync", "--frozen", "--project", str(project_root)]
     if use_mirror:
-        cmd.extend(['-i', 'https://pypi.tuna.tsinghua.edu.cn/simple'])
+        cmd.extend(["--default-index", "https://pypi.tuna.tsinghua.edu.cn/simple"])
     
     try:
         debug_logger.log_info(f"[BrowserCaptcha] 正在安装 {package}...")
@@ -151,17 +159,17 @@ def _ensure_playwright_installed() -> bool:
     print("[BrowserCaptcha] playwright 未安装，开始自动安装...")
     
     # 先尝试官方源
-    if _run_pip_install('playwright', use_mirror=False):
+    if _run_uv_sync('playwright', use_mirror=False):
         return True
     
     # 官方源失败，尝试国内镜像
     debug_logger.log_info("[BrowserCaptcha] 官方源安装失败，尝试国内镜像...")
     print("[BrowserCaptcha] 官方源安装失败，尝试国内镜像...")
-    if _run_pip_install('playwright', use_mirror=True):
+    if _run_uv_sync('playwright', use_mirror=True):
         return True
     
-    debug_logger.log_error("[BrowserCaptcha] ❌ playwright 自动安装失败，请手动安装: pip install playwright")
-    print("[BrowserCaptcha] ❌ playwright 自动安装失败，请手动安装: pip install playwright")
+    debug_logger.log_error("[BrowserCaptcha] ❌ playwright 自动安装失败，请运行: uv sync")
+    print("[BrowserCaptcha] ❌ playwright 自动安装失败，请运行: uv sync")
     return False
 
 
@@ -2069,7 +2077,7 @@ class BrowserCaptchaService:
         if not PLAYWRIGHT_AVAILABLE or async_playwright is None:
             raise RuntimeError(
                 "playwright 未安装或不可用。"
-                "请手动安装: pip install playwright && python -m playwright install chromium"
+                "请运行: uv sync && uv run playwright install chromium"
             )
     
     async def _load_browser_count(self):

@@ -3,7 +3,7 @@
 <div align="center">
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/fastapi-0.119.0-green.svg)](https://fastapi.tiangolo.com/)
 [![Docker](https://img.shields.io/badge/docker-supported-blue.svg)](https://www.docker.com/)
 
@@ -30,7 +30,7 @@
 ### Prerequisites
 
 - Docker and Docker Compose (recommended)
-- Or Python 3.8+
+- Or [uv](https://docs.astral.sh/uv/getting-started/installation/) and [Bun](https://bun.sh/) for local use. uv installs the required Python 3.11 runtime when necessary.
 
 Flow now requires an additional CAPTCHA. You can solve it through a browser or a third-party service.
 
@@ -119,7 +119,7 @@ Run [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/c
 6. Set `[cache].base_url` in `config/setting.toml` to the public API URL, for example `base_url = "https://flow-api.prismacreative.online"`. See the comments in `config/setting_example.toml`.
 7. Configure `FLOW2API_API_ONLY_HOST` as an environment variable. The default is shown in the `flow2api` service in `docker-compose.yml`; Docker Compose reads the root `.env` file.
 
-**If `/login` or another UI page remains accessible on the `flow-api` hostname:** the current image does not contain this repository's `ApiOnlyHostMiddleware`, usually because it is an older `ghcr.io/.../flow2api:latest` image. Build and deploy from this repository with `docker build -t flow2api:local -f Dockerfile .`, set the Compose service image to `flow2api:local`, and run `up -d` again. Confirm that the startup log contains `API-only host(s)`. The environment variable can also be set when running `python main.py` directly. If the current image is deployed but the old page remains, disable aggressive HTML caching for that hostname or purge the Cloudflare cache.
+**If `/login` or another UI page remains accessible on the `flow-api` hostname:** the current image does not contain this repository's `ApiOnlyHostMiddleware`, usually because it is an older `ghcr.io/.../flow2api:latest` image. Build and deploy from this repository with `docker build -t flow2api:local -f Dockerfile .`, set the Compose service image to `flow2api:local`, and run `up -d` again. Confirm that the startup log contains `API-only host(s)`. The environment variable can also be set when running `uv run flow2api-server` directly. If the current image is deployed but the old page remains, disable aggressive HTML caching for that hostname or purge the Cloudflare cache.
 
 For headed CAPTCHA solving, use `docker-compose.headed.yml`, which already includes Cloudflare Tunnel and `flow2api-headed`:
 
@@ -133,24 +133,16 @@ In Zero Trust, set both public hostnames' origin to `http://flow2api-headed:8000
 
 ```bash
 # Clone the project
-git clone https://github.com/TheSmallHanCat/flow2api.git
+git clone https://github.com/agmmnn/flow2api.git
 cd flow2api
 
-# Create a virtual environment
-python -m venv venv
-
-# Activate the virtual environment
-# Windows
-venv\Scripts\activate
-# Linux/Mac
-source venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Start the service
-python main.py
+# Create/sync the environment, build the frontend, and start Flow2API
+uv run flow2api
 ```
+
+On the first run, uv installs Python 3.11 if needed, creates `.venv`, and installs the exact versions from `uv.lock`. The launcher then installs the locked frontend dependencies with Bun, builds them into `static/`, and starts the API. Later runs use the existing caches and environment.
+
+To start only the backend without rebuilding the frontend, run `uv run flow2api-server`. For development, use `uv sync`, update dependencies with `uv add`/`uv remove`, and commit both `pyproject.toml` and `uv.lock`.
 
 ### First visit
 

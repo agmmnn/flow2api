@@ -1,15 +1,20 @@
 # Build frontend
-FROM node:20-slim AS frontend-builder
+FROM oven/bun:1.3.14-slim AS frontend-builder
 WORKDIR /app/frontend
-COPY frontend/package*.json ./
-RUN npm install
+COPY frontend/package.json frontend/bun.lock ./
+RUN bun install --frozen-lockfile
 COPY frontend/ ./
-RUN npm run build
+RUN bun run build
 
 # Build backend
 FROM python:3.11-slim
 
+COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/
+
 WORKDIR /app
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates gnupg \
@@ -23,15 +28,18 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends postgresql-client-16 \
     && rm -rf /var/lib/apt/lists/*
 
-# 安装 Python 依赖
-COPY requirements.txt .
-RUN pip install --no-cache-dir --root-user-action=ignore -r requirements.txt
+# Install locked Python dependencies before copying the application for better caching.
+COPY pyproject.toml uv.lock README.md LICENSE ./
+RUN uv sync --frozen --no-dev --no-install-project
 
 COPY . .
+RUN uv sync --frozen --no-dev
+
+ENV PATH="/app/.venv/bin:$PATH"
 
 # Copy built frontend assets from builder stage
 COPY --from=frontend-builder /app/frontend/dist /app/static
 
 EXPOSE 8000
 
-CMD ["python", "main.py"]
+CMD ["flow2api-server"]

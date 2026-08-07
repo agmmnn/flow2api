@@ -5085,7 +5085,7 @@ class FlowClient:
             except ImportError as e:
                 debug_logger.log_error(f"[reCAPTCHA Personal] 导入失败: {str(e)}")
                 debug_logger.log_recaptcha_execution_error(f"ImportError: {e}")
-                print(f"[reCAPTCHA] ❌ nodriver 未安装，请运行: pip install nodriver")
+                print("[reCAPTCHA] ❌ nodriver 未安装，请运行: uv sync")
                 self._set_request_fingerprint(None)
                 return None, None
             except Exception as e:
@@ -5166,7 +5166,7 @@ class FlowClient:
                 if not self._can_use_browser_gateway_fallback():
                     debug_logger.log_recaptcha_execution_error(primary_error_msg)
                     if isinstance(primary_error, ImportError):
-                        print("[reCAPTCHA] ❌ playwright 未安装，请运行: pip install playwright && python -m playwright install chromium")
+                        print("[reCAPTCHA] ❌ playwright 未安装，请运行: uv sync && uv run playwright install chromium")
                     elif isinstance(primary_error, RuntimeError):
                         print(f"[reCAPTCHA] ❌ 有头浏览器打码失败: {str(primary_error)}")
                     self._set_request_fingerprint(None)

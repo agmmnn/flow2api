@@ -36,6 +36,7 @@ venv/
 env/
 ENV/
 .venv
+.uv-cache/
 
 # IDE
 .vscode/

@@ -24,7 +24,8 @@ def build_uvicorn_log_config():
     return log_config
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Start the Flow2API Uvicorn server."""
     from src.core.config import config
 
     uvicorn.run(
@@ -34,3 +35,7 @@ if __name__ == "__main__":
         reload=False,
         log_config=build_uvicorn_log_config(),
     )
+
+
+if __name__ == "__main__":
+    main()

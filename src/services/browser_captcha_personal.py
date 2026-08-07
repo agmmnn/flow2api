@@ -302,8 +302,8 @@ def _cleanup_runtime_artifacts_sync(
 
 
 # ==================== nodriver 自动安装 ====================
-def _run_pip_install(package: str, use_mirror: bool = False) -> bool:
-    """运行 pip install 命令
+def _run_uv_sync(package: str, use_mirror: bool = False) -> bool:
+    """使用 uv 从锁定的项目环境安装依赖。
     
     Args:
         package: 包名
@@ -312,9 +312,15 @@ def _run_pip_install(package: str, use_mirror: bool = False) -> bool:
     Returns:
         是否安装成功
     """
-    cmd = [sys.executable, '-m', 'pip', 'install', package]
+    uv = shutil.which("uv")
+    if not uv:
+        debug_logger.log_warning("[BrowserCaptcha] uv 不可用，无法同步项目依赖")
+        return False
+
+    project_root = Path(__file__).resolve().parents[2]
+    cmd = [uv, "sync", "--frozen", "--project", str(project_root)]
     if use_mirror:
-        cmd.extend(['-i', 'https://pypi.tuna.tsinghua.edu.cn/simple'])
+        cmd.extend(["--default-index", "https://pypi.tuna.tsinghua.edu.cn/simple"])
     
     try:
         debug_logger.log_info(f"[BrowserCaptcha] 正在安装 {package}...")
@@ -349,17 +355,17 @@ def _ensure_nodriver_installed() -> bool:
     print("[BrowserCaptcha] nodriver 未安装，开始自动安装...")
     
     # 先尝试官方源
-    if _run_pip_install('nodriver', use_mirror=False):
+    if _run_uv_sync('nodriver', use_mirror=False):
         return True
     
     # 官方源失败，尝试国内镜像
     debug_logger.log_info("[BrowserCaptcha] 官方源安装失败，尝试国内镜像...")
     print("[BrowserCaptcha] 官方源安装失败，尝试国内镜像...")
-    if _run_pip_install('nodriver', use_mirror=True):
+    if _run_uv_sync('nodriver', use_mirror=True):
         return True
     
-    debug_logger.log_error("[BrowserCaptcha] ❌ nodriver 自动安装失败，请手动安装: pip install nodriver")
-    print("[BrowserCaptcha] ❌ nodriver 自动安装失败，请手动安装: pip install nodriver")
+    debug_logger.log_error("[BrowserCaptcha] ❌ nodriver 自动安装失败，请运行: uv sync")
+    print("[BrowserCaptcha] ❌ nodriver 自动安装失败，请运行: uv sync")
     return False
 
 
@@ -2283,7 +2289,7 @@ class BrowserCaptchaService:
         if not NODRIVER_AVAILABLE or uc is None:
             raise RuntimeError(
                 "nodriver 未安装或不可用。"
-                "请手动安装: pip install nodriver"
+                "请运行: uv sync"
             )
 
     async def _run_with_timeout(self, awaitable, timeout_seconds: float, label: str):
