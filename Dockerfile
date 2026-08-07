@@ -42,4 +42,4 @@ COPY --from=frontend-builder /app/frontend/dist /app/static
 
 EXPOSE 8000
 
-CMD ["flow2api-server"]
+CMD ["flow2api"]

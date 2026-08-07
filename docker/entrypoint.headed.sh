@@ -131,4 +131,4 @@ else
     echo "[entrypoint] warning: no valid browser executable found for personal/browser captcha" >&2
 fi
 
-exec flow2api-server
+exec flow2api

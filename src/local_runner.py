@@ -1,8 +1,7 @@
-"""One-command local launcher managed by uv."""
+"""Local project setup managed by uv and Bun."""
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -13,35 +12,23 @@ FRONTEND_DIR = PROJECT_ROOT / "frontend"
 STATIC_DIR = PROJECT_ROOT / "static"
 
 
-def _frontend_build_disabled() -> bool:
-    return os.getenv("FLOW2API_SKIP_FRONTEND_BUILD", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
 def build_frontend() -> None:
     """Install locked frontend dependencies and build assets into ./static."""
-    if _frontend_build_disabled():
-        return
-
     bun = shutil.which("bun")
     if not bun:
         raise SystemExit(
             "Bun is required to build the Flow2API frontend. Install it from "
-            "https://bun.sh, then run `uv run flow2api` again."
+            "https://bun.sh, then run `uv run setup` again."
         )
 
-    print("[flow2api] Syncing frontend dependencies with Bun...")
+    print("[flow2api] Syncing frontend dependencies with Bun...", flush=True)
     subprocess.run(
         [bun, "install", "--frozen-lockfile"],
         cwd=FRONTEND_DIR,
         check=True,
     )
 
-    print("[flow2api] Building frontend assets...")
+    print("[flow2api] Building frontend assets...", flush=True)
     subprocess.run(
         [
             bun,
@@ -57,10 +44,10 @@ def build_frontend() -> None:
     )
 
 
-def main() -> None:
-    """Prepare the frontend and start the Flow2API backend."""
+def setup() -> None:
+    """Install frontend dependencies and build the administration UI."""
     build_frontend()
-
-    from main import main as run_server
-
-    run_server()
+    print(
+        "[flow2api] Setup complete. Start the server with `uv run flow2api`.",
+        flush=True,
+    )

@@ -119,7 +119,7 @@ Run [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/c
 6. Set `[cache].base_url` in `config/setting.toml` to the public API URL, for example `base_url = "https://flow-api.prismacreative.online"`. See the comments in `config/setting_example.toml`.
 7. Configure `FLOW2API_API_ONLY_HOST` as an environment variable. The default is shown in the `flow2api` service in `docker-compose.yml`; Docker Compose reads the root `.env` file.
 
-**If `/login` or another UI page remains accessible on the `flow-api` hostname:** the current image does not contain this repository's `ApiOnlyHostMiddleware`, usually because it is an older `ghcr.io/.../flow2api:latest` image. Build and deploy from this repository with `docker build -t flow2api:local -f Dockerfile .`, set the Compose service image to `flow2api:local`, and run `up -d` again. Confirm that the startup log contains `API-only host(s)`. The environment variable can also be set when running `uv run flow2api-server` directly. If the current image is deployed but the old page remains, disable aggressive HTML caching for that hostname or purge the Cloudflare cache.
+**If `/login` or another UI page remains accessible on the `flow-api` hostname:** the current image does not contain this repository's `ApiOnlyHostMiddleware`, usually because it is an older `ghcr.io/.../flow2api:latest` image. Build and deploy from this repository with `docker build -t flow2api:local -f Dockerfile .`, set the Compose service image to `flow2api:local`, and run `up -d` again. Confirm that the startup log contains `API-only host(s)`. The environment variable can also be set when running `uv run flow2api` directly. If the current image is deployed but the old page remains, disable aggressive HTML caching for that hostname or purge the Cloudflare cache.
 
 For headed CAPTCHA solving, use `docker-compose.headed.yml`, which already includes Cloudflare Tunnel and `flow2api-headed`:
 
@@ -136,13 +136,16 @@ In Zero Trust, set both public hostnames' origin to `http://flow2api-headed:8000
 git clone https://github.com/agmmnn/flow2api.git
 cd flow2api
 
-# Create/sync the environment, build the frontend, and start Flow2API
+# Create/sync the environment and build the frontend
+uv run setup
+
+# Start Flow2API
 uv run flow2api
 ```
 
-On the first run, uv installs Python 3.11 if needed, creates `.venv`, and installs the exact versions from `uv.lock`. The launcher then installs the locked frontend dependencies with Bun, builds them into `static/`, and starts the API. Later runs use the existing caches and environment.
+`uv run setup` installs Python 3.11 if needed, creates `.venv`, installs the exact versions from `uv.lock`, installs the locked frontend dependencies with Bun, and builds them into `static/`. Run it after cloning or when frontend dependencies change.
 
-To start only the backend without rebuilding the frontend, run `uv run flow2api-server`. For development, use `uv sync`, update dependencies with `uv add`/`uv remove`, and commit both `pyproject.toml` and `uv.lock`.
+`uv run flow2api` starts the backend without rebuilding the frontend. For development, update Python dependencies with `uv add`/`uv remove`, then commit both `pyproject.toml` and `uv.lock`.
 
 ### First visit
 

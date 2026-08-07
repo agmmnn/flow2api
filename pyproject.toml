@@ -27,8 +27,8 @@ dependencies = [
 ]
 
 [project.scripts]
-flow2api = "src.local_runner:main"
-flow2api-server = "main:main"
+setup = "src.local_runner:setup"
+flow2api = "main:main"
 
 [dependency-groups]
 dev = [
