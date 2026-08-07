@@ -1126,7 +1126,7 @@ export function TokenManagement() {
               <div className="flex items-start gap-3">
                 <Switch checked={addProtocolMode} onCheckedChange={setAddProtocolMode} className="mt-0.5" />
                 <div>
-                  <Label className="!mt-0">Protocol ST refresh</Label>
+                  <Label className="mt-0!">Protocol ST refresh</Label>
                   <p className="text-xs text-muted-foreground">Use exported Google cookies to renew the Labs session token automatically.</p>
                 </div>
               </div>
@@ -1158,12 +1158,12 @@ export function TokenManagement() {
             <div className="flex flex-col gap-3 border-t pt-3">
               <div className="flex items-center gap-3">
                 <Switch checked={addImageEn} onCheckedChange={setAddImageEn} />
-                <Label className="!mt-0">Image generation</Label>
+                <Label className="mt-0!">Image generation</Label>
                 <Input className="w-20 h-8" value={addImgConc} onChange={(e) => setAddImgConc(e.target.value)} title="Concurrency, -1 = unlimited" />
               </div>
               <div className="flex items-center gap-3">
                 <Switch checked={addVideoEn} onCheckedChange={setAddVideoEn} />
-                <Label className="!mt-0">Video generation</Label>
+                <Label className="mt-0!">Video generation</Label>
                 <Input className="w-20 h-8" value={addVidConc} onChange={(e) => setAddVidConc(e.target.value)} />
               </div>
             </div>
@@ -1213,7 +1213,7 @@ export function TokenManagement() {
               <div className="flex items-start gap-3">
                 <Switch checked={editProtocolMode} onCheckedChange={setEditProtocolMode} className="mt-0.5" />
                 <div>
-                  <Label className="!mt-0">Protocol ST refresh</Label>
+                  <Label className="mt-0!">Protocol ST refresh</Label>
                   <p className="text-xs text-muted-foreground">Cookie values are write-only and never returned by the API.</p>
                 </div>
               </div>
@@ -1245,7 +1245,7 @@ export function TokenManagement() {
             <div className="flex items-start gap-3 border-t pt-3">
               <Switch checked={editUseExtensionGen} onCheckedChange={setEditUseExtensionGen} className="mt-0.5" />
               <div className="space-y-0.5">
-                <Label className="!mt-0">Use extension for generation</Label>
+                <Label className="mt-0!">Use extension for generation</Label>
                 <p className="text-xs text-muted-foreground">
                   When off, Flow image/video requests use server HTTP; the extension can still handle captcha for this token.
                 </p>
@@ -1254,12 +1254,12 @@ export function TokenManagement() {
             <div className="flex flex-col gap-3 border-t pt-3">
               <div className="flex items-center gap-3">
                 <Switch checked={editImageEn} onCheckedChange={setEditImageEn} />
-                <Label className="!mt-0">Image generation</Label>
+                <Label className="mt-0!">Image generation</Label>
                 <Input className="w-20 h-8" value={editImgConc} onChange={(e) => setEditImgConc(e.target.value)} />
               </div>
               <div className="flex items-center gap-3">
                 <Switch checked={editVideoEn} onCheckedChange={setEditVideoEn} />
-                <Label className="!mt-0">Video generation</Label>
+                <Label className="mt-0!">Video generation</Label>
                 <Input className="w-20 h-8" value={editVidConc} onChange={(e) => setEditVidConc(e.target.value)} />
               </div>
             </div>

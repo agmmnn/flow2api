@@ -4,11 +4,11 @@
 
 ## Changed
 
-Installed `@base-ui/react` 1.7.0 with Bun, migrated Button, Label, Switch, Scroll Area, Tabs, Dialog, Dropdown Menu, and Select, removed the unused Radix toast stack, removed all nine `@radix-ui/*` dependencies, and changed `components.json` to the current `base-vega` registry style. Existing Tailwind v3 visual classes were retained because the latest Base registry examples use Tailwind v4 syntax. The application consumer sweep replaced Radix `asChild` composition with Base UI `render` where needed.
+Installed `@base-ui/react` 1.7.0 with Bun, migrated Button, Label, Switch, Scroll Area, Tabs, Dialog, Dropdown Menu, and Select, removed the unused Radix toast stack, removed all nine `@radix-ui/*` dependencies, and changed `components.json` to the current `base-vega` registry style. A follow-up upgraded the frontend to Tailwind CSS 4.3 with the dedicated Vite plugin, migrated the utility syntax, updated the frontend dependency set, and smart-merged the current shadcn Base Switch so checked, unchecked, and disabled states render correctly. The application consumer sweep replaced Radix `asChild` composition with Base UI `render` where needed.
 
 ## Left alone
 
-Sonner remains the active notification system. Unrelated feature code, existing visual design, Tailwind 3, and the existing Vite/React setup were not changed.
+Sonner remains the active notification system. Unrelated feature code and the existing visual design were not changed.
 
 ## Behavior changes
 
@@ -20,4 +20,4 @@ Run `bun run dev`, then test login and dashboard navigation; link-style buttons;
 
 ## Final audit
 
-`bunx --bun shadcn@latest info --json` reports `style: base-vega` and `base: base`. `rg "@radix-ui|radix-ui" src package.json bun.lock components.json` returns no matches, and the derived Radix wrapper/dependency count is **0**. `bun run build` succeeds; Vite only reports the existing large-chunk warning.
+`bunx --bun shadcn@latest info --json` reports `style: base-vega`, `base: base`, and Tailwind `v4`. `rg "@radix-ui|radix-ui" src package.json bun.lock components.json` returns no matches, and the derived Radix wrapper/dependency count is **0**. `bun run build` succeeds; Vite only reports the existing large-chunk warning.

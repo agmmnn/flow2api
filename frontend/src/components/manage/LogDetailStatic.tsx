@@ -67,7 +67,7 @@ function LogPayloadPre({
     <pre
       className={cn(
         "rounded-lg border border-border bg-muted/30 p-3.5 text-[13px] font-mono leading-relaxed text-foreground overflow-x-auto whitespace-pre",
-        variant === "fullResponse" && "max-h-[min(420px,55vh)] max-w-full overflow-y-auto overscroll-contain [scrollbar-gutter:stable]",
+        variant === "fullResponse" && "max-h-[min(420px,55vh)] max-w-full overflow-y-auto overscroll-contain scrollbar-gutter-stable",
         className
       )}
     >
@@ -161,7 +161,7 @@ function LogMediaPreview({ label, url, withUrl = true }: { label: string; url: s
         <button
           type="button"
           onClick={requestPreview}
-          className="inline-flex items-center justify-center rounded-lg border border-border bg-secondary px-3.5 py-1.5 text-xs font-medium text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
+          className="inline-flex items-center justify-center rounded-lg border border-border bg-secondary px-3.5 py-1.5 text-xs font-medium text-secondary-foreground shadow-xs transition-colors hover:bg-secondary/80"
         >
           Click to load preview
         </button>
@@ -407,7 +407,7 @@ export function LogDetailStatic({ log }: { log: LogDetail }) {
                 </div>
               ) : null}
               {assetsBlock}
-              <details className="border-t border-border pt-4 open:[&>summary>span.chevron]:rotate-90" data-detail-key="full-response">
+              <details className="border-t border-border pt-4 [&>summary>span.chevron]:open:rotate-90" data-detail-key="full-response">
                 <summary className="cursor-pointer list-none text-sm font-semibold text-foreground marker:hidden select-none [&::-webkit-details-marker]:hidden">
                   <span className="chevron inline-block translate-y-px pr-1 text-muted-foreground transition-transform duration-200">▶</span>
                   Full response (large fields have been truncated)
@@ -463,7 +463,7 @@ export function LogDetailStatic({ log }: { log: LogDetail }) {
           <BasicInfoRow label="Status code">
             <span
               className={cn(
-                "inline-flex min-w-[2.25rem] items-center justify-center rounded px-2 py-0.5 text-xs font-medium tabular-nums",
+                "inline-flex min-w-9 items-center justify-center rounded px-2 py-0.5 text-xs font-medium tabular-nums",
                 statusCodePillClass(log.status_code ?? undefined)
               )}
             >

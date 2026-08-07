@@ -420,7 +420,7 @@ export default function TestPage() {
           <p className="text-muted-foreground mt-2">Pick a model, enter a prompt, and run a streamed completion.</p>
         </div>
 
-        <div className="flex flex-wrap gap-4 items-end bg-card p-5 border rounded-xl shadow-sm">
+        <div className="flex flex-wrap gap-4 items-end bg-card p-5 border rounded-xl shadow-xs">
           <div className="flex-1 min-w-[250px] space-y-2">
             <Label>API Key</Label>
             <Input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="API key" />
@@ -456,7 +456,7 @@ export default function TestPage() {
         </p>
 
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-          <div className="col-span-1 border rounded-xl bg-card shadow-sm overflow-hidden flex flex-col h-[700px]">
+          <div className="col-span-1 border rounded-xl bg-card shadow-xs overflow-hidden flex flex-col h-[700px]">
             <div className="p-4 bg-muted/50 border-b font-semibold">Models</div>
             <ScrollArea className="flex-1">
               <div className="p-2 space-y-4">
@@ -516,7 +516,7 @@ export default function TestPage() {
           </div>
 
           <div className="col-span-1 lg:col-span-3 space-y-6">
-            <div className="border rounded-xl bg-card p-6 shadow-sm space-y-6">
+            <div className="border rounded-xl bg-card p-6 shadow-xs space-y-6">
               <div>
                 <h3 className="font-semibold text-lg">{selectedModel || "Select a model"}</h3>
                 {selectedModel && <p className="text-xs text-muted-foreground mt-1">{models[selectedModel]}</p>}
@@ -525,7 +525,7 @@ export default function TestPage() {
               <div className="space-y-2">
                 <Label>Prompt</Label>
                 <textarea
-                  className="w-full h-32 p-3 rounded-md border border-input bg-background text-sm focus:ring-2 focus:ring-primary focus:outline-none resize-y"
+                  className="w-full h-32 p-3 rounded-md border border-input bg-background text-sm focus:ring-2 focus:ring-primary focus:outline-hidden resize-y"
                   value={prompt}
                   onChange={(e) => setPrompt(e.target.value)}
                   placeholder="Describe what you want to generate…"
@@ -604,7 +604,7 @@ export default function TestPage() {
               </Button>
             </div>
 
-            <div className="border rounded-xl bg-card p-6 shadow-sm">
+            <div className="border rounded-xl bg-card p-6 shadow-xs">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="font-semibold text-lg flex items-center gap-2">
                   Output

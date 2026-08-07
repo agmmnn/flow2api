@@ -817,7 +817,7 @@ export function ApiKeyManagement() {
                         <TableCell className="font-mono text-xs">
                           <button
                             type="button"
-                            className="max-w-full text-left break-all text-primary hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                            className="max-w-full text-left break-all text-primary hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
                             onClick={() => void copyCaptchaWorkerKey(String(row.key_plaintext || ""))}
                             title="Click to copy full key"
                           >

@@ -101,18 +101,18 @@ function MediaTile({ file, token }: { file: CacheFileItem; token: string | null 
 
   const mediaBody = () => {
     if (previewLoading) {
-      return <div className="flex h-full min-h-[8rem] items-center justify-center bg-muted text-xs text-muted-foreground">Loading…</div>
+      return <div className="flex h-full min-h-32 items-center justify-center bg-muted text-xs text-muted-foreground">Loading…</div>
     }
     if (previewError || !previewUrl) {
       return (
-        <div className="flex h-full min-h-[8rem] flex-col items-center justify-center gap-1 bg-muted px-2 text-center text-xs text-muted-foreground">
+        <div className="flex h-full min-h-32 flex-col items-center justify-center gap-1 bg-muted px-2 text-center text-xs text-muted-foreground">
           <span>Preview unavailable</span>
         </div>
       )
     }
     if (file.kind === "image") {
       return (
-        <a href={previewUrl} target="_blank" rel="noreferrer" className="block aspect-[4/3] bg-muted">
+        <a href={previewUrl} target="_blank" rel="noreferrer" className="block aspect-4/3 bg-muted">
           <img src={previewUrl} alt="" className="h-full w-full object-cover" decoding="async" onError={() => setFailedUrl(previewUrl)} />
         </a>
       )
@@ -125,7 +125,7 @@ function MediaTile({ file, token }: { file: CacheFileItem; token: string | null 
       )
     }
     return (
-      <div className="flex min-h-[8rem] flex-col items-center justify-center gap-2 bg-muted/30 p-3">
+      <div className="flex min-h-32 flex-col items-center justify-center gap-2 bg-muted/30 p-3">
         <File className="h-10 w-10 text-muted-foreground" />
         <a href={previewUrl} target="_blank" rel="noreferrer" className="line-clamp-2 break-all text-center text-xs text-primary hover:underline">
           Open file
@@ -135,7 +135,7 @@ function MediaTile({ file, token }: { file: CacheFileItem; token: string | null 
   }
 
   return (
-    <div className="overflow-hidden rounded-lg border bg-card shadow-sm">
+    <div className="overflow-hidden rounded-lg border bg-card shadow-xs">
       {mediaBody()}
       {meta}
     </div>

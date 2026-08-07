@@ -167,53 +167,53 @@ export default function Manage() {
           </Link>
         </div>
 
-        <TabsContent value="tokens" className="mt-0 outline-none focus-visible:ring-0">
+        <TabsContent value="tokens" className="mt-0 outline-hidden focus-visible:ring-0">
           <div className="animate-in fade-in duration-300">
             <TokenManagement />
           </div>
         </TabsContent>
-        <TabsContent value="settings" className="mt-0 outline-none focus-visible:ring-0">
+        <TabsContent value="settings" className="mt-0 outline-hidden focus-visible:ring-0">
           <div className="animate-in fade-in duration-300">
             <SystemSettings active={true} />
           </div>
         </TabsContent>
-        <TabsContent value="apikeys" className="mt-0 outline-none focus-visible:ring-0">
+        <TabsContent value="apikeys" className="mt-0 outline-hidden focus-visible:ring-0">
           <div className="animate-in fade-in duration-300">
             <ApiKeyManagement />
           </div>
         </TabsContent>
-        <TabsContent value="logs" className="mt-0 outline-none focus-visible:ring-0">
+        <TabsContent value="logs" className="mt-0 outline-hidden focus-visible:ring-0">
           <div className="animate-in fade-in duration-300">
             <RequestLogs />
           </div>
         </TabsContent>
-        <TabsContent value="adobe" className="mt-0 outline-none focus-visible:ring-0">
+        <TabsContent value="adobe" className="mt-0 outline-hidden focus-visible:ring-0">
           <div className="animate-in fade-in duration-300">
             <AdobeSettings active={tab === "adobe"} />
           </div>
         </TabsContent>
-        <TabsContent value="runway" className="mt-0 outline-none focus-visible:ring-0">
+        <TabsContent value="runway" className="mt-0 outline-hidden focus-visible:ring-0">
           <div className="animate-in fade-in duration-300">
             <RunwaySettings active={tab === "runway"} />
           </div>
         </TabsContent>
-        <TabsContent value="gateway" className="mt-0 outline-none focus-visible:ring-0">
+        <TabsContent value="gateway" className="mt-0 outline-hidden focus-visible:ring-0">
           <div className="animate-in fade-in duration-300">
             <AIGateway active={tab === "gateway"} />
           </div>
         </TabsContent>
-        <TabsContent value="geminigen" className="mt-0 outline-none focus-visible:ring-0">
+        <TabsContent value="geminigen" className="mt-0 outline-hidden focus-visible:ring-0">
           <div className="animate-in fade-in duration-300">
             <GeminiGenSettings active={tab === "geminigen"} />
           </div>
         </TabsContent>
-        <TabsContent value="cache" className="mt-0 outline-none focus-visible:ring-0">
+        <TabsContent value="cache" className="mt-0 outline-hidden focus-visible:ring-0">
           <div className="animate-in fade-in duration-300">
             <CacheManagement active={true} />
           </div>
         </TabsContent>
         {showAgentTab ? (
-          <TabsContent value="agent" className="mt-0 outline-none focus-visible:ring-0">
+          <TabsContent value="agent" className="mt-0 outline-hidden focus-visible:ring-0">
             <div className="animate-in fade-in duration-300">
               <AgentGateway />
             </div>

@@ -545,11 +545,11 @@ export function AIGateway({ active }: { active: boolean }) {
 
   return (
     <div className="space-y-6">
-      <div className="relative overflow-hidden rounded-xl border bg-card px-5 py-5 shadow-sm sm:px-7">
+      <div className="relative overflow-hidden rounded-xl border bg-card px-5 py-5 shadow-xs sm:px-7">
         <div className="absolute inset-y-0 right-0 w-1/2 bg-[radial-gradient(circle_at_center,hsl(var(--primary)/0.12),transparent_68%)]" />
         <div className="relative flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-start gap-4">
-            <div className="rounded-xl border bg-background p-3 shadow-sm"><Network className="h-6 w-6 text-primary" /></div>
+            <div className="rounded-xl border bg-background p-3 shadow-xs"><Network className="h-6 w-6 text-primary" /></div>
             <div>
               <div className="flex flex-wrap items-center gap-2">
                 <h1 className="text-2xl font-semibold tracking-tight">AI Gateway</h1>

@@ -292,14 +292,14 @@ export function RequestLogs() {
           <Table>
             <TableHeader className="sticky top-0 z-20 bg-background">
               <TableRow className="hover:bg-transparent border-b">
-                <TableHead className="h-10 w-[10rem] max-w-[10rem] px-3 text-left font-medium text-muted-foreground">Job ID</TableHead>
+                <TableHead className="h-10 w-40 max-w-40 px-3 text-left font-medium text-muted-foreground">Job ID</TableHead>
                 <TableHead className="h-10 px-3 text-left font-medium text-muted-foreground">Operation</TableHead>
                 <TableHead className="h-10 px-3 text-left font-medium text-muted-foreground">API key</TableHead>
                 <TableHead className="h-10 px-3 text-left font-medium text-muted-foreground">Token email</TableHead>
                 <TableHead className="h-10 px-3 text-left font-medium text-muted-foreground">Status</TableHead>
                 <TableHead className="h-10 px-3 text-left font-medium text-muted-foreground">Progress</TableHead>
                 <TableHead className="h-10 px-3 text-left font-medium text-muted-foreground">HTTP</TableHead>
-                <TableHead className="h-10 w-[17rem] max-w-[17rem] px-3 text-left font-medium text-muted-foreground">Summary</TableHead>
+                <TableHead className="h-10 w-68 max-w-68 px-3 text-left font-medium text-muted-foreground">Summary</TableHead>
                 <TableHead className="h-10 px-3 text-left font-medium text-muted-foreground">Duration (s)</TableHead>
                 <TableHead className="h-10 px-3 text-left font-medium text-muted-foreground">Time</TableHead>
                 <TableHead className="h-10 px-3 text-left font-medium text-muted-foreground">Details</TableHead>
@@ -331,7 +331,7 @@ export function RequestLogs() {
                       <TableCell className="py-2.5 px-3 text-xs align-top">
                         <span
                           className={cn(
-                            "block max-w-[10rem] truncate font-mono",
+                            "block max-w-40 truncate font-mono",
                             jobId ? "text-foreground" : "text-muted-foreground"
                           )}
                           title={jobId || undefined}
@@ -385,10 +385,10 @@ export function RequestLogs() {
                           {log.status_code ?? "-"}
                         </span>
                       </TableCell>
-                      <TableCell className="py-2.5 px-3 align-top w-[17rem] max-w-[17rem]">
+                      <TableCell className="py-2.5 px-3 align-top w-68 max-w-68">
                         <div
                           className={cn(
-                            "text-xs leading-5 whitespace-pre-wrap break-words line-clamp-2",
+                            "text-xs leading-5 whitespace-pre-wrap wrap-break-word line-clamp-2",
                             formatLogOutcomeRowClass(log)
                           )}
                           title={outcome}

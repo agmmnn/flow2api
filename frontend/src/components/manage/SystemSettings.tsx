@@ -2027,9 +2027,9 @@ export function SystemSettings({ active }: { active: boolean }) {
                       <span className="font-mono min-w-0 break-all whitespace-normal">{w.worker_session_id || "-"}</span>
                       <span className="font-mono min-w-0 break-all whitespace-normal">{w.instance_id || "-"}</span>
                       <span>{w.captcha_worker_key_prefix || w.captcha_worker_id || "-"}</span>
-                      <span className="min-w-0 break-words whitespace-normal">{w.captcha_worker_key_label || "-"}</span>
+                      <span className="min-w-0 wrap-break-word whitespace-normal">{w.captcha_worker_key_label || "-"}</span>
                       <span>reCAPTCHA only</span>
-                      <span className="min-w-0 break-words whitespace-normal">{w.binding_source || "-"}</span>
+                      <span className="min-w-0 wrap-break-word whitespace-normal">{w.binding_source || "-"}</span>
                       <span>{w.connected_at ? new Date(w.connected_at * 1000).toLocaleTimeString() : "-"}</span>
                       <span>
                         <Button
@@ -2062,9 +2062,9 @@ export function SystemSettings({ active }: { active: boolean }) {
                     <div key={w.worker_session_id} className="grid grid-cols-7 gap-2 px-3 py-2 text-xs border-b last:border-b-0 items-start">
                       <span className="font-mono min-w-0 break-all whitespace-normal">{w.worker_session_id || "-"}</span>
                       <span className="font-mono min-w-0 break-all whitespace-normal">{w.instance_id || "-"}</span>
-                      <span className="min-w-0 break-words whitespace-normal">{w.client_label || "-"}</span>
+                      <span className="min-w-0 wrap-break-word whitespace-normal">{w.client_label || "-"}</span>
                       <span>{w.managed_api_key_id ?? "-"}</span>
-                      <span className="min-w-0 break-words whitespace-normal">{w.binding_source || "-"}</span>
+                      <span className="min-w-0 wrap-break-word whitespace-normal">{w.binding_source || "-"}</span>
                       <span>{w.connected_at ? new Date(w.connected_at * 1000).toLocaleTimeString() : "-"}</span>
                       <span>
                         <Button
@@ -2099,7 +2099,7 @@ export function SystemSettings({ active }: { active: boolean }) {
                       <span className="font-mono min-w-0 break-all whitespace-normal">{w.instance_id || "-"}</span>
                       <span>{w.refresh_token_id ?? "-"}</span>
                       <span>ST refresh only</span>
-                      <span className="min-w-0 break-words whitespace-normal">{w.binding_source || "-"}</span>
+                      <span className="min-w-0 wrap-break-word whitespace-normal">{w.binding_source || "-"}</span>
                       <span>{w.connected_at ? new Date(w.connected_at * 1000).toLocaleTimeString() : "-"}</span>
                       <span>
                         <Button
