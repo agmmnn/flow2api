@@ -3,6 +3,29 @@ let reconnectTimeout = null;
 let heartbeatInterval = null;
 let cachedInstanceId = null;
 let sessionRefreshTimeout = null;
+let accountImportInFlight = false;
+
+const ACCOUNT_IMPORT_ALARM = "flow2api-account-import";
+const GOOGLE_COOKIE_NAMES = [
+    "SID",
+    "HSID",
+    "SSID",
+    "APISID",
+    "SAPISID",
+    "__Secure-1PSID",
+    "__Secure-3PSID",
+    "__Secure-1PAPISID",
+    "__Secure-3PAPISID",
+    "__Secure-1PSIDTS",
+    "__Secure-3PSIDTS",
+    "__Secure-1PSIDCC",
+    "__Secure-3PSIDCC",
+];
+const GOOGLE_AUTH_COOKIE_GROUPS = [
+    ["SID", "SAPISID"],
+    ["__Secure-1PSID", "__Secure-1PAPISID"],
+    ["__Secure-3PSID", "__Secure-3PAPISID"],
+];
 
 const DEFAULT_SETTINGS = {
     serverUrl: "wss://flow-api.prismacreative.online/captcha_ws",
@@ -11,6 +34,9 @@ const DEFAULT_SETTINGS = {
     captchaWorkerAuthKey: "",
     refreshTokenId: "",
     clientLabel: "",
+    accountAutoImportEnabled: false,
+    accountAutoImportIntervalMinutes: 30,
+    accountRefreshIntervalMinutes: 120,
 };
 
 const DEFAULT_WORKER_PAGE_URL = "https://labs.google/fx/api/auth/providers";
@@ -72,6 +98,10 @@ const runtimeState = {
     recentGenerationJobs: [],
     generationInFlight: false,
     generationLastPollFallbackReason: "",
+    accountImportInFlight: false,
+    accountImportLastAt: 0,
+    accountImportLastStatus: "never",
+    accountImportLastMessage: "",
     /** Dedicated worker capabilities from server register_ack (end-user mode: both true). */
     allowCaptcha: true,
     allowSessionRefresh: true,
@@ -254,6 +284,9 @@ function loadExtensionJobAndWorkerState() {
                 workerPageUrl: DEFAULT_WORKER_PAGE_URL,
                 usePersistentWorkerTab: DEFAULT_WORKER_SETTINGS.usePersistentWorkerTab,
                 autoRecycleWorkerTabOnCaptchaFailure: true,
+                accountImportLastAt: 0,
+                accountImportLastStatus: "never",
+                accountImportLastMessage: "",
             },
             (stored) => {
                 const st = stored[STORAGE_CAPTCHA_STATS] || {};
@@ -274,6 +307,9 @@ function loadExtensionJobAndWorkerState() {
                 if (runtimeState.workerTabId != null && Number.isNaN(runtimeState.workerTabId)) {
                     runtimeState.workerTabId = null;
                 }
+                runtimeState.accountImportLastAt = Number(stored.accountImportLastAt) || 0;
+                runtimeState.accountImportLastStatus = String(stored.accountImportLastStatus || "never");
+                runtimeState.accountImportLastMessage = String(stored.accountImportLastMessage || "");
                 resolve();
             }
         );
@@ -309,6 +345,154 @@ function serverWebSocketToHttpBase(wsUrl) {
     } catch {
         return "";
     }
+}
+
+function clampAccountInterval(raw, fallback) {
+    const value = parseInt(String(raw || ""), 10);
+    if (!Number.isFinite(value)) return fallback;
+    return Math.max(5, Math.min(1440, value));
+}
+
+function getCookies(details) {
+    return new Promise((resolve, reject) => {
+        chrome.cookies.getAll(details, (cookies) => {
+            if (chrome.runtime.lastError) {
+                reject(new Error(chrome.runtime.lastError.message || "cookie_read_failed"));
+                return;
+            }
+            resolve(Array.isArray(cookies) ? cookies : []);
+        });
+    });
+}
+
+async function getGoogleAccountCookies() {
+    const cookieMap = new Map();
+    const queries = [
+        { domain: "google.com" },
+        { url: "https://accounts.google.com/" },
+        { url: "https://www.google.com/" },
+        { url: "https://google.com/" },
+        { url: "https://ogs.google.com/" },
+        { url: "https://labs.google/" },
+    ];
+    for (const query of queries) {
+        const cookies = await getCookies(query);
+        for (const cookie of cookies) {
+            if (!GOOGLE_COOKIE_NAMES.includes(cookie.name) || !cookie.value) continue;
+            const existing = cookieMap.get(cookie.name);
+            const existingExpiry = Number(existing && existing.expirationDate) || 0;
+            const nextExpiry = Number(cookie.expirationDate) || 0;
+            if (!existing || nextExpiry >= existingExpiry) {
+                cookieMap.set(cookie.name, {
+                    name: cookie.name,
+                    value: cookie.value,
+                    domain: cookie.domain || "",
+                    path: cookie.path || "/",
+                    expirationDate: cookie.expirationDate || null,
+                });
+            }
+        }
+    }
+    return Array.from(cookieMap.values());
+}
+
+function persistAccountImportOutcome(status, message) {
+    runtimeState.accountImportLastAt = Date.now();
+    runtimeState.accountImportLastStatus = String(status || "error");
+    runtimeState.accountImportLastMessage = String(message || "").slice(0, 500);
+    chrome.storage.local.set({
+        accountImportLastAt: runtimeState.accountImportLastAt,
+        accountImportLastStatus: runtimeState.accountImportLastStatus,
+        accountImportLastMessage: runtimeState.accountImportLastMessage,
+    });
+}
+
+async function importCurrentGoogleAccount(reason = "manual") {
+    if (accountImportInFlight) {
+        throw new Error("account_import_busy");
+    }
+    accountImportInFlight = true;
+    runtimeState.accountImportInFlight = true;
+    try {
+        const settings = await getSettings();
+        if (settings.connectionMode !== "endUser") {
+            throw new Error("End User Worker mode is required for account import");
+        }
+        if (!settings.apiKey) {
+            throw new Error("API Key is required for account import");
+        }
+
+        const warmup = await warmupLabsForSessionRefresh();
+        if (!warmup.success) {
+            pushEvent("account_import_warmup", `Flow warmup failed: ${warmup.error}`, "warn");
+        }
+        const sessionResult = await getSessionTokenFromCookie();
+        if (!sessionResult.success) {
+            throw new Error("Google Labs session cookie is missing. Sign in to Flow in this Chrome profile first.");
+        }
+        const cookies = await getGoogleAccountCookies();
+        const foundNames = new Set(cookies.map((cookie) => cookie.name));
+        const hasAuthGroup = GOOGLE_AUTH_COOKIE_GROUPS.some((group) =>
+            group.every((name) => foundNames.has(name))
+        );
+        if (!hasAuthGroup) {
+            throw new Error(
+                `Google login cookies are incomplete. Found: ${Array.from(foundNames).join(", ") || "none"}`
+            );
+        }
+
+        const baseUrl = serverWebSocketToHttpBase(settings.serverUrl);
+        if (!baseUrl) throw new Error("Invalid WebSocket URL");
+        const response = await fetch(`${baseUrl}/api/extension/import-current-account`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${settings.apiKey}`,
+            },
+            body: JSON.stringify({
+                session_token: sessionResult.sessionToken,
+                google_cookies: JSON.stringify(cookies),
+                refresh_interval_minutes: settings.accountRefreshIntervalMinutes,
+            }),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || payload.success !== true) {
+            throw new Error(payload.detail || payload.message || `Import failed (HTTP ${response.status})`);
+        }
+
+        const message = `${reason}: ${payload.email || "unknown account"} (token ${payload.token_id || "?"})`;
+        persistAccountImportOutcome("success", message);
+        pushEvent("account_import_ok", `Google account synchronized (${message})`);
+        return payload;
+    } catch (error) {
+        const message = error && error.message ? error.message : String(error || "account_import_failed");
+        persistAccountImportOutcome("error", `${reason}: ${message}`);
+        pushEvent("account_import_error", `Google account sync failed: ${message}`, "error");
+        throw error;
+    } finally {
+        accountImportInFlight = false;
+        runtimeState.accountImportInFlight = false;
+    }
+}
+
+async function configureAccountImportAlarm() {
+    await new Promise((resolve) => chrome.alarms.clear(ACCOUNT_IMPORT_ALARM, () => resolve()));
+    const settings = await getSettings();
+    if (
+        settings.connectionMode !== "endUser" ||
+        !settings.apiKey ||
+        !settings.accountAutoImportEnabled
+    ) {
+        return;
+    }
+    chrome.alarms.create(ACCOUNT_IMPORT_ALARM, {
+        delayInMinutes: 1,
+        periodInMinutes: settings.accountAutoImportIntervalMinutes,
+    });
+    pushEvent(
+        "account_import_schedule",
+        `Automatic Google account sync scheduled every ${settings.accountAutoImportIntervalMinutes} minutes`
+    );
 }
 
 /** Public hosts should use wss://; keep ws:// for localhost-style hosts. */
@@ -373,6 +557,15 @@ function getSettings() {
                 autoRecycleWorkerTabOnCaptchaFailure:
                     stored.autoRecycleWorkerTabOnCaptchaFailure !== false,
                 workerRecaptchaSettleMs: clampWorkerRecaptchaSettleMs(stored.workerRecaptchaSettleMs),
+                accountAutoImportEnabled: stored.accountAutoImportEnabled === true,
+                accountAutoImportIntervalMinutes: clampAccountInterval(
+                    stored.accountAutoImportIntervalMinutes,
+                    30
+                ),
+                accountRefreshIntervalMinutes: clampAccountInterval(
+                    stored.accountRefreshIntervalMinutes,
+                    120
+                ),
             });
         });
     });
@@ -527,6 +720,10 @@ function resetRuntimeStatePartial() {
     runtimeState.recentGenerationJobs = [];
     runtimeState.generationInFlight = false;
     runtimeState.generationLastPollFallbackReason = "";
+    runtimeState.accountImportInFlight = false;
+    runtimeState.accountImportLastAt = 0;
+    runtimeState.accountImportLastStatus = "never";
+    runtimeState.accountImportLastMessage = "";
     runtimeState.allowCaptcha = true;
     runtimeState.allowSessionRefresh = true;
     runtimeState.allowGeneration = false;
@@ -561,6 +758,12 @@ function resetExtensionToDefaults(done) {
                         captchaWorkerAuthKey: DEFAULT_SETTINGS.captchaWorkerAuthKey,
                         refreshTokenId: DEFAULT_SETTINGS.refreshTokenId,
                         clientLabel: DEFAULT_SETTINGS.clientLabel,
+                        accountAutoImportEnabled: DEFAULT_SETTINGS.accountAutoImportEnabled,
+                        accountAutoImportIntervalMinutes: DEFAULT_SETTINGS.accountAutoImportIntervalMinutes,
+                        accountRefreshIntervalMinutes: DEFAULT_SETTINGS.accountRefreshIntervalMinutes,
+                        accountImportLastAt: 0,
+                        accountImportLastStatus: "never",
+                        accountImportLastMessage: "",
                         workerPageUrl: DEFAULT_WORKER_PAGE_URL,
                         usePersistentWorkerTab: DEFAULT_WORKER_SETTINGS.usePersistentWorkerTab,
                         autoRecycleWorkerTabOnCaptchaFailure: true,
@@ -1449,6 +1652,23 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
         closeSocket();
         connectWS();
     }
+    if (
+        changes.accountAutoImportEnabled ||
+        changes.accountAutoImportIntervalMinutes ||
+        changes.accountRefreshIntervalMinutes ||
+        changes.serverUrl ||
+        changes.apiKey ||
+        changes.connectionMode
+    ) {
+        configureAccountImportAlarm().catch((error) => {
+            pushEvent("account_import_schedule", error.message || "schedule_failed", "error");
+        });
+    }
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+    if (!alarm || alarm.name !== ACCOUNT_IMPORT_ALARM) return;
+    importCurrentGoogleAccount("scheduled").catch(() => {});
 });
 
 function mergeStateForStatus(settings) {
@@ -1495,6 +1715,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             .catch((err) => sendResponse({ success: false, error: err.message || "test_failed" }));
         return true;
     }
+    if (message.type === "import_current_account") {
+        importCurrentGoogleAccount("manual")
+            .then((payload) => sendResponse({ success: true, payload }))
+            .catch((err) => sendResponse({ success: false, error: err.message || "account_import_failed" }));
+        return true;
+    }
     if (message.type === "worker_tab_open") {
         getSettings()
             .then(async (s) => {
@@ -1533,4 +1759,7 @@ Promise.all([loadFlowSessionTokenHistoryFromStorage(), loadExtensionJobAndWorker
     validateStoredWorkerTab();
     pushEvent("startup", "Background worker started");
     connectWS();
+    configureAccountImportAlarm().catch((error) => {
+        pushEvent("account_import_schedule", error.message || "schedule_failed", "error");
+    });
 });

@@ -4,7 +4,10 @@ const DEFAULT_SETTINGS = {
   apiKey: "",
   captchaWorkerAuthKey: "",
   refreshTokenId: "",
-  clientLabel: ""
+  clientLabel: "",
+  accountAutoImportEnabled: false,
+  accountAutoImportIntervalMinutes: 30,
+  accountRefreshIntervalMinutes: 120
 };
 
 const DEFAULT_WORKER_PAGE_URL = "https://labs.google/fx/api/auth/providers";
@@ -21,7 +24,10 @@ const STORAGE_KEYS = {
   workerPageUrl: DEFAULT_WORKER_PAGE_URL,
   usePersistentWorkerTab: true,
   autoRecycleWorkerTabOnCaptchaFailure: true,
-  workerRecaptchaSettleMs: WORKER_RECAPTCHA_SETTLE_DEFAULT_MS
+  workerRecaptchaSettleMs: WORKER_RECAPTCHA_SETTLE_DEFAULT_MS,
+  accountAutoImportEnabled: false,
+  accountAutoImportIntervalMinutes: 30,
+  accountRefreshIntervalMinutes: 120
 };
 
 const $ = (id) => document.getElementById(id);
@@ -35,6 +41,12 @@ function clampWorkerRecaptchaSettleMs(raw) {
   if (i < 0) return 0;
   if (i > WORKER_RECAPTCHA_SETTLE_MAX_MS) return WORKER_RECAPTCHA_SETTLE_MAX_MS;
   return i;
+}
+
+function clampAccountInterval(raw, fallback) {
+  const value = parseInt(String(raw || ""), 10);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(5, Math.min(1440, value));
 }
 
 function normalizeWorkerPageUrl(raw) {
@@ -65,7 +77,10 @@ function normalizeSettings(values) {
     workerPageUrl: normalizeWorkerPageUrl(values.workerPageUrl),
     usePersistentWorkerTab: !!values.usePersistentWorkerTab,
     autoRecycleWorkerTabOnCaptchaFailure: values.autoRecycleWorkerTabOnCaptchaFailure !== false,
-    workerRecaptchaSettleMs: clampWorkerRecaptchaSettleMs(values.workerRecaptchaSettleMs)
+    workerRecaptchaSettleMs: clampWorkerRecaptchaSettleMs(values.workerRecaptchaSettleMs),
+    accountAutoImportEnabled: values.accountAutoImportEnabled === true,
+    accountAutoImportIntervalMinutes: clampAccountInterval(values.accountAutoImportIntervalMinutes, 30),
+    accountRefreshIntervalMinutes: clampAccountInterval(values.accountRefreshIntervalMinutes, 120)
   };
 }
 
@@ -172,6 +187,9 @@ function applyLoadedSettings(stored, inferredMode) {
   $("workerRecaptchaSettleMs").value = String(settings.workerRecaptchaSettleMs);
   $("usePersistentWorkerTab").checked = settings.usePersistentWorkerTab;
   $("autoRecycleWorkerTabOnCaptchaFailure").checked = settings.autoRecycleWorkerTabOnCaptchaFailure;
+  $("accountAutoImportEnabled").checked = settings.accountAutoImportEnabled;
+  $("accountAutoImportIntervalMinutes").value = String(settings.accountAutoImportIntervalMinutes);
+  $("accountRefreshIntervalMinutes").value = String(settings.accountRefreshIntervalMinutes);
   setActiveMode(settings.connectionMode);
   updateWorkerActionButtons();
 }
@@ -196,7 +214,10 @@ function saveSettings() {
       serverUrl,
       connectionMode: "endUser",
       apiKey,
-      clientLabel: ($("clientLabel").value || "").trim()
+      clientLabel: ($("clientLabel").value || "").trim(),
+      accountAutoImportEnabled: $("accountAutoImportEnabled").checked,
+      accountAutoImportIntervalMinutes: clampAccountInterval($("accountAutoImportIntervalMinutes").value, 30),
+      accountRefreshIntervalMinutes: clampAccountInterval($("accountRefreshIntervalMinutes").value, 120)
     };
     chrome.storage.local.set(payload, () => {
       if (chrome.runtime.lastError) {
@@ -256,6 +277,62 @@ function saveSettings() {
     $("apiKey").value = "";
     $("clientLabel").value = "";
   });
+}
+
+async function importCurrentAccount() {
+  if (getActiveMode() !== "endUser") {
+    setStatus("Switch to End User Worker mode before importing an account.", true);
+    return;
+  }
+
+  const serverUrl = normalizeWebSocketUrl(($("serverUrl").value || "").trim());
+  const apiKey = ($("apiKey").value || "").trim();
+  if (!isValidWsUrl(serverUrl)) {
+    setStatus("WebSocket URL must start with ws:// or wss://.", true);
+    return;
+  }
+  if (!apiKey) {
+    setStatus("API Key is required for account import.", true);
+    return;
+  }
+
+  const importButton = $("importAccountBtn");
+  importButton.disabled = true;
+  setStatus("Opening Flow and importing the current Google account...");
+  const settings = {
+    serverUrl,
+    connectionMode: "endUser",
+    apiKey,
+    clientLabel: ($("clientLabel").value || "").trim(),
+    accountAutoImportEnabled: $("accountAutoImportEnabled").checked,
+    accountAutoImportIntervalMinutes: clampAccountInterval($("accountAutoImportIntervalMinutes").value, 30),
+    accountRefreshIntervalMinutes: clampAccountInterval($("accountRefreshIntervalMinutes").value, 120)
+  };
+
+  try {
+    await new Promise((resolve, reject) => {
+      chrome.storage.local.set(settings, () => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        resolve();
+      });
+    });
+    const response = await chrome.runtime.sendMessage({ type: "import_current_account" });
+    if (!response || response.success !== true) {
+      throw new Error((response && response.error) || "The extension did not return an import result");
+    }
+    const payload = response.payload || {};
+    setStatus(
+      `Account synchronized: ${payload.email || "unknown"}; added ${payload.added || 0}, updated ${payload.updated || 0}, token ${payload.token_id || "?"}.`
+    );
+    refreshRuntimeStatus();
+  } catch (error) {
+    setStatus(`Account import failed: ${error.message || error}`, true);
+  } finally {
+    importButton.disabled = false;
+  }
 }
 
 function saveWorkerSettings() {
@@ -456,6 +533,10 @@ function renderStatusCards(state) {
   const persistent = state.usePersistentWorkerTab ? "on" : "off";
   const workerTabId =
     state.workerTabId != null && state.workerTabId !== "" ? String(state.workerTabId) : "(none)";
+  const accountImportAt = state.accountImportLastAt
+    ? new Date(Number(state.accountImportLastAt)).toLocaleString()
+    : "never";
+  const accountImportStatus = state.accountImportLastStatus || "never";
 
   const items = [
     ["Connection", ws, false],
@@ -478,6 +559,9 @@ function renderStatusCards(state) {
     ["Register error", registerError, registerError !== "-"],
     ["Last error", lastError, lastError !== "-"],
     ["Generation in-flight", state.generationInFlight ? "yes" : "no", false],
+    ["Account sync", state.accountImportInFlight ? "running" : accountImportStatus, accountImportStatus === "error"],
+    ["Last account sync", accountImportAt, false],
+    ["Account sync detail", state.accountImportLastMessage || "-", accountImportStatus === "error"],
   ];
 
   cardsEl.innerHTML = items
@@ -695,6 +779,7 @@ document.addEventListener("DOMContentLoaded", () => {
   $("saveWorkerBtn").addEventListener("click", saveWorkerSettings);
   $("reconnectBtn").addEventListener("click", reconnectNow);
   $("testBtn").addEventListener("click", runTokenTest);
+  $("importAccountBtn").addEventListener("click", importCurrentAccount);
   $("resetBtn").addEventListener("click", runResetExtension);
   $("usePersistentWorkerTab").addEventListener("change", updateWorkerActionButtons);
   $("workerOpenBtn").addEventListener("click", () =>

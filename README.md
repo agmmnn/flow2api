@@ -43,18 +43,19 @@ Flow now requires an additional CAPTCHA. You can solve it through a browser or a
 - Runway web-task integration is available through the admin `Runway` tab, `runway-*` models, and `/v1/runway/*` routes. See [`docs/runway.md`](./docs/runway.md). It includes a manifest-backed model registry, live feature sync, real Runway uploads/datasets, image/video/audio/upscale task builders, OpenAI-compatible dispatch, voices, estimates, cancel, async polling, and cache mirroring.
 - Production performance, Railway Redis, WebSocket events, and seven-day retention are documented in [`docs/performance-redis-rollout.md`](./docs/performance-redis-rollout.md). The PostgreSQL 16 bridge, migration, encrypted Google Drive backup, cutover, and rollback procedure is in [`docs/postgres-migration-runbook.md`](./docs/postgres-migration-runbook.md).
 
-- Browser extension for automatic ST refresh: [Flow2API-Token-Updater](https://github.com/TheSmallHanCat/Flow2API-Token-Updater)
+- The bundled [`extension/`](./extension/) supports CAPTCHA work, current-account import, scheduled ST/cookie synchronization, and token-bound refresh workers.
 
 ### Chrome Extension per-key isolation setup
 
-When using captcha method `extension`, Flow2API keeps one global captcha mode but isolates workers per managed API key.
+When using captcha method `extension`, Flow2API keeps one global captcha mode but isolates end-user workers per managed API key.
 
-1. Create a managed API key in admin panel (`/api/admin/managed-apikeys`).
-2. Set the token/account `extension_route_key` to a unique value (for example `9223`).
-3. In Chrome extension options, set:
-   - backend API key
-   - same route key as the token/account
-4. Confirm in admin extension workers page (`/api/admin/extension/workers`) that route and managed key binding match. The server resolves managed key ID from the API key on connect.
+1. Load [`extension/`](./extension/) as an unpacked Chrome extension.
+2. Create a managed API key in **API key manager**. Add `tokens:import` if this extension may add or refresh the Google account signed in to its Chrome profile.
+3. Select **End User Worker**, enter the WebSocket URL and managed API key, then save the connection.
+4. Click **Save / Import Current Google Account** to create or update the dashboard token by Google email. The imported account is automatically assigned to that managed key, uses `protocol` refresh, and stores the required Google cookies.
+5. Optionally enable automatic account sync and choose its interval. This keeps the account current without a separate Refresh Worker profile.
+
+Use **Captcha Worker** for server-wide CAPTCHA capacity, or **Refresh Worker** only when binding a dedicated Chrome profile to an already existing Token ID.
 
 If a managed key has no matching extension worker online, requests wait up to `extension_queue_wait_timeout_seconds` and then fail (no gateway fallback).
 

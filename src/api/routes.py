@@ -1,7 +1,7 @@
 """API routes for OpenAI-compatible and Gemini generateContent endpoints."""
 
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 import asyncio
 import base64
@@ -142,6 +142,14 @@ class RunwayMediaInput(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
+class ExtensionAccountImportRequest(BaseModel):
+    """Credentials captured from the currently signed-in Chrome profile."""
+
+    session_token: str = Field(min_length=1, max_length=16_384)
+    google_cookies: str = Field(min_length=2, max_length=262_144)
+    refresh_interval_minutes: int = Field(default=120, ge=5, le=1_440)
+
+
 class RunwayTaskCreateRequest(BaseModel):
     model: str
     prompt: str = ""
@@ -268,6 +276,13 @@ def _require_geminigen_scope(auth_ctx: AuthContext) -> None:
     if auth_ctx.key_id is None:
         raise HTTPException(status_code=403, detail="Managed API key required for GeminiGen")
     _require_managed_scope(auth_ctx, "geminigen:generate")
+
+
+def _require_token_import_scope(auth_ctx: AuthContext) -> None:
+    """Restrict browser credential imports to explicitly trusted API keys."""
+    if auth_ctx.is_legacy or "*" in auth_ctx.scopes or "tokens:import" in auth_ctx.scopes:
+        return
+    raise HTTPException(status_code=403, detail="Missing scope: tokens:import")
 
 
 async def _logged_managed_adobe_call(
@@ -2313,6 +2328,132 @@ async def create_flow_project(
         "total": len(created_projects),
         "failed_accounts": failed_accounts,
     }
+
+
+@router.post("/api/extension/import-current-account")
+async def extension_import_current_account(
+    body: ExtensionAccountImportRequest,
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+):
+    """Add or update the Google account signed in to the extension's Chrome profile."""
+    _require_token_import_scope(auth_ctx)
+    handler = _ensure_generation_handler()
+    token_manager = handler.token_manager
+    database = token_manager.db
+
+    session_token = body.session_token.strip()
+    try:
+        raw_cookies = json.loads(body.google_cookies)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="google_cookies must be valid JSON") from exc
+    if not isinstance(raw_cookies, list) or not raw_cookies:
+        raise HTTPException(status_code=400, detail="google_cookies must be a non-empty list")
+
+    normalized_cookies = []
+    for raw_cookie in raw_cookies:
+        if not isinstance(raw_cookie, dict):
+            continue
+        name = str(raw_cookie.get("name") or "").strip()
+        value = str(raw_cookie.get("value") or "").strip()
+        if not name or not value:
+            continue
+        normalized_cookies.append(
+            {
+                "name": name,
+                "value": value,
+                "domain": str(raw_cookie.get("domain") or ""),
+                "path": str(raw_cookie.get("path") or "/"),
+                "expirationDate": raw_cookie.get("expirationDate"),
+            }
+        )
+    if not normalized_cookies:
+        raise HTTPException(status_code=400, detail="google_cookies contains no usable cookies")
+    google_cookies = json.dumps(normalized_cookies, ensure_ascii=False, separators=(",", ":"))
+
+    try:
+        result = await token_manager.flow_client.st_to_at(session_token)
+        access_token = str(result.get("access_token") or "").strip()
+        user_info = result.get("user") or {}
+        email = str(user_info.get("email") or "").strip()
+        expires = result.get("expires")
+        if not access_token or not email:
+            raise HTTPException(status_code=400, detail="Could not resolve the Google account from the session token")
+
+        at_expires = None
+        if expires:
+            try:
+                at_expires = datetime.fromisoformat(str(expires).replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                at_expires = None
+        if at_expires is not None:
+            aware_expires = at_expires if at_expires.tzinfo else at_expires.replace(tzinfo=timezone.utc)
+            if aware_expires <= datetime.now(timezone.utc):
+                raise HTTPException(
+                    status_code=400,
+                    detail="The Google Labs session is expired; reopen Flow and import again",
+                )
+
+        existing = await database.get_token_by_email(email)
+        common_fields = {
+            "protocol_mode": "protocol",
+            "google_cookies": google_cookies,
+            "auto_refresh_enabled": True,
+            "refresh_interval_minutes": body.refresh_interval_minutes,
+        }
+        if existing is not None:
+            await token_manager.update_token(
+                token_id=existing.id,
+                st=session_token,
+                at=access_token,
+                at_expires=at_expires,
+                **common_fields,
+            )
+            token_id = int(existing.id)
+            added = 0
+            updated = 1
+        else:
+            created = await token_manager.add_token(
+                st=session_token,
+                remark="Imported by Chrome extension",
+                image_enabled=True,
+                video_enabled=True,
+                image_concurrency=-1,
+                video_concurrency=-1,
+                **common_fields,
+            )
+            token_id = int(created.id)
+            added = 1
+            updated = 0
+
+        await database.update_token(
+            token_id,
+            last_st_refresh_result="Chrome extension synchronized the current Google account",
+        )
+
+        if auth_ctx.key_id is not None:
+            assigned_accounts = set(await database.get_api_key_account_ids(auth_ctx.key_id))
+            if token_id not in assigned_accounts:
+                assigned_accounts.add(token_id)
+                await database.update_api_key(
+                    auth_ctx.key_id,
+                    account_ids=sorted(assigned_accounts),
+                )
+                if auth_core.api_key_manager is not None:
+                    await auth_core.api_key_manager.invalidate(auth_ctx.key_id)
+
+        return {
+            "success": True,
+            "added": added,
+            "updated": updated,
+            "email": email,
+            "token_id": token_id,
+            "expires": expires,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        debug_logger.log_error(f"[EXTENSION_IMPORT] Current Google account import failed: {exc}")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/api/extension/generation-upload")

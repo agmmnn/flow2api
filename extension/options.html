@@ -558,6 +558,22 @@
         <div class="form-group">
           <label for="apiKey">API Key</label>
           <input id="apiKey" type="password" placeholder="Paste managed API key here">
+          <p class="hint">Managed keys need the <code>tokens:import</code> scope to import this Chrome profile.</p>
+        </div>
+        <div class="form-group">
+          <label for="accountRefreshIntervalMinutes">Token refresh interval (minutes)</label>
+          <input id="accountRefreshIntervalMinutes" type="number" min="5" max="1440" step="1" value="120">
+        </div>
+        <div class="checkbox-row">
+          <input type="checkbox" id="accountAutoImportEnabled">
+          <label for="accountAutoImportEnabled">Automatically sync the current Google account</label>
+        </div>
+        <div class="form-group">
+          <label for="accountAutoImportIntervalMinutes">Account sync interval (minutes)</label>
+          <input id="accountAutoImportIntervalMinutes" type="number" min="5" max="1440" step="1" value="30">
+        </div>
+        <div class="btn-row">
+          <button id="importAccountBtn" type="button" class="secondary">Save / Import Current Google Account</button>
         </div>
       </div>
 
