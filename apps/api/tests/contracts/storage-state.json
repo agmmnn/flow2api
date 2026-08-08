@@ -1,0 +1,22 @@
+{
+  "binding": {
+    "api_key_matches": true
+  },
+  "cache": {
+    "media_type": "application/octet-stream",
+    "size_bytes": 123
+  },
+  "managed_key": {
+    "account_count": 1,
+    "is_active": true
+  },
+  "project": {
+    "name": "Storage contract",
+    "token_matches": true
+  },
+  "token": {
+    "credits": 42,
+    "email": "storage-contract@example.com",
+    "is_active": false
+  }
+}

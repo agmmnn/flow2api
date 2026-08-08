@@ -3,6 +3,7 @@ import base64
 import json
 import os
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -22,6 +23,9 @@ POSTGRES_URL = os.environ.get("FLOW2API_TEST_POSTGRES_URL") or os.environ.get(
     "DATABASE_PUBLIC_URL"
 )
 REDIS_URL = os.environ.get("FLOW2API_TEST_REDIS_URL") or os.environ.get("FLOW2API_REDIS_URL")
+STORAGE_CONTRACT = json.loads(
+    (Path(__file__).parent / "contracts" / "storage-state.json").read_text(encoding="utf-8")
+)
 
 
 pytestmark = pytest.mark.skipif(
@@ -41,30 +45,35 @@ async def test_postgres_storage_contract_roundtrip(monkeypatch):
     await database.cache_schema_capabilities()
     try:
         token_id = await database.add_token(
-            Token(st=f"st-{uuid.uuid4().hex}", email="postgres-contract@example.com")
+            Token(st=f"st-{uuid.uuid4().hex}", email=STORAGE_CONTRACT["token"]["email"])
         )
         token = await database.get_token(token_id)
         assert token is not None
-        assert token.email == "postgres-contract@example.com"
+        assert token.email == STORAGE_CONTRACT["token"]["email"]
         assert token.is_active is True
 
-        await database.update_token(token_id, is_active=False, credits=42)
+        await database.update_token(
+            token_id,
+            is_active=STORAGE_CONTRACT["token"]["is_active"],
+            credits=STORAGE_CONTRACT["token"]["credits"],
+        )
         updated = await database.get_token(token_id)
         assert updated is not None
-        assert updated.is_active is False
-        assert updated.credits == 42
+        assert updated.is_active is STORAGE_CONTRACT["token"]["is_active"]
+        assert updated.credits == STORAGE_CONTRACT["token"]["credits"]
 
         project_id = f"project-{uuid.uuid4().hex}"
         await database.add_project(
             Project(
                 project_id=project_id,
                 token_id=token_id,
-                project_name="PostgreSQL contract",
+                project_name=STORAGE_CONTRACT["project"]["name"],
             )
         )
         project = await database.get_project_by_id(project_id)
         assert project is not None
         assert project.token_id == token_id
+        assert project.project_name == STORAGE_CONTRACT["project"]["name"]
 
         task_id = f"task-{uuid.uuid4().hex}"
         await database.create_task(
@@ -108,7 +117,8 @@ async def test_postgres_storage_contract_roundtrip(monkeypatch):
         )
         key_detail = await database.get_api_key_detail(key_id)
         assert key_detail is not None
-        assert key_detail["is_active"] is True
+        assert key_detail["is_active"] is STORAGE_CONTRACT["managed_key"]["is_active"]
+        assert len(key_detail["account_ids"]) == STORAGE_CONTRACT["managed_key"]["account_count"]
         assert key_detail["account_ids"] == [token_id]
 
         assert await database.count_request_logs(search="postgres-contract") == 1
@@ -161,15 +171,17 @@ async def test_postgres_storage_contract_roundtrip(monkeypatch):
             filename="postgres-contract.bin",
             api_key_id=key_id,
             token_id=token_id,
-            media_type="application/octet-stream",
+            media_type=STORAGE_CONTRACT["cache"]["media_type"],
             source_url="https://example.com/source",
             flow_project_id=project_id,
-            size_bytes=123,
+            size_bytes=STORAGE_CONTRACT["cache"]["size_bytes"],
         )
         cache_file = await database.get_cache_file_for_api_key(
             "postgres-contract.bin", key_id
         )
-        assert cache_file is not None and cache_file["size_bytes"] == 123
+        assert cache_file is not None
+        assert cache_file["media_type"] == STORAGE_CONTRACT["cache"]["media_type"]
+        assert cache_file["size_bytes"] == STORAGE_CONTRACT["cache"]["size_bytes"]
 
         await database.insert_api_key_audit_log(
             api_key_id=key_id,

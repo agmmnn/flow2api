@@ -4,10 +4,10 @@ import re
 from pathlib import Path
 
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+API_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_ROOTS = (
-    REPOSITORY_ROOT / "tests" / "fixtures",
-    REPOSITORY_ROOT / "tests" / "contracts",
+    API_ROOT / "tests" / "fixtures",
+    API_ROOT / "tests" / "contracts",
 )
 TEXT_SUFFIXES = {".csv", ".html", ".json", ".md", ".txt", ".xml", ".yaml", ".yml"}
 FORBIDDEN_PATTERNS = {
@@ -29,6 +29,6 @@ def test_contract_fixtures_do_not_contain_credentials() -> None:
             content = path.read_text(encoding="utf-8", errors="replace")
             for label, pattern in FORBIDDEN_PATTERNS.items():
                 if pattern.search(content):
-                    findings.append(f"{path.relative_to(REPOSITORY_ROOT)}: {label}")
+                    findings.append(f"{path.relative_to(API_ROOT)}: {label}")
 
     assert not findings, "Sensitive fixture content detected:\n" + "\n".join(findings)

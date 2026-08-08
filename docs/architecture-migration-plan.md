@@ -1,6 +1,6 @@
 # Flow2API Architecture Migration Plan
 
-Status: in progress; Phases 1-4 are complete and Phase 5 is next.
+Status: in progress; Phases 1-5 are complete and Phase 6 is next.
 
 This plan restructures Flow2API as a modular monolith in a monorepo. It avoids a full rewrite, preserves existing API contracts, and keeps these commands working throughout the migration:
 
@@ -176,12 +176,12 @@ Exit criteria:
 
 ## Phase 5: Characterization coverage
 
-- [ ] Freeze representative OpenAI-compatible HTTP contracts.
-- [ ] Cover streaming and non-streaming generation responses.
-- [ ] Cover token import, refresh, project selection, and cache behavior.
-- [ ] Capture SQLite and PostgreSQL state transitions at repository seams.
-- [ ] Model extension worker registration, routing, reconnect, CAPTCHA, refresh, and generation as sanitized event transcripts.
-- [ ] Add a sanitizer test that rejects sensitive fixture content.
+- [x] Freeze representative OpenAI-compatible HTTP contracts.
+- [x] Cover streaming and non-streaming generation responses.
+- [x] Cover token import, refresh, project selection, and cache behavior.
+- [x] Capture SQLite and PostgreSQL state transitions at repository seams.
+- [x] Model extension worker registration, routing, reconnect, CAPTCHA, refresh, and generation as sanitized event transcripts.
+- [x] Add a sanitizer test that rejects sensitive fixture content.
 
 Exit criteria:
 
