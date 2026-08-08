@@ -15,20 +15,8 @@ from ..workers.extension.models import (
     NoExtensionGenerationWorkerError,
     normalize_extension_captcha_user_agent,
 )
+from ..workers.extension.routing import ExtensionWorkerRouting
 from ..workers.extension.uploads import GenerationUploadStore
-
-
-# Dedicated-worker hybrid routing (health + score + RR tie-break)
-_DEDICATED_EMA_ALPHA = 0.25
-_DEDICATED_TIE_DELTA = 5.0
-_DEDICATED_FAILURE_WINDOW_SEC = 30.0
-_DEDICATED_COOLDOWN_SEC = 20.0
-_DEDICATED_FAILS_FOR_COOLDOWN = 2
-_DEDICATED_SCORE_WEIGHT_SUCCESS = 100.0
-_DEDICATED_SCORE_WEIGHT_INFLIGHT = 15.0
-_DEDICATED_SCORE_WEIGHT_EMA_DIVISOR = 50.0
-_DEDICATED_SCORE_WEIGHT_TIMEOUT = 20.0
-_DEDICATED_TIMEOUT_WINDOW_SEC = 60.0
 
 
 class ExtensionCaptchaService:
@@ -52,11 +40,11 @@ class ExtensionCaptchaService:
         # Round-robin cursor per managed API key (see _queue_key). Lock-free counter:
         # concurrent picks may occasionally duplicate; modulo on read keeps indices valid.
         self._rr_cursor: dict[str, int] = {}
-        # Hybrid dedicated-worker routing: stats keyed by worker_session_id
-        self._dedicated_worker_stats: dict[str, DedicatedWorkerStats] = {}
-        # RR cursor among top-scoring dedicated workers per token_id (keys dedicated:{id}:captcha|generation)
-        self._dedicated_hybrid_rr: dict[str, int] = {}
-        self._dedicated_stats_lock = asyncio.Lock()
+        self.worker_routing = ExtensionWorkerRouting()
+        # Compatibility aliases for in-flight callers during the strangler migration.
+        self._dedicated_worker_stats = self.worker_routing.worker_stats
+        self._dedicated_hybrid_rr = self.worker_routing.round_robin
+        self._dedicated_stats_lock = self.worker_routing.lock
         self.generation_uploads = GenerationUploadStore()
 
     async def register_generation_upload_slot(
@@ -77,31 +65,13 @@ class ExtensionCaptchaService:
         return await self.generation_uploads.resolve(req_id=req_id, upload_id=upload_id, base_payload=base_payload)
 
     def _dedicated_stats(self, worker_session_id: str) -> DedicatedWorkerStats:
-        sid = (worker_session_id or "").strip()
-        if not sid:
-            sid = "_"
-        if sid not in self._dedicated_worker_stats:
-            self._dedicated_worker_stats[sid] = DedicatedWorkerStats()
-        return self._dedicated_worker_stats[sid]
+        return self.worker_routing.stats(worker_session_id)
 
     def _prune_timestamps(self, stamps: List[float], now: float, window: float) -> None:
-        cutoff = now - window
-        stamps[:] = [t for t in stamps if t >= cutoff]
+        self.worker_routing.prune_timestamps(stamps, now, window)
 
     def _dedicated_worker_score(self, stats: DedicatedWorkerStats, now: float) -> float:
-        self._prune_timestamps(stats.fail_timestamps, now, _DEDICATED_FAILURE_WINDOW_SEC)
-        self._prune_timestamps(stats.timeout_timestamps, now, _DEDICATED_TIMEOUT_WINDOW_SEC)
-        total = stats.success_count + stats.fail_count
-        success_rate = (stats.success_count / total) if total > 0 else 1.0
-        ema = stats.ema_latency_ms if stats.has_latency_sample else 0.0
-        timeouts_recent = len(stats.timeout_timestamps)
-        score = (
-            success_rate * _DEDICATED_SCORE_WEIGHT_SUCCESS
-            - stats.inflight_count * _DEDICATED_SCORE_WEIGHT_INFLIGHT
-            - (ema / _DEDICATED_SCORE_WEIGHT_EMA_DIVISOR)
-            - timeouts_recent * _DEDICATED_SCORE_WEIGHT_TIMEOUT
-        )
-        return float(score)
+        return self.worker_routing.score(stats, now)
 
     def _pick_dedicated_connection_hybrid(
         self,
@@ -110,59 +80,18 @@ class ExtensionCaptchaService:
         *,
         exclude_worker_session_ids: Optional[Set[str]] = None,
         selection_meta_out: Optional[Dict[str, Any]] = None,
-        eligible: Optional[Callable[[ExtensionConnection], bool]] = None,
+        eligible=None,
         hybrid_rr_suffix: str = "captcha",
     ) -> Optional[ExtensionConnection]:
-        tid = int(preferred_token_id)
-        exclude = exclude_worker_session_ids or set()
-        eligible_fn = eligible or self._conn_eligible_for_captcha
-        candidates = [
-            c
-            for c in pool
-            if c.refresh_token_id is not None
-            and int(c.refresh_token_id) == tid
-            and c.worker_session_id not in exclude
-            and eligible_fn(c)
-        ]
-        if not candidates:
-            return None
-        now = time.time()
-        healthy: list[ExtensionConnection] = []
-        for c in candidates:
-            st = self._dedicated_stats(c.worker_session_id)
-            if st.cooldown_until <= now:
-                healthy.append(c)
-        pick_from = healthy if healthy else list(candidates)
-
-        scored: list[tuple[float, ExtensionConnection]] = []
-        for c in pick_from:
-            st = self._dedicated_stats(c.worker_session_id)
-            scored.append((self._dedicated_worker_score(st, now), c))
-        best_score = max(s[0] for s in scored)
-        tied = [c for s, c in scored if abs(s - best_score) <= _DEDICATED_TIE_DELTA]
-        tied_sorted = sorted(tied, key=lambda c: c.worker_session_id)
-        rr_key = f"dedicated:{tid}:{hybrid_rr_suffix}"
-        n = len(tied_sorted)
-        idx = self._dedicated_hybrid_rr.get(rr_key, 0) % n
-        chosen = tied_sorted[idx]
-        self._dedicated_hybrid_rr[rr_key] = (idx + 1) % n
-
-        if selection_meta_out is not None:
-            selection_meta_out.clear()
-            selection_meta_out["dedicated_hybrid"] = True
-            selection_meta_out["dedicated_hybrid_suffix"] = hybrid_rr_suffix
-            selection_meta_out["dedicated_token_id"] = tid
-            selection_meta_out["dedicated_score"] = round(best_score, 2)
-            selection_meta_out["dedicated_rr_idx"] = idx
-            selection_meta_out["dedicated_pool_size"] = len(candidates)
-            selection_meta_out["dedicated_pick_from"] = len(pick_from)
-
-        debug_logger.log_info(
-            "[Extension Captcha] Dedicated hybrid pick: "
-            f"token_id={tid}, pool={hybrid_rr_suffix}, worker_session_id={chosen.worker_session_id}, score={best_score:.2f}, "
-            f"rr_idx={idx}/{n}, candidates={len(candidates)}, healthy={len(healthy)}"
+        return self.worker_routing.pick_dedicated(
+            pool,
+            preferred_token_id,
+            exclude_worker_session_ids=exclude_worker_session_ids,
+            selection_meta_out=selection_meta_out,
+            eligible=eligible or self._conn_eligible_for_captcha,
+            hybrid_rr_suffix=hybrid_rr_suffix,
+            log_info=debug_logger.log_info,
         )
-        return chosen
 
     def _pick_captcha_worker_global_hybrid(
         self,
@@ -171,75 +100,19 @@ class ExtensionCaptchaService:
         exclude_worker_session_ids: Optional[Set[str]] = None,
         selection_meta_out: Optional[Dict[str, Any]] = None,
     ) -> Optional[ExtensionConnection]:
-        exclude = exclude_worker_session_ids or set()
-        candidates = [
-            c
-            for c in pool
-            if c.captcha_worker_id is not None
-            and c.worker_session_id not in exclude
-            and self._conn_eligible_for_captcha(c)
-        ]
-        if not candidates:
-            return None
-        now = time.time()
-        healthy: list[ExtensionConnection] = []
-        for c in candidates:
-            st = self._dedicated_stats(c.worker_session_id)
-            if st.cooldown_until <= now:
-                healthy.append(c)
-        pick_from = healthy if healthy else list(candidates)
-
-        scored: list[tuple[float, ExtensionConnection]] = []
-        for c in pick_from:
-            st = self._dedicated_stats(c.worker_session_id)
-            scored.append((self._dedicated_worker_score(st, now), c))
-        best_score = max(s[0] for s in scored)
-        tied = [c for s, c in scored if abs(s - best_score) <= _DEDICATED_TIE_DELTA]
-        tied_sorted = sorted(tied, key=lambda c: c.worker_session_id)
-        rr_key = "captcha_worker:global"
-        n = len(tied_sorted)
-        idx = self._dedicated_hybrid_rr.get(rr_key, 0) % n
-        chosen = tied_sorted[idx]
-        self._dedicated_hybrid_rr[rr_key] = (idx + 1) % n
-
-        if selection_meta_out is not None:
-            selection_meta_out.clear()
-            selection_meta_out["captcha_worker_pool"] = True
-            selection_meta_out["captcha_worker_score"] = round(best_score, 2)
-            selection_meta_out["captcha_worker_rr_idx"] = idx
-            selection_meta_out["captcha_worker_pool_size"] = len(candidates)
-            selection_meta_out["captcha_worker_pick_from"] = len(pick_from)
-
-        debug_logger.log_info(
-            "[Extension Captcha] Global captcha worker pick: "
-            f"worker_session_id={chosen.worker_session_id}, captcha_worker_id={chosen.captcha_worker_id}, "
-            f"score={best_score:.2f}, rr_idx={idx}/{n}, candidates={len(candidates)}, healthy={len(healthy)}"
+        return self.worker_routing.pick_global_captcha_worker(
+            pool,
+            exclude_worker_session_ids=exclude_worker_session_ids,
+            selection_meta_out=selection_meta_out,
+            eligible=self._conn_eligible_for_captcha,
+            log_info=debug_logger.log_info,
         )
-        return chosen
 
     def _dedicated_record_failure_locked(self, stats: DedicatedWorkerStats, now: float, *, is_timeout: bool) -> None:
-        """Caller must hold ``_dedicated_stats_lock``."""
-        if is_timeout:
-            stats.timeout_timestamps.append(now)
-            self._prune_timestamps(stats.timeout_timestamps, now, _DEDICATED_TIMEOUT_WINDOW_SEC)
-            stats.cooldown_until = max(stats.cooldown_until, now + _DEDICATED_COOLDOWN_SEC)
-            return
-        stats.fail_count += 1
-        stats.fail_timestamps.append(now)
-        self._prune_timestamps(stats.fail_timestamps, now, _DEDICATED_FAILURE_WINDOW_SEC)
-        if len(stats.fail_timestamps) >= _DEDICATED_FAILS_FOR_COOLDOWN:
-            stats.cooldown_until = max(stats.cooldown_until, now + _DEDICATED_COOLDOWN_SEC)
+        self.worker_routing.record_failure(stats, now, is_timeout=is_timeout)
 
     def _dedicated_record_success_locked(self, stats: DedicatedWorkerStats, latency_ms: float) -> None:
-        """Caller must hold ``_dedicated_stats_lock``."""
-        stats.success_count += 1
-        if stats.has_latency_sample:
-            stats.ema_latency_ms = (
-                _DEDICATED_EMA_ALPHA * latency_ms + (1.0 - _DEDICATED_EMA_ALPHA) * stats.ema_latency_ms
-            )
-        else:
-            stats.ema_latency_ms = latency_ms
-            stats.has_latency_sample = True
+        self.worker_routing.record_success(stats, latency_ms)
 
     @classmethod
     async def get_instance(cls, db=None) -> "ExtensionCaptchaService":

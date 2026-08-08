@@ -273,10 +273,11 @@ Exit criteria:
 - [ ] Separate static deployment settings from mutable database-backed operational settings.
 - [ ] Introduce abstractions only where multiple implementations or test seams justify them.
 
-Phase 9 is underway. Extension worker connection/result models and the bounded
-large-generation-response upload side channel have moved to `workers/extension`;
-the existing service exposes compatibility delegates while registry, routing, and
-job state machines are separated in subsequent slices.
+Phase 9 is underway. Extension worker connection/result models, the bounded
+large-generation-response upload side channel, and health-aware worker routing have
+moved to `workers/extension`. Routing now owns worker scoring, cooldowns, latency
+tracking, and round-robin cursors; the existing service exposes compatibility delegates
+while the connection registry and job state machines are separated in subsequent slices.
 
 Exit criteria:
 
