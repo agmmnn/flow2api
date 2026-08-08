@@ -11,6 +11,14 @@ from ..core.logger import debug_logger
 from ..core.config import config, get_runtime_tmp_dir
 from ..core.monitoring import record_generation_result
 from ..core.models import RequestLog, Task, Token
+from ..generation import (
+    ImageGenerationPipeline,
+    VideoGenerationPipeline,
+    create_generation_result,
+    create_response_state,
+    mark_generation_failed,
+    mark_generation_succeeded,
+)
 from ..core.account_tiers import (
     PAYGATE_TIER_NOT_PAID,
     get_paygate_tier_label,
@@ -1111,24 +1119,16 @@ class GenerationHandler:
             cache_repository=cache_repository,
         )
         self.extension_generation_service = ExtensionGenerationService()
+        self.image_pipeline = ImageGenerationPipeline(self)
+        self.video_pipeline = VideoGenerationPipeline(self)
 
     def _create_generation_result(self) -> Dict[str, Any]:
         """????????????????"""
-        return dict(
-            success=False,
-            error_message=None,
-            error_emitted=False,
-            error_status_code=500,
-            error_extra={},
-        )
+        return create_generation_result()
 
     def _create_response_state(self) -> Dict[str, Any]:
         """为单次请求创建独立的响应状态，避免并发请求互相污染。"""
-        return {
-            "url": None,
-            "generated_assets": None,
-            "base_url": None,
-        }
+        return create_response_state()
 
     def _mark_generation_failed(
         self,
@@ -1139,21 +1139,16 @@ class GenerationHandler:
         error_extra: Optional[Dict[str, Any]] = None,
     ):
         """????????????????????"""
-        if isinstance(generation_result, dict):
-            generation_result["success"] = False
-            generation_result["error_message"] = error_message
-            generation_result["error_emitted"] = True
-            generation_result["error_status_code"] = int(status_code)
-            generation_result["error_extra"] = dict(error_extra or {})
+        mark_generation_failed(
+            generation_result,
+            error_message,
+            status_code=status_code,
+            error_extra=error_extra,
+        )
 
     def _mark_generation_succeeded(self, generation_result: Optional[Dict[str, Any]]):
         """???????"""
-        if isinstance(generation_result, dict):
-            generation_result["success"] = True
-            generation_result["error_message"] = None
-            generation_result["error_emitted"] = False
-            generation_result["error_status_code"] = 200
-            generation_result["error_extra"] = {}
+        mark_generation_succeeded(generation_result)
 
     async def _resolve_video_asset(
         self,
@@ -1788,7 +1783,7 @@ class GenerationHandler:
             generation_pipeline_started_at = time.time()
             if generation_type == "image":
                 debug_logger.log_info(f"[GENERATION] 开始图片生成流程...")
-                async for chunk in self._handle_image_generation(
+                async for chunk in self.image_pipeline.run(
                     token, project_id, model_config, prompt, images, stream,
                     api_key_id=api_key_id,
                     perf_trace=perf_trace,
@@ -1801,7 +1796,7 @@ class GenerationHandler:
                     yield chunk
             else:  # video
                 debug_logger.log_info(f"[GENERATION] 开始视频生成流程...")
-                async for chunk in self._handle_video_generation(
+                async for chunk in self.video_pipeline.run(
                     token, project_id, model_config, prompt, images, stream,
                     api_key_id=api_key_id,
                     perf_trace=perf_trace,

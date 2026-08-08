@@ -269,7 +269,7 @@ Exit criteria:
 - [x] Split extension worker WebSocket handling, registry, routing, CAPTCHA jobs, refresh jobs, and generation jobs.
 - [x] Split personal/browser worker pools, sessions, tabs, policies, CAPTCHA, and refresh behavior.
 - [x] Split `FlowClient` into shared transport plus auth, projects, images, videos, and model resources.
-- [ ] Split `generation_handler` into an orchestrator and explicit generation pipelines.
+- [x] Split `generation_handler` into an orchestrator and explicit generation pipelines.
 - [ ] Separate static deployment settings from mutable database-backed operational settings.
 - [ ] Introduce abstractions only where multiple implementations or test seams justify them.
 
@@ -304,6 +304,11 @@ adapter abstraction. CAPTCHA result and identity orchestration now lives in
 media, images, videos, and model resources. `FlowClient` composes these resources and
 keeps private implementation seams for the large image/video operations during the
 compatibility window; public capability calls no longer own resource selection.
+
+`generation/pipelines.py` now provides explicit image and video streaming pipelines,
+while `generation/state.py` owns request-local outcome transitions. `GenerationHandler`
+remains the token/project/logging orchestrator and delegates capability execution to the
+appropriate pipeline.
 
 Exit criteria:
 
