@@ -74,3 +74,20 @@ def test_admin_routes_are_partitioned_once_by_feature() -> None:
     assert "/api/admin/extension/workers" in route_paths(workers.router)
     assert "/api/admin/runway/config" in route_paths(admin_runway.router)
     assert "/api/admin/geminigen/config" in route_paths(admin_geminigen.router)
+
+
+def test_admin_routes_do_not_expose_mutable_service_globals() -> None:
+    forbidden = {
+        "api_key_manager",
+        "concurrency_manager",
+        "db",
+        "generation_handler",
+        "geminigen_service",
+        "google_drive_backup_service",
+        "proxy_manager",
+        "runway_service",
+        "set_dependencies",
+        "token_manager",
+    }
+
+    assert forbidden.isdisjoint(vars(admin))

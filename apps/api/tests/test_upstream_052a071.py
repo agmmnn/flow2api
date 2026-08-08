@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi import HTTPException
@@ -167,14 +168,15 @@ class PluginSyncTests(unittest.IsolatedAsyncioTestCase):
         }])
         fake_manager = MagicMock()
         fake_manager.needs_at_refresh.return_value = False
-        with patch.object(admin, "db", fake_db), patch.object(admin, "token_manager", fake_manager):
-            result = await admin.plugin_check_tokens(
-                {"emails": ["PERSON@example.com"]},
-                authorization="Bearer connection-secret",
-            )
-            self.assertEqual(result["tokens"][0]["email"], "person@example.com")
-            with self.assertRaises(HTTPException):
-                await admin._verify_plugin_connection_token("Bearer wrong")
+        container = SimpleNamespace(db=fake_db, token_manager=fake_manager)
+        result = await admin.plugin_check_tokens(
+            {"emails": ["PERSON@example.com"]},
+            authorization="Bearer connection-secret",
+            container=container,
+        )
+        self.assertEqual(result["tokens"][0]["email"], "person@example.com")
+        with self.assertRaises(HTTPException):
+            await admin._verify_plugin_connection_token("Bearer wrong", fake_db)
 
 
 class ProtocolLoginUtilityTests(unittest.TestCase):

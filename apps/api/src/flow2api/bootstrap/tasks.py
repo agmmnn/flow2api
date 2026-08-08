@@ -17,6 +17,10 @@ class TaskRegistry:
     def names(self) -> tuple[str, ...]:
         return tuple(self._tasks)
 
+    def is_running(self, name: str) -> bool:
+        task = self._tasks.get(name)
+        return task is not None and not task.done()
+
     def start(self, name: str, coroutine: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
         existing = self._tasks.get(name)
         if existing is not None and not existing.done():

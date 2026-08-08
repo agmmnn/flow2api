@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 
 from ..core.api_key_manager import ApiKeyManager
@@ -44,6 +45,7 @@ class AppContainer:
     redis_runtime: RedisRuntime
     failed_payload_manager: FailedPayloadManager
     tasks: TaskRegistry = field(default_factory=TaskRegistry)
+    database_restore_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 def build_container(*, database: Database | None = None) -> AppContainer:

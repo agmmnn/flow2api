@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from fastapi import Request, WebSocket
+from fastapi import WebSocket
+from starlette.requests import HTTPConnection
 
 from .container import AppContainer
 
 
-def get_container(request: Request) -> AppContainer:
-    """Return the dependency container for the current HTTP application."""
+def get_container(connection: HTTPConnection) -> AppContainer:
+    """Return the dependency container for the current HTTP or WebSocket application."""
 
-    return request.app.state.container
+    return connection.app.state.container
 
 
 def get_websocket_container(websocket: WebSocket) -> AppContainer:

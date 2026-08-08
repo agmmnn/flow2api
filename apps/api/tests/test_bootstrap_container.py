@@ -3,8 +3,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from flow2api import main
 from flow2api.bootstrap.container import AppContainer
 from flow2api.bootstrap.dependencies import get_container, get_websocket_container
+from flow2api.bootstrap.lifecycle import build_lifespan
 from flow2api.bootstrap.tasks import TaskRegistry
 
 
@@ -24,6 +26,10 @@ def test_app_container_has_no_process_global_accessor() -> None:
     assert not hasattr(AppContainer, "set_instance")
 
 
+def test_application_lifecycle_is_composed_by_bootstrap() -> None:
+    assert main.lifespan.__module__ == build_lifespan.__module__
+
+
 @pytest.mark.asyncio
 async def test_task_registry_rejects_duplicate_names_and_cancels_tasks() -> None:
     registry = TaskRegistry()
@@ -35,6 +41,7 @@ async def test_task_registry_rejects_duplicate_names_and_cancels_tasks() -> None
 
     task = registry.start("worker", worker())
     await started.wait()
+    assert registry.is_running("worker") is True
 
     with pytest.raises(RuntimeError, match="already running"):
         registry.start("worker", worker())
@@ -43,3 +50,4 @@ async def test_task_registry_rejects_duplicate_names_and_cancels_tasks() -> None
 
     assert task.cancelled()
     assert registry.names == ()
+    assert registry.is_running("worker") is False

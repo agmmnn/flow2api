@@ -1,6 +1,6 @@
 # Flow2API Architecture Migration Plan
 
-Status: in progress; Phases 1-6 are complete and Phase 7 is underway.
+Status: in progress; Phases 1-7 are complete and Phase 8 is underway.
 
 This plan restructures Flow2API as a modular monolith in a monorepo. It avoids a full rewrite, preserves existing API contracts, and keeps these commands working throughout the migration:
 
@@ -74,7 +74,7 @@ flow2api/
 ├── bootstrap/
 │   ├── app.py
 │   ├── container.py
-│   ├── lifespan.py
+│   ├── lifecycle.py
 │   └── tasks.py
 ├── common/
 │   ├── errors.py
@@ -210,20 +210,20 @@ Exit criteria:
 
 - [x] Add an `AppContainer` containing application dependencies.
 - [x] Expose dependencies through small FastAPI dependency functions.
-- [ ] Move startup and shutdown orchestration into bootstrap modules.
+- [x] Move startup and shutdown orchestration into bootstrap modules.
 - [x] Manage recurring background work through a task registry.
-- [ ] Remove module globals and `set_dependencies()`-style initialization.
+- [x] Remove module globals and `set_dependencies()`-style initialization.
 - [x] Avoid introducing new service-locator singletons.
 
 The FastAPI application now owns a passive dependency graph through
 `app.state.container`, and lifespan-created recurring jobs are registered and cancelled
-by name. Authentication, WebSocket worker registration, extension account import,
-projects, cache delivery, Runway endpoints, capacity, and model catalogs resolve their
-dependencies from the request-owned container. Public generation helpers now take
-their handler or provider service explicitly, and a regression test prevents the old
-public service globals from returning. The remaining compatibility bridge is limited
-to admin handler bodies; admin request dependencies and lifespan extraction are the
-next targets before Phase 7 is marked complete.
+by name. Public and admin HTTP/WebSocket handlers resolve their services from the
+request-owned container; the legacy mutable service globals and `set_dependencies()`
+bridge have been removed. Startup and shutdown orchestration lives in
+`bootstrap/lifecycle.py`, while the application module retains the stable storage
+recovery callbacks it supplies to that lifecycle factory. Regression tests protect
+transport ownership, isolated containers, lifecycle composition, and the absence of
+the old service locator.
 
 Exit criteria:
 

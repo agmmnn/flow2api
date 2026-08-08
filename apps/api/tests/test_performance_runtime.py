@@ -304,12 +304,11 @@ class _WebSocketRuntime:
 
 class TestAdminWebSocket(unittest.TestCase):
     def test_cookie_auth_replay_and_1013_outage(self):
-        original_db = admin.db
         original_runtime = admin.redis_runtime
         runtime = _WebSocketRuntime()
-        admin.db = _WebSocketDb()
         admin.redis_runtime = runtime
         app = FastAPI()
+        app.state.container = SimpleNamespace(db=_WebSocketDb())
         app.include_router(admin.router)
         try:
             client = TestClient(app)
@@ -327,43 +326,34 @@ class TestAdminWebSocket(unittest.TestCase):
                 self.assertEqual(disconnected.exception.code, 1013)
             self.assertEqual(runtime.websocket_clients, 0)
         finally:
-            admin.db = original_db
             admin.redis_runtime = original_runtime
 
     def test_cookie_is_required(self):
-        original_db = admin.db
-        admin.db = _WebSocketDb()
         app = FastAPI()
+        app.state.container = SimpleNamespace(db=_WebSocketDb())
         app.include_router(admin.router)
-        try:
-            client = TestClient(app)
-            with self.assertRaises(WebSocketDisconnect) as disconnected:
-                with client.websocket_connect(
-                    "/api/admin/events/ws",
-                    headers={"origin": "http://testserver"},
-                ):
-                    pass
-            self.assertEqual(disconnected.exception.code, 1008)
-        finally:
-            admin.db = original_db
+        client = TestClient(app)
+        with self.assertRaises(WebSocketDisconnect) as disconnected:
+            with client.websocket_connect(
+                "/api/admin/events/ws",
+                headers={"origin": "http://testserver"},
+            ):
+                pass
+        self.assertEqual(disconnected.exception.code, 1008)
 
     def test_cross_origin_is_rejected(self):
-        original_db = admin.db
-        admin.db = _WebSocketDb()
         app = FastAPI()
+        app.state.container = SimpleNamespace(db=_WebSocketDb())
         app.include_router(admin.router)
-        try:
-            client = TestClient(app)
-            with self.assertRaises(WebSocketDisconnect) as disconnected:
-                with client.websocket_connect(
-                    "/api/admin/events/ws",
-                    cookies={admin.ADMIN_SESSION_COOKIE_NAME: "valid"},
-                    headers={"origin": "https://attacker.example"},
-                ):
-                    pass
-            self.assertEqual(disconnected.exception.code, 1008)
-        finally:
-            admin.db = original_db
+        client = TestClient(app)
+        with self.assertRaises(WebSocketDisconnect) as disconnected:
+            with client.websocket_connect(
+                "/api/admin/events/ws",
+                cookies={admin.ADMIN_SESSION_COOKIE_NAME: "valid"},
+                headers={"origin": "https://attacker.example"},
+            ):
+                pass
+        self.assertEqual(disconnected.exception.code, 1008)
 
 
 if __name__ == "__main__":

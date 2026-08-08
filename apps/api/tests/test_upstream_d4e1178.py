@@ -2,6 +2,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException, Response
@@ -39,6 +40,7 @@ def make_request(
             "headers": headers,
             "client": ("127.0.0.1", 1234),
             "server": ("testserver", 80),
+            "app": app_main.app,
         }
     )
 
@@ -148,11 +150,13 @@ class AdminCookieAuthenticationTests(unittest.IsolatedAsyncioTestCase):
         request = make_request("/api/login", forwarded_proto="https")
         payload = admin.LoginRequest(username="admin", password="password", remember_me=True)
 
-        with (
-            patch.object(admin, "db", fake_db),
-            patch.object(admin.AuthManager, "verify_admin", return_value=True),
-        ):
-            result = await admin.admin_login(payload, request, response)
+        with patch.object(admin.AuthManager, "verify_admin", return_value=True):
+            result = await admin.admin_login(
+                payload,
+                request,
+                response,
+                container=SimpleNamespace(db=fake_db),
+            )
 
         cookie = response.headers["set-cookie"].lower()
         self.assertTrue(result["success"])
@@ -173,11 +177,13 @@ class AdminCookieAuthenticationTests(unittest.IsolatedAsyncioTestCase):
         request = make_request("/api/login")
         payload = admin.LoginRequest(username="admin", password="password", remember_me=False)
 
-        with (
-            patch.object(admin, "db", fake_db),
-            patch.object(admin.AuthManager, "verify_admin", return_value=True),
-        ):
-            await admin.admin_login(payload, request, response)
+        with patch.object(admin.AuthManager, "verify_admin", return_value=True):
+            await admin.admin_login(
+                payload,
+                request,
+                response,
+                container=SimpleNamespace(db=fake_db),
+            )
 
         cookie = response.headers["set-cookie"].lower()
         self.assertNotIn("max-age=", cookie)
@@ -189,20 +195,23 @@ class AdminCookieAuthenticationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_verifier_accepts_bearer_or_cookie_and_rejects_invalid_sessions(self):
         fake_db = FakeAdminDb({"header-session", "cookie-session"})
-        with patch.object(admin, "db", fake_db):
-            self.assertEqual(
-                await admin.verify_admin_token(
-                    make_request(authorization="Bearer header-session"),
-                    "Bearer header-session",
-                ),
-                "header-session",
-            )
-            self.assertEqual(
-                await admin.verify_admin_token(make_request(cookie="cookie-session"), None),
-                "cookie-session",
-            )
-            with self.assertRaises(HTTPException) as invalid:
-                await admin.verify_admin_token(make_request(cookie="invalid"), None)
+        container = SimpleNamespace(db=fake_db)
+        self.assertEqual(
+            await admin.verify_admin_token(
+                make_request(authorization="Bearer header-session"),
+                "Bearer header-session",
+                container,
+            ),
+            "header-session",
+        )
+        self.assertEqual(
+            await admin.verify_admin_token(
+                make_request(cookie="cookie-session"), None, container
+            ),
+            "cookie-session",
+        )
+        with self.assertRaises(HTTPException) as invalid:
+            await admin.verify_admin_token(make_request(cookie="invalid"), None, container)
 
         self.assertEqual(invalid.exception.status_code, 401)
 
@@ -211,8 +220,12 @@ class AdminCookieAuthenticationTests(unittest.IsolatedAsyncioTestCase):
         request = make_request(cookie="cookie-session", forwarded_proto="https")
         response = Response()
 
-        with patch.object(admin, "db", fake_db):
-            await admin.admin_logout(request, response, "header-session")
+        await admin.admin_logout(
+            request,
+            response,
+            "header-session",
+            container=SimpleNamespace(db=fake_db),
+        )
 
         self.assertEqual(set(fake_db.delete_calls), {"header-session", "cookie-session"})
         cookie = response.headers["set-cookie"].lower()
@@ -230,15 +243,13 @@ class AdminCookieAuthenticationTests(unittest.IsolatedAsyncioTestCase):
             new_password="new-password",
         )
 
-        with (
-            patch.object(admin, "db", fake_db),
-            patch.object(admin.AuthManager, "verify_admin", return_value=True),
-        ):
+        with patch.object(admin.AuthManager, "verify_admin", return_value=True):
             result = await admin.change_password(
                 payload,
                 request,
                 response,
                 "cookie-session",
+                container=SimpleNamespace(db=fake_db),
             )
 
         self.assertTrue(result["success"])
@@ -250,8 +261,12 @@ class AdminCookieAuthenticationTests(unittest.IsolatedAsyncioTestCase):
         request = make_request(authorization="Bearer legacy-session", forwarded_proto="https")
         response = Response()
 
-        with patch.object(admin, "db", fake_db):
-            result = await admin.get_stats(request, response, "legacy-session")
+        result = await admin.get_stats(
+            request,
+            response,
+            "legacy-session",
+            container=SimpleNamespace(db=fake_db),
+        )
 
         self.assertEqual(result["total_tokens"], 2)
         cookie = response.headers["set-cookie"].lower()

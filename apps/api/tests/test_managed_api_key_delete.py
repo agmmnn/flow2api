@@ -147,11 +147,16 @@ def test_admin_delete_removes_cache_objects_and_managed_worker_sessions(monkeypa
     )
     backend = SimpleNamespace(delete=AsyncMock(side_effect=[True, False]))
     extension_service = SimpleNamespace(kill_managed_api_key_sessions=AsyncMock(return_value=2))
-    monkeypatch.setattr(admin, "db", fake_db)
-    monkeypatch.setattr(admin, "generation_handler", SimpleNamespace(file_cache=SimpleNamespace(backend=backend)))
     monkeypatch.setattr(ExtensionCaptchaService, "get_instance", AsyncMock(return_value=extension_service))
 
-    result = asyncio.run(admin.delete_managed_api_key(10, token="admin-token"))
+    container = SimpleNamespace(
+        db=fake_db,
+        generation_handler=SimpleNamespace(file_cache=SimpleNamespace(backend=backend)),
+        api_key_manager=SimpleNamespace(invalidate=AsyncMock()),
+    )
+    result = asyncio.run(
+        admin.delete_managed_api_key(10, token="admin-token", container=container)
+    )
 
     assert result["success"] is True
     assert result["cache_objects_deleted"] == 1
@@ -170,11 +175,16 @@ def test_admin_delete_keeps_key_when_cache_cleanup_fails(monkeypatch):
         delete_api_key=AsyncMock(),
     )
     backend = SimpleNamespace(delete=AsyncMock(side_effect=RuntimeError("storage unavailable")))
-    monkeypatch.setattr(admin, "db", fake_db)
-    monkeypatch.setattr(admin, "generation_handler", SimpleNamespace(file_cache=SimpleNamespace(backend=backend)))
+    container = SimpleNamespace(
+        db=fake_db,
+        generation_handler=SimpleNamespace(file_cache=SimpleNamespace(backend=backend)),
+        api_key_manager=SimpleNamespace(invalidate=AsyncMock()),
+    )
 
     with pytest.raises(HTTPException) as exc_info:
-        asyncio.run(admin.delete_managed_api_key(10, token="admin-token"))
+        asyncio.run(
+            admin.delete_managed_api_key(10, token="admin-token", container=container)
+        )
 
     assert exc_info.value.status_code == 503
     assert "not deleted" in str(exc_info.value.detail)

@@ -426,12 +426,16 @@ class BrowserProfileAccountTests(unittest.IsolatedAsyncioTestCase):
         fake_db = FakeDb(rows=[row])
         profile_service = SimpleNamespace(is_runtime_open=AsyncMock(return_value=True))
 
-        with (
-            patch.object(admin, "db", fake_db),
-            patch.object(admin, "token_manager", SimpleNamespace(flow_client=None)),
-            patch.object(admin.BrowserProfileService, "get_instance", AsyncMock(return_value=profile_service)),
+        container = SimpleNamespace(
+            db=fake_db,
+            token_manager=SimpleNamespace(flow_client=None),
+        )
+        with patch.object(
+            admin.BrowserProfileService,
+            "get_instance",
+            AsyncMock(return_value=profile_service),
         ):
-            result = await admin.get_tokens(token="admin-token")
+            result = await admin.get_tokens(token="admin-token", container=container)
 
         self.assertTrue(result[0]["runtime_open"])
         profile_service.is_runtime_open.assert_awaited_once_with(24)
@@ -450,16 +454,14 @@ class BrowserProfileAccountTests(unittest.IsolatedAsyncioTestCase):
             enable_token=AsyncMock(),
         )
 
-        with (
-            patch.object(
-                admin.BrowserProfileService,
-                "get_instance",
-                AsyncMock(return_value=profile_service),
-            ),
-            patch.object(admin, "token_manager", token_manager),
+        container = SimpleNamespace(db=SimpleNamespace(), token_manager=token_manager)
+        with patch.object(
+            admin.BrowserProfileService,
+            "get_instance",
+            AsyncMock(return_value=profile_service),
         ):
-            await admin.sync_browser_profile(24, token="admin-token")
-            await admin.refresh_browser_profile(24, token="admin-token")
+            await admin.sync_browser_profile(24, token="admin-token", container=container)
+            await admin.refresh_browser_profile(24, token="admin-token", container=container)
 
         profile_service.sync_profile.assert_awaited_once_with(24, retain_runtime=False)
         profile_service.refresh_profile.assert_awaited_once_with(24, retain_runtime=False)
@@ -542,23 +544,27 @@ class BrowserProfileSchedulerTests(unittest.IsolatedAsyncioTestCase):
 
 class ProductionHealthTests(unittest.IsolatedAsyncioTestCase):
     async def test_health_reports_database_ready(self):
+        database = SimpleNamespace(
+            health_snapshot=AsyncMock(return_value={"database_ready": True})
+        )
         with patch.object(
             admin,
             "build_public_health_snapshot",
             AsyncMock(return_value={"backend_running": True, "has_active_tokens": True}),
         ):
-            result = await admin.health_check()
+            result = await admin.health_check(SimpleNamespace(db=database))
 
         self.assertTrue(result["database_ready"])
         self.assertTrue(result["has_active_tokens"])
 
     async def test_health_returns_503_when_database_is_unavailable(self):
+        database = SimpleNamespace(backend="sqlite", database_revision=None)
         with patch.object(
             admin,
             "build_public_health_snapshot",
             AsyncMock(side_effect=RuntimeError("can't start new thread")),
         ):
-            result = await admin.health_check()
+            result = await admin.health_check(SimpleNamespace(db=database))
 
         self.assertEqual(result.status_code, 503)
         payload = json.loads(result.body)

@@ -133,19 +133,15 @@ class CaptchaConfigTestCase(unittest.IsolatedAsyncioTestCase):
                 },
             ]
         )
-        original_proxy_manager = admin.proxy_manager
-        admin.proxy_manager = None
-        try:
-            with patch("flow2api.api.admin.AsyncSession", return_value=session):
-                token = await admin._solve_recaptcha_with_api_service(
-                    "capmonster",
-                    "https://labs.google/fx/tools/flow/project/project-3",
-                    "site-key",
-                    "IMAGE_GENERATION",
-                    enterprise=True,
-                )
-        finally:
-            admin.proxy_manager = original_proxy_manager
+        with patch("flow2api.api.admin.AsyncSession", return_value=session):
+            token = await admin._solve_recaptcha_with_api_service(
+                "capmonster",
+                "https://labs.google/fx/tools/flow/project/project-3",
+                "site-key",
+                "IMAGE_GENERATION",
+                enterprise=True,
+                proxy_manager=None,
+            )
 
         self.assertEqual(token, "captcha-token")
         self.assertEqual(

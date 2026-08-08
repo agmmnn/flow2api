@@ -1,4 +1,5 @@
 """Admin API routes"""
+
 import asyncio
 import csv
 import inspect
@@ -11,7 +12,19 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
-from fastapi import APIRouter, Depends, File, HTTPException, Header, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Header,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
@@ -24,7 +37,8 @@ import urllib.request
 from urllib.parse import urlparse
 from curl_cffi.requests import AsyncSession
 from ..core.auth import AuthManager
-from ..core.api_key_manager import ApiKeyManager
+from ..bootstrap.container import AppContainer
+from ..bootstrap.dependencies import get_container
 from ..core.database import Database
 from ..core.config import config, get_runtime_data_dir, get_yescaptcha_min_score, normalize_yescaptcha_task_type
 from ..core.models import GenerationConfig, Token
@@ -36,9 +50,7 @@ from ..core.browser_runtime_status import (
     start_runtime_prepare,
 )
 from ..core.monitoring import build_public_health_snapshot
-from ..services.token_manager import TokenManager
 from ..services.proxy_manager import ProxyManager
-from ..services.concurrency_manager import ConcurrencyManager
 from ..services.runway_service import RunwayService
 from ..services.geminigen_service import (
     GEMINIGEN_GROK_IMAGE_MAX_DAILY,
@@ -58,18 +70,6 @@ except ImportError:
 
 router = APIRouter()
 
-# Dependency injection
-token_manager: TokenManager = None
-proxy_manager: ProxyManager = None
-db: Database = None
-concurrency_manager: Optional[ConcurrencyManager] = None
-api_key_manager: Optional[ApiKeyManager] = None
-runway_service: Optional[RunwayService] = None
-geminigen_service: Optional[GeminiGenService] = None
-google_drive_backup_service: Optional[GoogleDriveBackupService] = None
-generation_handler: Optional[GenerationHandler] = None
-captcha_runtime_prepare_tasks: Dict[str, asyncio.Task] = {}
-
 # Admin session TTLs (seconds)
 _ADMIN_SESSION_TTL_REMEMBER = 30 * 24 * 3600  # 30 days when "remember me" is on
 _ADMIN_SESSION_TTL_BROWSER = 24 * 3600  # 24 hours when off
@@ -78,7 +78,6 @@ ADMIN_SESSION_COOKIE_NAME = "admin_session"
 SUPPORTED_API_CAPTCHA_METHODS = {"yescaptcha", "capmonster", "ezcaptcha", "capsolver"}
 MAX_SQLITE_RESTORE_BYTES = 512 * 1024 * 1024
 REQUIRED_SQLITE_RESTORE_TABLES = {"admin_config", "tokens"}
-_database_restore_lock = asyncio.Lock()
 
 
 def _generate_captcha_worker_key() -> str:
@@ -108,7 +107,7 @@ def _truncate_text(text: Any, limit: int = 240) -> str:
     value = str(text or "").strip()
     if len(value) <= limit:
         return value
-    return f"{value[:limit - 3]}..."
+    return f"{value[: limit - 3]}..."
 
 
 def _to_iso(value: Any) -> Any:
@@ -131,9 +130,7 @@ def _validate_uploaded_sqlite_database(path: Path) -> Dict[str, Any]:
                     detail=f"SQLite integrity check failed: {integrity or 'unknown'}",
                 )
 
-            table_rows = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            ).fetchall()
+            table_rows = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
             tables = {str(r[0]) for r in table_rows}
     except HTTPException:
         raise
@@ -325,13 +322,9 @@ def _guess_client_hints_from_user_agent(user_agent: str) -> Dict[str, str]:
     if major_match:
         major = major_match.group(1)
         if "Edg/" in ua:
-            headers["sec-ch-ua"] = (
-                f'"Not:A-Brand";v="99", "Microsoft Edge";v="{major}", "Chromium";v="{major}"'
-            )
+            headers["sec-ch-ua"] = f'"Not:A-Brand";v="99", "Microsoft Edge";v="{major}", "Chromium";v="{major}"'
         else:
-            headers["sec-ch-ua"] = (
-                f'"Not:A-Brand";v="99", "Google Chrome";v="{major}", "Chromium";v="{major}"'
-            )
+            headers["sec-ch-ua"] = f'"Not:A-Brand";v="99", "Google Chrome";v="{major}", "Chromium";v="{major}"'
 
     return headers
 
@@ -500,7 +493,8 @@ async def _sync_json_http_request(
 async def _resolve_score_test_verify_proxy(
     captcha_method: str,
     browser_proxy_enabled: bool,
-    browser_proxy_url: str
+    browser_proxy_url: str,
+    proxy_manager: ProxyManager,
 ) -> tuple[Optional[Dict[str, str]], bool, str, str]:
     """
     选择 score-test 的 verify 请求代理，优先与浏览器打码代理保持一致。
@@ -531,7 +525,8 @@ async def _solve_recaptcha_with_api_service(
     website_url: str,
     website_key: str,
     action: str,
-    enterprise: bool = False
+    enterprise: bool = False,
+    proxy_manager: Optional[ProxyManager] = None,
 ) -> Optional[str]:
     """使用当前配置的第三方打码服务获取 token。"""
     if method == "yescaptcha":
@@ -676,11 +671,7 @@ async def _probe_agent_gateway_mode(base_url: str) -> Dict[str, Any]:
     if status_code >= 400:
         detail = ""
         if isinstance(response_payload, dict):
-            detail = str(
-                response_payload.get("detail")
-                or response_payload.get("message")
-                or ""
-            ).strip()
+            detail = str(response_payload.get("detail") or response_payload.get("message") or "").strip()
         if not detail:
             detail = (response_text or "").strip()
         raise RuntimeError(f"HTTP {status_code}{f': {detail}' if detail else ''}")
@@ -710,11 +701,7 @@ async def _fetch_agent_gateway_connections(base_url: str, api_key: str) -> Dict[
     if status_code >= 400:
         detail = ""
         if isinstance(response_payload, dict):
-            detail = str(
-                response_payload.get("detail")
-                or response_payload.get("message")
-                or ""
-            ).strip()
+            detail = str(response_payload.get("detail") or response_payload.get("message") or "").strip()
         if not detail:
             detail = (response_text or "").strip()
         raise RuntimeError(f"HTTP {status_code}{f': {detail}' if detail else ''}")
@@ -738,21 +725,21 @@ def _normalize_runtime_method(method: Optional[str]) -> str:
     return normalized
 
 
-async def _prepare_captcha_runtime(method: str) -> None:
+async def _prepare_captcha_runtime(method: str, container: AppContainer) -> None:
     runtime_method = _normalize_runtime_method(method)
     start_runtime_prepare(runtime_method, f"Preparing {runtime_method} captcha runtime")
     try:
         if runtime_method == "browser":
             from ..services.browser_captcha import BrowserCaptchaService
 
-            service = await BrowserCaptchaService.get_instance(db)
+            service = await BrowserCaptchaService.get_instance(container.db)
             progress_runtime_prepare(runtime_method, "Warming headed browser slots")
             await service.reload_browser_count()
             await service.warmup_browser_slots()
         else:
             from ..services.browser_captcha_personal import BrowserCaptchaService
 
-            service = await BrowserCaptchaService.get_instance(db)
+            service = await BrowserCaptchaService.get_instance(container.db)
             progress_runtime_prepare(runtime_method, "Reloading Personal browser pool")
             await service.reload_config()
         finish_runtime_prepare(runtime_method, f"{runtime_method.title()} captcha runtime is ready")
@@ -761,47 +748,18 @@ async def _prepare_captcha_runtime(method: str) -> None:
             runtime_method,
             f"Runtime preparation failed: {type(exc).__name__}: {str(exc)[:200]}",
         )
-    finally:
-        captcha_runtime_prepare_tasks.pop(runtime_method, None)
-
-
-def _schedule_captcha_runtime_prepare(method: str) -> bool:
+def _schedule_captcha_runtime_prepare(method: str, container: AppContainer) -> bool:
     runtime_method = _normalize_runtime_method(method)
-    existing = captcha_runtime_prepare_tasks.get(runtime_method)
-    if existing and not existing.done():
+    task_name = f"captcha-runtime-{runtime_method}"
+    if container.tasks.is_running(task_name):
         progress_runtime_prepare(runtime_method, "Runtime preparation is still in progress")
         return False
-    captcha_runtime_prepare_tasks[runtime_method] = asyncio.create_task(
-        _prepare_captcha_runtime(runtime_method)
-    )
+    container.tasks.start(task_name, _prepare_captcha_runtime(runtime_method, container))
     return True
 
 
-def set_dependencies(
-    tm: TokenManager,
-    pm: ProxyManager,
-    database: Database,
-    cm: Optional[ConcurrencyManager] = None,
-    akm: Optional[ApiKeyManager] = None,
-    rs: Optional[RunwayService] = None,
-    gs: Optional[GeminiGenService] = None,
-    gdbs: Optional[GoogleDriveBackupService] = None,
-    gh: Optional[GenerationHandler] = None,
-):
-    """Set service instances"""
-    global token_manager, proxy_manager, db, concurrency_manager, api_key_manager, runway_service, geminigen_service, google_drive_backup_service, generation_handler
-    token_manager = tm
-    proxy_manager = pm
-    db = database
-    concurrency_manager = cm
-    api_key_manager = akm
-    runway_service = rs
-    geminigen_service = gs
-    google_drive_backup_service = gdbs
-    generation_handler = gh
-
-
 # ========== Request Models ==========
+
 
 class LoginRequest(BaseModel):
     username: str
@@ -1111,6 +1069,7 @@ class GeminiGenAccountUpdateRequest(BaseModel):
 
 class ST2ATRequest(BaseModel):
     """ST转AT请求"""
+
     st: str
 
 
@@ -1121,6 +1080,7 @@ class TokenRefreshConfigRequest(BaseModel):
 
 class ImportTokenItem(BaseModel):
     """导入Token项"""
+
     email: Optional[str] = None
     access_token: Optional[str] = None
     session_token: Optional[str] = None
@@ -1142,6 +1102,7 @@ class ImportTokenItem(BaseModel):
 
 class ImportTokensRequest(BaseModel):
     """导入Token请求"""
+
     tokens: List[ImportTokenItem]
 
 
@@ -1156,6 +1117,7 @@ class EventCalendarUpdateRequest(BaseModel):
 
 
 # ========== Auth Middleware ==========
+
 
 def get_admin_token_from_cookie(request: Request) -> Optional[str]:
     token = str(request.cookies.get(ADMIN_SESSION_COOKIE_NAME) or "").strip()
@@ -1195,21 +1157,25 @@ def _clear_admin_session_cookie(response: Response, request: Request) -> None:
     )
 
 
-async def is_admin_session_token_valid(token: Optional[str]) -> bool:
+async def is_admin_session_token_valid(token: Optional[str], database: Database) -> bool:
     normalized = str(token or "").strip()
-    return bool(normalized and db and await db.is_admin_session_valid(normalized))
+    return bool(normalized and await database.is_admin_session_valid(normalized))
 
 
-async def verify_admin_token(request: Request, authorization: str = Header(None)):
+async def verify_admin_token(
+    request: Request,
+    authorization: str = Header(None),
+    container: AppContainer = Depends(get_container),
+):
     """Verify a persistent admin session from Bearer auth or the browser cookie."""
     header_token = ""
     if authorization and authorization.startswith("Bearer "):
         header_token = authorization[7:].strip()
     cookie_token = get_admin_token_from_cookie(request) or ""
 
-    if header_token and await is_admin_session_token_valid(header_token):
+    if header_token and await is_admin_session_token_valid(header_token, container.db):
         return header_token
-    if cookie_token and await is_admin_session_token_valid(cookie_token):
+    if cookie_token and await is_admin_session_token_valid(cookie_token, container.db):
         return cookie_token
     if header_token or cookie_token:
         raise HTTPException(status_code=401, detail="Invalid or expired admin token")
@@ -1218,8 +1184,14 @@ async def verify_admin_token(request: Request, authorization: str = Header(None)
 
 # ========== Auth Endpoints ==========
 
+
 @router.post("/api/admin/login")
-async def admin_login(payload: LoginRequest, request: Request, response: Response):
+async def admin_login(
+    payload: LoginRequest,
+    request: Request,
+    response: Response,
+    container: AppContainer = Depends(get_container),
+):
     """Admin login - returns session token (NOT API key)"""
     if not AuthManager.verify_admin(payload.username, payload.password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -1229,7 +1201,7 @@ async def admin_login(payload: LoginRequest, request: Request, response: Respons
 
     ttl = _ADMIN_SESSION_TTL_REMEMBER if payload.remember_me else _ADMIN_SESSION_TTL_BROWSER
     expires_at = int(time.time()) + ttl
-    await db.insert_admin_session(session_token, expires_at)
+    await container.db.insert_admin_session(session_token, expires_at)
     _set_admin_session_cookie(
         response,
         request,
@@ -1240,7 +1212,7 @@ async def admin_login(payload: LoginRequest, request: Request, response: Respons
     return {
         "success": True,
         "token": session_token,  # Session token (NOT API key)
-        "username": config.admin_username
+        "username": config.admin_username,
     }
 
 
@@ -1249,12 +1221,13 @@ async def admin_logout(
     request: Request,
     response: Response,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Admin logout - invalidate session token"""
     cookie_token = get_admin_token_from_cookie(request)
     for session_token in {token, cookie_token}:
         if session_token:
-            await db.delete_admin_session(session_token)
+            await container.db.delete_admin_session(session_token)
     _clear_admin_session_cookie(response, request)
     return {"success": True, "message": "退出登录成功"}
 
@@ -1264,7 +1237,8 @@ async def change_password(
     payload: ChangePasswordRequest,
     request: Request,
     response: Response,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Change admin password"""
     # Verify old password
@@ -1276,13 +1250,13 @@ async def change_password(
     if payload.username:
         update_params["username"] = payload.username
 
-    await db.update_admin_config(**update_params)
+    await container.db.update_admin_config(**update_params)
 
     # 🔥 Hot reload: sync database config to memory
-    await db.reload_config_to_memory()
+    await container.db.reload_config_to_memory()
 
     # 🔑 Invalidate all admin session tokens (force re-login for security)
-    await db.delete_all_admin_sessions()
+    await container.db.delete_all_admin_sessions()
     _clear_admin_session_cookie(response, request)
 
     return {"success": True, "message": "密码修改成功,请重新登录"}
@@ -1290,11 +1264,17 @@ async def change_password(
 
 # ========== Token Management ==========
 
+
 @router.get("/api/tokens")
-async def get_tokens(token: str = Depends(verify_admin_token)):
+async def get_tokens(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     """Get all tokens with statistics"""
-    token_rows = await db.get_all_tokens_with_stats()
-    profile_service = await BrowserProfileService.get_instance(db=db, flow_client=token_manager.flow_client)
+    token_rows = await container.db.get_all_tokens_with_stats()
+    profile_service = await BrowserProfileService.get_instance(
+        db=container.db, flow_client=container.token_manager.flow_client
+    )
     runtime_states = {
         int(row["id"]): await profile_service.is_runtime_open(int(row["id"]))
         for row in token_rows
@@ -1315,75 +1295,85 @@ async def get_tokens(token: str = Depends(verify_admin_token)):
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
 
-    return [{
-        "id": row.get("id"),
-        "st": row.get("st"),  # Session Token for editing
-        "at": row.get("at"),  # Access Token for editing (从ST转换而来)
-        "at_expires": to_iso(row.get("at_expires")) if row.get("at_expires") else None,  # 🆕 AT过期时间
-        "at_expired": bool(normalize_dt(row.get("at_expires")) and normalize_dt(row.get("at_expires")) <= now),
-        "at_expiring_within_1h": bool(
-            normalize_dt(row.get("at_expires"))
-            and normalize_dt(row.get("at_expires")) > now
-            and (normalize_dt(row.get("at_expires")) - now).total_seconds() < 3600
-        ),
-        "token": row.get("at"),  # 兼容前端 token.token 的访问方式
-        "email": row.get("email"),
-        "name": row.get("name"),
-        "remark": row.get("remark"),
-        "is_active": bool(row.get("is_active")),
-        "created_at": to_iso(row.get("created_at")) if row.get("created_at") else None,
-        "last_used_at": to_iso(row.get("last_used_at")) if row.get("last_used_at") else None,
-        "use_count": row.get("use_count"),
-        "credits": row.get("credits"),  # 🆕 余额
-        "user_paygate_tier": row.get("user_paygate_tier"),
-        "current_project_id": row.get("current_project_id"),  # 🆕 项目ID
-        "current_project_name": row.get("current_project_name"),  # 🆕 项目名称
-        "auth_mode": row.get("auth_mode") or "session_token",
-        "browser_profile_path": row.get("browser_profile_path"),
-        "browser_profile_status": row.get("browser_profile_status") or "not_created",
-        "browser_profile_email": row.get("browser_profile_email"),
-        "browser_profile_name": row.get("browser_profile_name"),
-        "browser_profile_login_state": row.get("browser_profile_login_state") or "unknown",
-        "browser_profile_cookie_status": row.get("browser_profile_cookie_status") or "unknown",
-        "browser_profile_st_status": row.get("browser_profile_st_status") or "unknown",
-        "browser_profile_at_status": row.get("browser_profile_at_status") or "unknown",
-        "browser_profile_last_opened_at": to_iso(row.get("browser_profile_last_opened_at")) if row.get("browser_profile_last_opened_at") else None,
-        "browser_profile_last_sync_at": to_iso(row.get("browser_profile_last_sync_at")) if row.get("browser_profile_last_sync_at") else None,
-        "browser_profile_last_refresh_at": to_iso(row.get("browser_profile_last_refresh_at")) if row.get("browser_profile_last_refresh_at") else None,
-        "browser_profile_last_error": row.get("browser_profile_last_error"),
-        "runtime_open": runtime_states.get(int(row.get("id") or 0), False),
-        "captcha_proxy_url": row.get("captcha_proxy_url") or "",
-        "extension_route_key": row.get("extension_route_key") or "",
-        "protocol_mode": row.get("protocol_mode") or "session",
-        "google_cookies": row.get("google_cookies") or "",
-        "has_google_cookies": bool(str(row.get("google_cookies") or "").strip()),
-        "login_account": row.get("login_account") or "",
-        "login_password": row.get("login_password") or "",
-        "proxy_url": row.get("proxy_url") or "",
-        "protocol_proxy_configured": bool(str(row.get("proxy_url") or "").strip()),
-        "auto_refresh_enabled": bool(row.get("auto_refresh_enabled", True)),
-        "refresh_interval_minutes": int(row.get("refresh_interval_minutes") or 120),
-        "last_st_refresh_at": to_iso(row.get("last_st_refresh_at")) if row.get("last_st_refresh_at") else None,
-        "last_st_refresh_result": row.get("last_st_refresh_result") or "",
-        "image_enabled": bool(row.get("image_enabled")),
-        "video_enabled": bool(row.get("video_enabled")),
-        "image_concurrency": row.get("image_concurrency"),
-        "video_concurrency": row.get("video_concurrency"),
-        "image_count": row.get("image_count", 0),
-        "video_count": row.get("video_count", 0),
-        "error_count": row.get("error_count", 0),
-        "today_error_count": row.get("today_error_count", 0),
-        "consecutive_error_count": row.get("consecutive_error_count", 0),
-        "last_error_at": to_iso(row.get("last_error_at")) if row.get("last_error_at") else None,
-        "ban_reason": row.get("ban_reason"),
-        "banned_at": to_iso(row.get("banned_at")) if row.get("banned_at") else None,
-    } for row in token_rows]  # 直接返回数组,兼容前端
+    return [
+        {
+            "id": row.get("id"),
+            "st": row.get("st"),  # Session Token for editing
+            "at": row.get("at"),  # Access Token for editing (从ST转换而来)
+            "at_expires": to_iso(row.get("at_expires")) if row.get("at_expires") else None,  # 🆕 AT过期时间
+            "at_expired": bool(normalize_dt(row.get("at_expires")) and normalize_dt(row.get("at_expires")) <= now),
+            "at_expiring_within_1h": bool(
+                normalize_dt(row.get("at_expires"))
+                and normalize_dt(row.get("at_expires")) > now
+                and (normalize_dt(row.get("at_expires")) - now).total_seconds() < 3600
+            ),
+            "token": row.get("at"),  # 兼容前端 token.token 的访问方式
+            "email": row.get("email"),
+            "name": row.get("name"),
+            "remark": row.get("remark"),
+            "is_active": bool(row.get("is_active")),
+            "created_at": to_iso(row.get("created_at")) if row.get("created_at") else None,
+            "last_used_at": to_iso(row.get("last_used_at")) if row.get("last_used_at") else None,
+            "use_count": row.get("use_count"),
+            "credits": row.get("credits"),  # 🆕 余额
+            "user_paygate_tier": row.get("user_paygate_tier"),
+            "current_project_id": row.get("current_project_id"),  # 🆕 项目ID
+            "current_project_name": row.get("current_project_name"),  # 🆕 项目名称
+            "auth_mode": row.get("auth_mode") or "session_token",
+            "browser_profile_path": row.get("browser_profile_path"),
+            "browser_profile_status": row.get("browser_profile_status") or "not_created",
+            "browser_profile_email": row.get("browser_profile_email"),
+            "browser_profile_name": row.get("browser_profile_name"),
+            "browser_profile_login_state": row.get("browser_profile_login_state") or "unknown",
+            "browser_profile_cookie_status": row.get("browser_profile_cookie_status") or "unknown",
+            "browser_profile_st_status": row.get("browser_profile_st_status") or "unknown",
+            "browser_profile_at_status": row.get("browser_profile_at_status") or "unknown",
+            "browser_profile_last_opened_at": to_iso(row.get("browser_profile_last_opened_at"))
+            if row.get("browser_profile_last_opened_at")
+            else None,
+            "browser_profile_last_sync_at": to_iso(row.get("browser_profile_last_sync_at"))
+            if row.get("browser_profile_last_sync_at")
+            else None,
+            "browser_profile_last_refresh_at": to_iso(row.get("browser_profile_last_refresh_at"))
+            if row.get("browser_profile_last_refresh_at")
+            else None,
+            "browser_profile_last_error": row.get("browser_profile_last_error"),
+            "runtime_open": runtime_states.get(int(row.get("id") or 0), False),
+            "captcha_proxy_url": row.get("captcha_proxy_url") or "",
+            "extension_route_key": row.get("extension_route_key") or "",
+            "protocol_mode": row.get("protocol_mode") or "session",
+            "google_cookies": row.get("google_cookies") or "",
+            "has_google_cookies": bool(str(row.get("google_cookies") or "").strip()),
+            "login_account": row.get("login_account") or "",
+            "login_password": row.get("login_password") or "",
+            "proxy_url": row.get("proxy_url") or "",
+            "protocol_proxy_configured": bool(str(row.get("proxy_url") or "").strip()),
+            "auto_refresh_enabled": bool(row.get("auto_refresh_enabled", True)),
+            "refresh_interval_minutes": int(row.get("refresh_interval_minutes") or 120),
+            "last_st_refresh_at": to_iso(row.get("last_st_refresh_at")) if row.get("last_st_refresh_at") else None,
+            "last_st_refresh_result": row.get("last_st_refresh_result") or "",
+            "image_enabled": bool(row.get("image_enabled")),
+            "video_enabled": bool(row.get("video_enabled")),
+            "image_concurrency": row.get("image_concurrency"),
+            "video_concurrency": row.get("video_concurrency"),
+            "image_count": row.get("image_count", 0),
+            "video_count": row.get("video_count", 0),
+            "error_count": row.get("error_count", 0),
+            "today_error_count": row.get("today_error_count", 0),
+            "consecutive_error_count": row.get("consecutive_error_count", 0),
+            "last_error_at": to_iso(row.get("last_error_at")) if row.get("last_error_at") else None,
+            "ban_reason": row.get("ban_reason"),
+            "banned_at": to_iso(row.get("banned_at")) if row.get("banned_at") else None,
+        }
+        for row in token_rows
+    ]  # 直接返回数组,兼容前端
 
 
 @router.post("/api/tokens")
 async def add_token(
     request: AddTokenRequest,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Add a new token"""
     try:
@@ -1405,20 +1395,18 @@ async def add_token(
             "auto_refresh_enabled": request.auto_refresh_enabled,
             "refresh_interval_minutes": request.refresh_interval_minutes,
         }
-        if _supports_kwarg(token_manager.add_token, "extension_route_key"):
+        if _supports_kwarg(container.token_manager.add_token, "extension_route_key"):
             add_kwargs["extension_route_key"] = (
-                request.extension_route_key.strip()
-                if request.extension_route_key is not None
-                else None
+                request.extension_route_key.strip() if request.extension_route_key is not None else None
             )
-        new_token = await token_manager.add_token(**add_kwargs)
+        new_token = await container.token_manager.add_token(**add_kwargs)
 
         # 热更新并发限制，避免必须重启服务
-        if concurrency_manager:
-            await concurrency_manager.reset_token(
+        if container.concurrency_manager:
+            await container.concurrency_manager.reset_token(
                 new_token.id,
                 image_concurrency=new_token.image_concurrency,
-                video_concurrency=new_token.video_concurrency
+                video_concurrency=new_token.video_concurrency,
             )
 
         return {
@@ -1428,7 +1416,7 @@ async def add_token(
                 "id": new_token.id,
                 "email": new_token.email,
                 "credits": new_token.credits,
-            }
+            },
         }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1440,10 +1428,13 @@ async def add_token(
 async def add_browser_profile_token(
     request: BrowserProfileTokenRequest,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Create a headed browser-profile account placeholder without a real ST yet."""
     try:
-        service = await BrowserProfileService.get_instance(db=db, flow_client=token_manager.flow_client)
+        service = await BrowserProfileService.get_instance(
+            db=container.db, flow_client=container.token_manager.flow_client
+        )
         account = Token(
             st=service.build_placeholder_st(),
             at=None,
@@ -1467,14 +1458,14 @@ async def add_browser_profile_token(
             browser_profile_st_status="missing",
             browser_profile_at_status="missing",
         )
-        token_id = await db.add_token(account)
-        await db.update_token(
+        token_id = await container.db.add_token(account)
+        await container.db.update_token(
             token_id,
             email=service.build_placeholder_email(token_id),
             browser_profile_path=str(service.profile_path_for_token(token_id)),
         )
-        if concurrency_manager:
-            await concurrency_manager.reset_token(
+        if container.concurrency_manager:
+            await container.concurrency_manager.reset_token(
                 token_id,
                 image_concurrency=request.image_concurrency,
                 video_concurrency=request.video_concurrency,
@@ -1492,9 +1483,12 @@ async def add_browser_profile_token(
 async def browser_profile_status(
     token_id: int,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     try:
-        service = await BrowserProfileService.get_instance(db=db, flow_client=token_manager.flow_client)
+        service = await BrowserProfileService.get_instance(
+            db=container.db, flow_client=container.token_manager.flow_client
+        )
         return {"success": True, "profile": await service.status(token_id)}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -1506,9 +1500,12 @@ async def browser_profile_status(
 async def open_browser_profile(
     token_id: int,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     try:
-        service = await BrowserProfileService.get_instance(db=db, flow_client=token_manager.flow_client)
+        service = await BrowserProfileService.get_instance(
+            db=container.db, flow_client=container.token_manager.flow_client
+        )
         return {"success": True, "profile": await service.open_profile(token_id)}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -1520,9 +1517,12 @@ async def open_browser_profile(
 async def close_browser_profile(
     token_id: int,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     try:
-        service = await BrowserProfileService.get_instance(db=db, flow_client=token_manager.flow_client)
+        service = await BrowserProfileService.get_instance(
+            db=container.db, flow_client=container.token_manager.flow_client
+        )
         return {"success": True, "profile": await service.close_profile(token_id)}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -1534,12 +1534,15 @@ async def close_browser_profile(
 async def sync_browser_profile(
     token_id: int,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     try:
-        service = await BrowserProfileService.get_instance(db=db, flow_client=token_manager.flow_client)
+        service = await BrowserProfileService.get_instance(
+            db=container.db, flow_client=container.token_manager.flow_client
+        )
         profile = await service.sync_profile(token_id, retain_runtime=False)
         if profile.get("profile_status") == "connected" and profile.get("st_status") == "ok":
-            await token_manager.enable_token(token_id)
+            await container.token_manager.enable_token(token_id)
         return {"success": True, "profile": profile}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -1551,12 +1554,15 @@ async def sync_browser_profile(
 async def refresh_browser_profile(
     token_id: int,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     try:
-        service = await BrowserProfileService.get_instance(db=db, flow_client=token_manager.flow_client)
+        service = await BrowserProfileService.get_instance(
+            db=container.db, flow_client=container.token_manager.flow_client
+        )
         profile = await service.refresh_profile(token_id, retain_runtime=False)
         if profile.get("profile_status") == "connected" and profile.get("st_status") == "ok":
-            await token_manager.enable_token(token_id)
+            await container.token_manager.enable_token(token_id)
         return {"success": True, "profile": profile}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -1568,9 +1574,12 @@ async def refresh_browser_profile(
 async def reset_browser_profile(
     token_id: int,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     try:
-        service = await BrowserProfileService.get_instance(db=db, flow_client=token_manager.flow_client)
+        service = await BrowserProfileService.get_instance(
+            db=container.db, flow_client=container.token_manager.flow_client
+        )
         return {"success": True, "profile": await service.reset_profile(token_id)}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -1582,15 +1591,17 @@ async def reset_browser_profile(
 async def update_token_profile_aware(
     token_id: int,
     request: UpdateTokenRequest,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Update token/account metadata; ST is optional for browser-profile accounts."""
     try:
-        existing = await token_manager.get_token(token_id)
+        existing = await container.token_manager.get_token(token_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Token not found")
 
         from datetime import datetime
+
         update_kwargs: Dict[str, Any] = {
             "token_id": token_id,
             "remark": request.remark,
@@ -1610,7 +1621,7 @@ async def update_token_profile_aware(
 
         st_value = (request.st or "").strip()
         if st_value:
-            result = await token_manager.flow_client.st_to_at(st_value)
+            result = await container.token_manager.flow_client.st_to_at(st_value)
             expires = result.get("expires")
             at_expires = None
             if expires:
@@ -1618,28 +1629,28 @@ async def update_token_profile_aware(
                     at_expires = datetime.fromisoformat(str(expires).replace("Z", "+00:00"))
                 except Exception:
                     at_expires = None
-            update_kwargs.update({
-                "st": st_value,
-                "at": result["access_token"],
-                "at_expires": at_expires,
-            })
-
-        if _supports_kwarg(token_manager.update_token, "extension_route_key"):
-            update_kwargs["extension_route_key"] = (
-                request.extension_route_key.strip()
-                if request.extension_route_key is not None
-                else None
+            update_kwargs.update(
+                {
+                    "st": st_value,
+                    "at": result["access_token"],
+                    "at_expires": at_expires,
+                }
             )
-        if _supports_kwarg(token_manager.update_token, "use_extension_for_generation"):
+
+        if _supports_kwarg(container.token_manager.update_token, "extension_route_key"):
+            update_kwargs["extension_route_key"] = (
+                request.extension_route_key.strip() if request.extension_route_key is not None else None
+            )
+        if _supports_kwarg(container.token_manager.update_token, "use_extension_for_generation"):
             if request.use_extension_for_generation is not None:
                 update_kwargs["use_extension_for_generation"] = bool(request.use_extension_for_generation)
 
-        await token_manager.update_token(**update_kwargs)
+        await container.token_manager.update_token(**update_kwargs)
 
-        if concurrency_manager:
-            updated_token = await token_manager.get_token(token_id)
+        if container.concurrency_manager:
+            updated_token = await container.token_manager.get_token(token_id)
             if updated_token:
-                await concurrency_manager.reset_token(
+                await container.concurrency_manager.reset_token(
                     token_id,
                     image_concurrency=updated_token.image_concurrency,
                     video_concurrency=updated_token.video_concurrency,
@@ -1656,21 +1667,23 @@ async def update_token_profile_aware(
 async def update_token(
     token_id: int,
     request: UpdateTokenRequest,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Update token - 使用ST自动刷新AT"""
     try:
         # 先ST转AT
-        result = await token_manager.flow_client.st_to_at(request.st)
+        result = await container.token_manager.flow_client.st_to_at(request.st)
         at = result["access_token"]
         expires = result.get("expires")
 
         # 解析过期时间
         from datetime import datetime
+
         at_expires = None
         if expires:
             try:
-                at_expires = datetime.fromisoformat(expires.replace('Z', '+00:00'))
+                at_expires = datetime.fromisoformat(expires.replace("Z", "+00:00"))
             except:
                 pass
 
@@ -1696,25 +1709,23 @@ async def update_token(
             "auto_refresh_enabled": request.auto_refresh_enabled,
             "refresh_interval_minutes": request.refresh_interval_minutes,
         }
-        if _supports_kwarg(token_manager.update_token, "extension_route_key"):
+        if _supports_kwarg(container.token_manager.update_token, "extension_route_key"):
             update_kwargs["extension_route_key"] = (
-                request.extension_route_key.strip()
-                if request.extension_route_key is not None
-                else None
+                request.extension_route_key.strip() if request.extension_route_key is not None else None
             )
-        if _supports_kwarg(token_manager.update_token, "use_extension_for_generation"):
+        if _supports_kwarg(container.token_manager.update_token, "use_extension_for_generation"):
             if request.use_extension_for_generation is not None:
                 update_kwargs["use_extension_for_generation"] = bool(request.use_extension_for_generation)
-        await token_manager.update_token(**update_kwargs)
+        await container.token_manager.update_token(**update_kwargs)
 
         # 热更新并发限制，确保管理台修改立即生效
-        if concurrency_manager:
-            updated_token = await token_manager.get_token(token_id)
+        if container.concurrency_manager:
+            updated_token = await container.token_manager.get_token(token_id)
             if updated_token:
-                await concurrency_manager.reset_token(
+                await container.concurrency_manager.reset_token(
                     token_id,
                     image_concurrency=updated_token.image_concurrency,
-                    video_concurrency=updated_token.video_concurrency
+                    video_concurrency=updated_token.video_concurrency,
                 )
 
         return {"success": True, "message": "Token更新成功"}
@@ -1725,13 +1736,14 @@ async def update_token(
 @router.delete("/api/tokens/{token_id}")
 async def delete_token(
     token_id: int,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Delete token"""
     try:
-        await token_manager.delete_token(token_id)
-        if concurrency_manager:
-            await concurrency_manager.remove_token(token_id)
+        await container.token_manager.delete_token(token_id)
+        if container.concurrency_manager:
+            await container.concurrency_manager.remove_token(token_id)
         return {"success": True, "message": "Token删除成功"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1740,36 +1752,35 @@ async def delete_token(
 @router.post("/api/tokens/{token_id}/enable")
 async def enable_token(
     token_id: int,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Enable token"""
-    await token_manager.enable_token(token_id)
+    await container.token_manager.enable_token(token_id)
     return {"success": True, "message": "Token已启用"}
 
 
 @router.post("/api/tokens/{token_id}/disable")
 async def disable_token(
     token_id: int,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Disable token"""
-    await token_manager.disable_token(token_id)
+    await container.token_manager.disable_token(token_id)
     return {"success": True, "message": "Token已禁用"}
 
 
 @router.post("/api/tokens/{token_id}/refresh-credits")
 async def refresh_credits(
     token_id: int,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """刷新Token余额 🆕"""
     try:
-        credits = await token_manager.refresh_credits(token_id)
-        return {
-            "success": True,
-            "message": "余额刷新成功",
-            "credits": credits
-        }
+        credits = await container.token_manager.refresh_credits(token_id)
+        return {"success": True, "message": "余额刷新成功", "credits": credits}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"刷新余额失败: {str(e)}")
 
@@ -1777,10 +1788,11 @@ async def refresh_credits(
 @router.post("/api/tokens/{token_id}/refresh-at")
 async def refresh_at(
     token_id: int,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """手动刷新Token的AT (使用ST转换) 🆕
-    
+
     如果 AT 刷新失败且处于 personal 模式，会自动尝试通过浏览器刷新 ST
     """
     from ..core.logger import debug_logger
@@ -1788,11 +1800,11 @@ async def refresh_at(
     from ..services.st_refresh_reasons import describe_st_refresh_reason
 
     debug_logger.log_info(f"[API] 手动刷新 AT 请求: token_id={token_id}, captcha_method={config.captcha_method}")
-    
+
     try:
         # 调用token_manager的内部刷新方法（包含 ST 自动刷新逻辑）
-        success = await token_manager._refresh_at(token_id)
-        st_refresh_reason = token_manager.consume_st_refresh_reason(token_id)
+        success = await container.token_manager._refresh_at(token_id)
+        st_refresh_reason = container.token_manager.consume_st_refresh_reason(token_id)
         captcha_mode = str(config.captcha_method or "").strip()
         supports_st_refresh = captcha_mode in {"personal", "browser", "extension"} or bool(
             getattr(config, "dedicated_extension_enabled", False)
@@ -1800,43 +1812,39 @@ async def refresh_at(
 
         if success:
             # 获取更新后的token信息
-            updated_token = await token_manager.get_token(token_id)
-            
+            updated_token = await container.token_manager.get_token(token_id)
+
             message = "AT刷新成功"
             if supports_st_refresh:
                 message += "（支持ST自动刷新）"
-            
+
             debug_logger.log_info(f"[API] AT 刷新成功: token_id={token_id}")
-            
+
             return {
                 "success": True,
                 "message": message,
                 "token": {
                     "id": updated_token.id,
                     "email": updated_token.email,
-                    "at_expires": updated_token.at_expires.isoformat() if updated_token.at_expires else None
-                }
+                    "at_expires": updated_token.at_expires.isoformat() if updated_token.at_expires else None,
+                },
             }
         else:
             debug_logger.log_error(f"[API] AT 刷新失败: token_id={token_id}")
-            
+
             error_detail = "AT刷新失败"
             if supports_st_refresh:
-                error_detail += (
-                    f"（当前打码模式: {captcha_mode or '-'}，已尝试 ST 自动刷新后重试 AT）"
-                )
+                error_detail += f"（当前打码模式: {captcha_mode or '-'}，已尝试 ST 自动刷新后重试 AT）"
                 reason_hint = describe_st_refresh_reason(st_refresh_reason)
                 if reason_hint:
                     error_detail += f"；原因: {reason_hint}"
             else:
-                error_detail += (
-                    f"（当前打码模式: {captcha_mode or '-'}，当前模式未启用 ST 自动刷新能力）"
-                )
+                error_detail += f"（当前打码模式: {captcha_mode or '-'}，当前模式未启用 ST 自动刷新能力）"
             if captcha_mode == "browser":
                 error_detail += (
                     f"，gateway fallback={'on' if bool(config.browser_fallback_to_remote_browser) else 'off'}"
                 )
-            
+
             raise HTTPException(status_code=500, detail=error_detail)
     except HTTPException:
         raise
@@ -1850,10 +1858,11 @@ async def refresh_token_profile(
     token_id: int,
     request: ST2ATRequest,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Refresh token email/name using ST -> AT user profile payload."""
     try:
-        token_obj = await token_manager.get_token(token_id)
+        token_obj = await container.token_manager.get_token(token_id)
         if not token_obj:
             raise HTTPException(status_code=404, detail="Token not found")
 
@@ -1861,7 +1870,7 @@ async def refresh_token_profile(
         if not st_value:
             raise HTTPException(status_code=400, detail="st is required")
 
-        result = await token_manager.flow_client.st_to_at(st_value)
+        result = await container.token_manager.flow_client.st_to_at(st_value)
         user_info = result.get("user", {}) if isinstance(result, dict) else {}
         email = str(user_info.get("email", "") or "").strip()
         name = str(user_info.get("name", "") or "").strip()
@@ -1870,7 +1879,7 @@ async def refresh_token_profile(
         if not name:
             name = email.split("@")[0] if "@" in email else email
 
-        await db.update_token(token_id, email=email, name=name)
+        await container.db.update_token(token_id, email=email, name=name)
 
         return {
             "success": True,
@@ -1902,14 +1911,15 @@ def _project_to_dict(project):
 @router.get("/api/tokens/{token_id}/projects")
 async def list_token_projects(
     token_id: int,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """List VideoFX projects stored for a token."""
     raise HTTPException(status_code=410, detail="Project management has been removed")
-    t = await token_manager.get_token(token_id)
+    t = await container.token_manager.get_token(token_id)
     if not t:
         raise HTTPException(status_code=404, detail="Token not found")
-    projects = await token_manager.db.get_projects_by_token(token_id)
+    projects = await container.token_manager.db.get_projects_by_token(token_id)
     return {"success": True, "projects": [_project_to_dict(p) for p in projects]}
 
 
@@ -1917,11 +1927,12 @@ async def list_token_projects(
 async def create_token_project(
     token_id: int,
     request: dict,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Create a new VideoFX project for an existing token."""
     raise HTTPException(status_code=410, detail="Project management has been removed")
-    t = await token_manager.get_token(token_id)
+    t = await container.token_manager.get_token(token_id)
     if not t:
         raise HTTPException(status_code=404, detail="Token not found")
 
@@ -1935,12 +1946,12 @@ async def create_token_project(
         raise HTTPException(status_code=400, detail="set_as_current must be a boolean")
 
     try:
-        project = await token_manager.create_project_for_token(
+        project = await container.token_manager.create_project_for_token(
             token_id,
             title=title,
             set_as_current=set_as_current,
         )
-        updated = await token_manager.get_token(token_id) if set_as_current else None
+        updated = await container.token_manager.get_token(token_id) if set_as_current else None
         return {
             "success": True,
             "message": "Project created",
@@ -1964,17 +1975,18 @@ async def create_token_project(
 @router.post("/api/tokens/st2at")
 async def st_to_at(
     request: ST2ATRequest,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Convert Session Token to Access Token (仅转换,不添加到数据库)"""
     try:
-        result = await token_manager.flow_client.st_to_at(request.st)
+        result = await container.token_manager.flow_client.st_to_at(request.st)
         return {
             "success": True,
             "message": "ST converted to AT successfully",
             "access_token": result["access_token"],
             "email": result.get("user", {}).get("email"),
-            "expires": result.get("expires")
+            "expires": result.get("expires"),
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1983,7 +1995,8 @@ async def st_to_at(
 @router.post("/api/tokens/import")
 async def import_tokens(
     request: ImportTokensRequest,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """批量导入Token"""
     from datetime import datetime, timezone
@@ -1993,7 +2006,7 @@ async def import_tokens(
     errors = []
     # 保持与历史逻辑一致：按 created_at DESC 的结果中，优先命中同邮箱“最新一条”
     existing_by_email = {}
-    for existing_token in await token_manager.get_all_tokens():
+    for existing_token in await container.token_manager.get_all_tokens():
         if existing_token.email and existing_token.email not in existing_by_email:
             existing_by_email[existing_token.email] = existing_token
 
@@ -2002,18 +2015,18 @@ async def import_tokens(
             st = item.session_token
 
             if not st:
-                errors.append(f"第{idx+1}项: 缺少 session_token")
+                errors.append(f"第{idx + 1}项: 缺少 session_token")
                 continue
 
             # 使用 ST 转 AT 获取用户信息
             try:
-                result = await token_manager.flow_client.st_to_at(st)
+                result = await container.token_manager.flow_client.st_to_at(st)
                 at = result["access_token"]
                 email = result.get("user", {}).get("email")
                 expires = result.get("expires")
 
                 if not email:
-                    errors.append(f"第{idx+1}项: 无法获取邮箱信息")
+                    errors.append(f"第{idx + 1}项: 无法获取邮箱信息")
                     continue
 
                 # 解析过期时间
@@ -2021,7 +2034,7 @@ async def import_tokens(
                 is_expired = False
                 if expires:
                     try:
-                        at_expires = datetime.fromisoformat(expires.replace('Z', '+00:00'))
+                        at_expires = datetime.fromisoformat(expires.replace("Z", "+00:00"))
                         # 判断是否过期
                         now = datetime.now(timezone.utc)
                         is_expired = at_expires <= now
@@ -2038,7 +2051,9 @@ async def import_tokens(
                         "st": st,
                         "at": at,
                         "at_expires": at_expires,
-                        "captcha_proxy_url": item.captcha_proxy_url.strip() if item.captcha_proxy_url is not None else None,
+                        "captcha_proxy_url": item.captcha_proxy_url.strip()
+                        if item.captcha_proxy_url is not None
+                        else None,
                         "image_enabled": item.image_enabled,
                         "video_enabled": item.video_enabled,
                         "image_concurrency": item.image_concurrency,
@@ -2051,16 +2066,14 @@ async def import_tokens(
                         "auto_refresh_enabled": item.auto_refresh_enabled,
                         "refresh_interval_minutes": item.refresh_interval_minutes,
                     }
-                    if _supports_kwarg(token_manager.update_token, "extension_route_key"):
+                    if _supports_kwarg(container.token_manager.update_token, "extension_route_key"):
                         import_update_kwargs["extension_route_key"] = (
-                            item.extension_route_key.strip()
-                            if item.extension_route_key is not None
-                            else None
+                            item.extension_route_key.strip() if item.extension_route_key is not None else None
                         )
-                    await token_manager.update_token(**import_update_kwargs)
+                    await container.token_manager.update_token(**import_update_kwargs)
                     # 如果过期则禁用
                     if is_expired:
-                        await token_manager.disable_token(existing.id)
+                        await container.token_manager.disable_token(existing.id)
                         existing.is_active = False
                     existing.st = st
                     existing.at = at
@@ -2084,7 +2097,9 @@ async def import_tokens(
                     # 添加新Token
                     import_add_kwargs: Dict[str, Any] = {
                         "st": st,
-                        "captcha_proxy_url": item.captcha_proxy_url.strip() if item.captcha_proxy_url is not None else None,
+                        "captcha_proxy_url": item.captcha_proxy_url.strip()
+                        if item.captcha_proxy_url is not None
+                        else None,
                         "image_enabled": item.image_enabled,
                         "video_enabled": item.video_enabled,
                         "image_concurrency": item.image_concurrency,
@@ -2097,76 +2112,82 @@ async def import_tokens(
                         "auto_refresh_enabled": item.auto_refresh_enabled,
                         "refresh_interval_minutes": item.refresh_interval_minutes,
                     }
-                    if _supports_kwarg(token_manager.add_token, "extension_route_key"):
+                    if _supports_kwarg(container.token_manager.add_token, "extension_route_key"):
                         import_add_kwargs["extension_route_key"] = (
-                            item.extension_route_key.strip()
-                            if item.extension_route_key is not None
-                            else None
+                            item.extension_route_key.strip() if item.extension_route_key is not None else None
                         )
-                    new_token = await token_manager.add_token(**import_add_kwargs)
+                    new_token = await container.token_manager.add_token(**import_add_kwargs)
                     # 如果过期则禁用
                     if is_expired:
-                        await token_manager.disable_token(new_token.id)
+                        await container.token_manager.disable_token(new_token.id)
                         new_token.is_active = False
                     existing_by_email[email] = new_token
                     added += 1
 
             except Exception as e:
-                errors.append(f"第{idx+1}项: {str(e)}")
+                errors.append(f"第{idx + 1}项: {str(e)}")
 
         except Exception as e:
-            errors.append(f"第{idx+1}项: {str(e)}")
+            errors.append(f"第{idx + 1}项: {str(e)}")
 
     return {
         "success": True,
         "added": added,
         "updated": updated,
         "errors": errors if errors else None,
-        "message": f"导入完成: 新增 {added} 个, 更新 {updated} 个" + (f", {len(errors)} 个失败" if errors else "")
+        "message": f"导入完成: 新增 {added} 个, 更新 {updated} 个" + (f", {len(errors)} 个失败" if errors else ""),
     }
 
 
 # ========== Config Management ==========
 
+
 @router.get("/api/config/proxy")
-async def get_proxy_config(token: str = Depends(verify_admin_token)):
+async def get_proxy_config(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     """Get proxy configuration"""
-    config = await proxy_manager.get_proxy_config()
+    config = await container.proxy_manager.get_proxy_config()
     return {
         "success": True,
         "config": {
             "enabled": config.enabled,
             "proxy_url": config.proxy_url,
             "media_proxy_enabled": config.media_proxy_enabled,
-            "media_proxy_url": config.media_proxy_url
-        }
+            "media_proxy_url": config.media_proxy_url,
+        },
     }
 
 
 @router.get("/api/proxy/config")
-async def get_proxy_config_alias(token: str = Depends(verify_admin_token)):
+async def get_proxy_config_alias(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     """Get proxy configuration (alias for frontend compatibility)"""
-    config = await proxy_manager.get_proxy_config()
+    config = await container.proxy_manager.get_proxy_config()
     return {
         "proxy_enabled": config.enabled,  # Frontend expects proxy_enabled
         "proxy_url": config.proxy_url,
         "media_proxy_enabled": config.media_proxy_enabled,
-        "media_proxy_url": config.media_proxy_url
+        "media_proxy_url": config.media_proxy_url,
     }
 
 
 @router.post("/api/proxy/config")
 async def update_proxy_config_alias(
     request: ProxyConfigRequest,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Update proxy configuration (alias for frontend compatibility)"""
     try:
-        await proxy_manager.update_proxy_config(
+        await container.proxy_manager.update_proxy_config(
             enabled=request.proxy_enabled,
             proxy_url=request.proxy_url,
             media_proxy_enabled=request.media_proxy_enabled,
-            media_proxy_url=request.media_proxy_url
+            media_proxy_url=request.media_proxy_url,
         )
     except ValueError as e:
         return {"success": False, "message": str(e)}
@@ -2176,15 +2197,16 @@ async def update_proxy_config_alias(
 @router.post("/api/config/proxy")
 async def update_proxy_config(
     request: ProxyConfigRequest,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Update proxy configuration"""
     try:
-        await proxy_manager.update_proxy_config(
+        await container.proxy_manager.update_proxy_config(
             enabled=request.proxy_enabled,
             proxy_url=request.proxy_url,
             media_proxy_enabled=request.media_proxy_enabled,
-            media_proxy_url=request.media_proxy_url
+            media_proxy_url=request.media_proxy_url,
         )
     except ValueError as e:
         return {"success": False, "message": str(e)}
@@ -2194,7 +2216,8 @@ async def update_proxy_config(
 @router.post("/api/proxy/test")
 async def test_proxy_connectivity(
     request: ProxyTestRequest,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """测试代理是否可访问目标站点（默认 https://labs.google/）"""
     proxy_input = (request.proxy_url or "").strip()
@@ -2203,20 +2226,12 @@ async def test_proxy_connectivity(
     timeout_seconds = max(5, min(timeout_seconds, 60))
 
     if not proxy_input:
-        return {
-            "success": False,
-            "message": "代理地址为空",
-            "test_url": test_url
-        }
+        return {"success": False, "message": "代理地址为空", "test_url": test_url}
 
     try:
-        proxy_url = proxy_manager.normalize_proxy_url(proxy_input)
+        proxy_url = container.proxy_manager.normalize_proxy_url(proxy_input)
     except ValueError as e:
-        return {
-            "success": False,
-            "message": str(e),
-            "test_url": test_url
-        }
+        return {"success": False, "message": str(e), "test_url": test_url}
 
     start_time = time.time()
     try:
@@ -2228,7 +2243,7 @@ async def test_proxy_connectivity(
                 timeout=timeout_seconds,
                 impersonate="chrome120",
                 allow_redirects=True,
-                verify=False
+                verify=False,
             )
 
         elapsed_ms = int((time.time() - start_time) * 1000)
@@ -2242,22 +2257,20 @@ async def test_proxy_connectivity(
             "test_url": test_url,
             "final_url": final_url,
             "status_code": status_code,
-            "elapsed_ms": elapsed_ms
+            "elapsed_ms": elapsed_ms,
         }
     except Exception as e:
         elapsed_ms = int((time.time() - start_time) * 1000)
-        return {
-            "success": False,
-            "message": f"代理测试失败: {str(e)}",
-            "test_url": test_url,
-            "elapsed_ms": elapsed_ms
-        }
+        return {"success": False, "message": f"代理测试失败: {str(e)}", "test_url": test_url, "elapsed_ms": elapsed_ms}
 
 
 @router.get("/api/config/generation")
-async def get_generation_config(token: str = Depends(verify_admin_token)):
+async def get_generation_config(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     """Get generation timeout configuration"""
-    config = await db.get_generation_config()
+    config = await container.db.get_generation_config()
     if config is None:
         config = GenerationConfig()
     return {
@@ -2266,9 +2279,7 @@ async def get_generation_config(token: str = Depends(verify_admin_token)):
             "image_timeout": config.image_timeout,
             "video_timeout": config.video_timeout,
             "max_retries": config.max_retries,
-            "extension_generation_enabled": bool(
-                getattr(config, "extension_generation_enabled", False)
-            ),
+            "extension_generation_enabled": bool(getattr(config, "extension_generation_enabled", False)),
             "extension_generation_fallback_mode": str(
                 getattr(config, "extension_generation_fallback_mode", "local_http_on_recaptcha")
                 or "local_http_on_recaptcha"
@@ -2287,27 +2298,18 @@ async def get_generation_config(token: str = Depends(verify_admin_token)):
             "flow2api_csvgen_cookie": str(getattr(config, "flow2api_csvgen_cookie", "") or ""),
             "flow2api_csvgen_api_keys": str(getattr(config, "flow2api_csvgen_api_keys", "") or ""),
             "flow2api_cloning_model": str(
-                getattr(config, "flow2api_cloning_model", "gemini-2.5-flash")
-                or "gemini-2.5-flash"
+                getattr(config, "flow2api_cloning_model", "gemini-2.5-flash") or "gemini-2.5-flash"
             ),
             "flow2api_cloning_backend": str(
                 getattr(config, "flow2api_cloning_backend", "gemini_native") or "gemini_native"
             ),
-            "flow2api_cloning_provider_order": str(
-                getattr(config, "flow2api_cloning_provider_order", "") or ""
-            ),
-            "flow2api_cloning_enabled_providers": str(
-                getattr(config, "flow2api_cloning_enabled_providers", "") or ""
-            ),
+            "flow2api_cloning_provider_order": str(getattr(config, "flow2api_cloning_provider_order", "") or ""),
+            "flow2api_cloning_enabled_providers": str(getattr(config, "flow2api_cloning_enabled_providers", "") or ""),
             "flow2api_cloning_provider_retry_count": int(
                 getattr(config, "flow2api_cloning_provider_retry_count", 1) or 1
             ),
-            "flow2api_cloning_gemini_api_keys": str(
-                getattr(config, "flow2api_cloning_gemini_api_keys", "") or ""
-            ),
-            "flow2api_cloning_openai_api_keys": str(
-                getattr(config, "flow2api_cloning_openai_api_keys", "") or ""
-            ),
+            "flow2api_cloning_gemini_api_keys": str(getattr(config, "flow2api_cloning_gemini_api_keys", "") or ""),
+            "flow2api_cloning_openai_api_keys": str(getattr(config, "flow2api_cloning_openai_api_keys", "") or ""),
             "flow2api_cloning_openrouter_api_keys": str(
                 getattr(config, "flow2api_cloning_openrouter_api_keys", "") or ""
             ),
@@ -2324,12 +2326,9 @@ async def get_generation_config(token: str = Depends(verify_admin_token)):
                 getattr(config, "flow2api_cloning_cloudflare_api_token", "") or ""
             ),
             "flow2api_metadata_backend": str(
-                getattr(config, "flow2api_metadata_backend", "gemini_native")
-                or "gemini_native"
+                getattr(config, "flow2api_metadata_backend", "gemini_native") or "gemini_native"
             ),
-            "flow2api_metadata_provider_order": str(
-                getattr(config, "flow2api_metadata_provider_order", "") or ""
-            ),
+            "flow2api_metadata_provider_order": str(getattr(config, "flow2api_metadata_provider_order", "") or ""),
             "flow2api_metadata_enabled_providers": str(
                 getattr(config, "flow2api_metadata_enabled_providers", "") or ""
             ),
@@ -2337,48 +2336,36 @@ async def get_generation_config(token: str = Depends(verify_admin_token)):
                 getattr(config, "flow2api_metadata_provider_retry_count", 1) or 1
             ),
             "flow2api_metadata_model": str(
-                getattr(config, "flow2api_metadata_model", "gemini-2.5-flash")
-                or "gemini-2.5-flash"
+                getattr(config, "flow2api_metadata_model", "gemini-2.5-flash") or "gemini-2.5-flash"
             ),
-            "flow2api_metadata_enabled_models": str(
-                getattr(config, "flow2api_metadata_enabled_models", "") or ""
-            ),
-            "flow2api_metadata_primary_model": str(
-                getattr(config, "flow2api_metadata_primary_model", "") or ""
-            ),
-            "flow2api_metadata_fallback_models": str(
-                getattr(config, "flow2api_metadata_fallback_models", "") or ""
-            ),
+            "flow2api_metadata_enabled_models": str(getattr(config, "flow2api_metadata_enabled_models", "") or ""),
+            "flow2api_metadata_primary_model": str(getattr(config, "flow2api_metadata_primary_model", "") or ""),
+            "flow2api_metadata_fallback_models": str(getattr(config, "flow2api_metadata_fallback_models", "") or ""),
             "metadata_system_prompt": str(getattr(config, "metadata_system_prompt", "") or ""),
-            "cloning_image_system_prompt": str(
-                getattr(config, "cloning_image_system_prompt", "") or ""
-            ),
-            "cloning_video_system_prompt": str(
-                getattr(config, "cloning_video_system_prompt", "") or ""
-            ),
+            "cloning_image_system_prompt": str(getattr(config, "cloning_image_system_prompt", "") or ""),
+            "cloning_video_system_prompt": str(getattr(config, "cloning_video_system_prompt", "") or ""),
             "task_tracker_device_id": str(getattr(config, "task_tracker_device_id", "") or ""),
             "task_tracker_device_name": str(getattr(config, "task_tracker_device_name", "") or ""),
             "task_tracker_cookies": str(getattr(config, "task_tracker_cookies", "") or ""),
             "task_tracker_device_token": str(getattr(config, "task_tracker_device_token", "") or ""),
             "task_tracker_turnstile_token": str(getattr(config, "task_tracker_turnstile_token", "") or ""),
             "task_tracker_tls_profile": str(getattr(config, "task_tracker_tls_profile", "") or ""),
-        }
+        },
     }
 
 
 @router.post("/api/config/generation")
 async def update_generation_config(
     request: GenerationConfigRequest,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Update generation timeout configuration"""
-    captcha_cfg = await db.get_captcha_config()
+    captcha_cfg = await container.db.get_captcha_config()
     extension_mode_active = str(getattr(captcha_cfg, "captcha_method", "") or "").strip().lower() == "extension"
     extension_generation_enabled = bool(request.extension_generation_enabled) if extension_mode_active else False
-    extension_generation_fallback_mode = (
-        request.extension_generation_fallback_mode if extension_mode_active else "none"
-    )
-    await db.update_generation_config(
+    extension_generation_fallback_mode = request.extension_generation_fallback_mode if extension_mode_active else "none"
+    await container.db.update_generation_config(
         image_timeout=request.image_timeout,
         video_timeout=request.video_timeout,
         max_retries=request.max_retries,
@@ -2425,21 +2412,21 @@ async def update_generation_config(
     )
 
     # 🔥 Hot reload: sync database config to memory
-    await db.reload_config_to_memory()
+    await container.db.reload_config_to_memory()
 
     return {"success": True, "message": "生成配置更新成功"}
 
 
-def _require_runway_service() -> RunwayService:
-    if runway_service is None:
+def _require_runway_service(service: Optional[RunwayService]) -> RunwayService:
+    if service is None:
         raise HTTPException(status_code=500, detail="Runway service not initialized")
-    return runway_service
+    return service
 
 
-def _require_geminigen_service() -> GeminiGenService:
-    if geminigen_service is None:
+def _require_geminigen_service(service: Optional[GeminiGenService]) -> GeminiGenService:
+    if service is None:
         raise HTTPException(status_code=500, detail="GeminiGen service not initialized")
-    return geminigen_service
+    return service
 
 
 def _validate_json_object_text(raw: str, field_name: str) -> str:
@@ -2541,11 +2528,7 @@ def _geminigen_account_payload(account, generation_stats: Optional[Dict[str, int
     def daily_limit_state(value: Optional[datetime]) -> tuple[bool, Optional[str]]:
         if not value:
             return False, None
-        normalized = (
-            value.replace(tzinfo=timezone.utc)
-            if value.tzinfo is None
-            else value.astimezone(timezone.utc)
-        )
+        normalized = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
         return normalized > now_utc, normalized.isoformat().replace("+00:00", "Z")
 
     image_gen_daily_limited, image_gen_daily_limit_reset_at = daily_limit_state(
@@ -2711,10 +2694,13 @@ def _geminigen_config_payload(cfg) -> Dict[str, Any]:
 
 
 @router.get("/api/admin/runway/config")
-async def get_runway_admin_config(token: str = Depends(verify_admin_token)):
-    cfg = await db.get_runway_config()
-    accounts = await db.list_runway_accounts()
-    models = await db.list_runway_models()
+async def get_runway_admin_config(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
+    cfg = await container.db.get_runway_config()
+    accounts = await container.db.list_runway_accounts()
+    models = await container.db.list_runway_models()
     return {
         "success": True,
         "config": {
@@ -2733,10 +2719,11 @@ async def get_runway_admin_config(token: str = Depends(verify_admin_token)):
 async def get_runway_teams_for_credential(
     request: RunwayTeamsRequest,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     if not request.raw_credential.strip():
         raise HTTPException(status_code=400, detail="Runway credential is required")
-    service = _require_runway_service()
+    service = _require_runway_service(container.runway_service)
     try:
         result = await service.get_teams_for_credential(request.raw_credential.strip())
     except Exception as exc:
@@ -2748,8 +2735,9 @@ async def get_runway_teams_for_credential(
 async def update_runway_admin_config(
     request: RunwayConfigUpdateRequest,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
-    cfg = await db.update_runway_config(
+    cfg = await container.db.update_runway_config(
         enabled=request.enabled,
         base_url=request.base_url,
         poll_interval_sec=request.poll_interval_sec,
@@ -2772,6 +2760,7 @@ async def update_runway_admin_config(
 async def create_runway_account(
     request: RunwayAccountRequest,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     if not request.raw_credential.strip():
         raise HTTPException(status_code=400, detail="Runway credential is required")
@@ -2780,7 +2769,7 @@ async def create_runway_account(
     selected_team_id = _clean_optional_text(request.team_id)
     workspace_id = selected_workspace_id or _clean_optional_text(str(meta.get("workspace_id") or ""))
     team_id = selected_team_id or selected_workspace_id or _clean_optional_text(str(meta.get("team_id") or ""))
-    account_id = await db.create_runway_account(
+    account_id = await container.db.create_runway_account(
         label=request.label.strip() or "Runway account",
         raw_credential=request.raw_credential.strip(),
         is_active=request.is_active,
@@ -2790,7 +2779,7 @@ async def create_runway_account(
         last_status=str(meta.get("status") or ""),
         last_error=str(meta.get("error") or ""),
     )
-    account = await db.get_runway_account(account_id)
+    account = await container.db.get_runway_account(account_id)
     return {"success": True, "account": _runway_account_payload(account)}
 
 
@@ -2799,8 +2788,9 @@ async def update_runway_account(
     account_id: int,
     request: RunwayAccountUpdateRequest,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
-    account = await db.get_runway_account(account_id)
+    account = await container.db.get_runway_account(account_id)
     if not account:
         raise HTTPException(status_code=404, detail="Runway account not found")
     updates: Dict[str, Any] = {}
@@ -2823,8 +2813,8 @@ async def update_runway_account(
         updates["team_id"] = _clean_optional_text(request.team_id)
     if request.concurrency_limit is not None:
         updates["concurrency_limit"] = max(-1, int(request.concurrency_limit))
-    await db.update_runway_account(account_id, **updates)
-    account = await db.get_runway_account(account_id)
+    await container.db.update_runway_account(account_id, **updates)
+    account = await container.db.get_runway_account(account_id)
     return {"success": True, "account": _runway_account_payload(account)}
 
 
@@ -2832,8 +2822,9 @@ async def update_runway_account(
 async def get_runway_account_teams(
     account_id: int,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
-    service = _require_runway_service()
+    service = _require_runway_service(container.runway_service)
     try:
         result = await service.get_account_teams(account_id)
     except ValueError as exc:
@@ -2847,8 +2838,9 @@ async def get_runway_account_teams(
 async def delete_runway_account(
     account_id: int,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
-    await db.delete_runway_account(account_id)
+    await container.db.delete_runway_account(account_id)
     return {"success": True, "account_id": account_id}
 
 
@@ -2856,10 +2848,11 @@ async def delete_runway_account(
 async def test_runway_account(
     account_id: int,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
-    service = _require_runway_service()
+    service = _require_runway_service(container.runway_service)
     result = await service.test_account(account_id)
-    account = await db.get_runway_account(account_id)
+    account = await container.db.get_runway_account(account_id)
     return {
         "success": bool(result.get("success")),
         "status": result.get("status"),
@@ -2872,6 +2865,7 @@ async def test_runway_account(
 async def upsert_runway_model(
     request: RunwayModelRequest,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     public_id = request.public_model_id.strip()
     if not public_id.startswith("runway-"):
@@ -2880,7 +2874,7 @@ async def upsert_runway_model(
         raise HTTPException(status_code=400, detail="kind must be image, video, audio, or upscale")
     if not request.task_type.strip():
         raise HTTPException(status_code=400, detail="task_type is required")
-    await db.upsert_runway_model(
+    await container.db.upsert_runway_model(
         public_model_id=public_id,
         display_name=request.display_name.strip() or public_id,
         kind=request.kind,
@@ -2899,7 +2893,7 @@ async def upsert_runway_model(
         disabled_reason=request.disabled_reason.strip(),
         is_enabled=request.is_enabled,
     )
-    model = await db.get_runway_model(public_id)
+    model = await container.db.get_runway_model(public_id)
     return {"success": True, "model": _runway_model_payload(model)}
 
 
@@ -2908,8 +2902,9 @@ async def update_runway_model(
     model_id: int,
     request: RunwayModelUpdateRequest,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
-    models = await db.list_runway_models()
+    models = await container.db.list_runway_models()
     existing = next((m for m in models if m.id == model_id), None)
     if not existing:
         raise HTTPException(status_code=404, detail="Runway model not found")
@@ -2919,9 +2914,10 @@ async def update_runway_model(
     kind = (request.kind if request.kind is not None else existing.kind).strip()
     if kind not in {"image", "video", "audio", "upscale"}:
         raise HTTPException(status_code=400, detail="kind must be image, video, audio, or upscale")
-    await db.upsert_runway_model(
+    await container.db.upsert_runway_model(
         public_model_id=public_id,
-        display_name=(request.display_name if request.display_name is not None else existing.display_name).strip() or public_id,
+        display_name=(request.display_name if request.display_name is not None else existing.display_name).strip()
+        or public_id,
         kind=kind,
         task_type=(request.task_type if request.task_type is not None else existing.task_type).strip(),
         builder_key=(request.builder_key if request.builder_key is not None else existing.builder_key).strip(),
@@ -2960,14 +2956,18 @@ async def update_runway_model(
             list,
         ),
         cost_feature=(request.cost_feature if request.cost_feature is not None else existing.cost_feature).strip(),
-        source_version=(request.source_version if request.source_version is not None else existing.source_version).strip(),
+        source_version=(
+            request.source_version if request.source_version is not None else existing.source_version
+        ).strip(),
         live_available=bool(request.live_available if request.live_available is not None else existing.live_available),
-        disabled_reason=(request.disabled_reason if request.disabled_reason is not None else existing.disabled_reason).strip(),
+        disabled_reason=(
+            request.disabled_reason if request.disabled_reason is not None else existing.disabled_reason
+        ).strip(),
         is_enabled=bool(request.is_enabled if request.is_enabled is not None else existing.is_enabled),
     )
     if public_id != existing.public_model_id:
-        await db.delete_runway_model(model_id)
-    model = await db.get_runway_model(public_id)
+        await container.db.delete_runway_model(model_id)
+    model = await container.db.get_runway_model(public_id)
     return {"success": True, "model": _runway_model_payload(model)}
 
 
@@ -2975,14 +2975,18 @@ async def update_runway_model(
 async def delete_runway_model(
     model_id: int,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
-    await db.delete_runway_model(model_id)
+    await container.db.delete_runway_model(model_id)
     return {"success": True, "model_id": model_id}
 
 
 @router.post("/api/admin/runway/models/sync")
-async def sync_runway_models(token: str = Depends(verify_admin_token)):
-    service = _require_runway_service()
+async def sync_runway_models(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
+    service = _require_runway_service(container.runway_service)
     sync_result = await service.sync_models()
     if isinstance(sync_result, dict):
         synced = int(sync_result.get("synced") or 0)
@@ -2997,23 +3001,27 @@ async def sync_runway_models(token: str = Depends(verify_admin_token)):
         "synced": synced,
         "blocked": blocked,
         "disabled_task_types": disabled_task_types,
-        "models": [_runway_model_payload(m) for m in await db.list_runway_models()],
+        "models": [_runway_model_payload(m) for m in await container.db.list_runway_models()],
     }
 
 
 @router.get("/api/admin/geminigen/config")
-async def get_geminigen_admin_config(token: str = Depends(verify_admin_token)):
-    cfg = await db.get_geminigen_config()
-    accounts = await db.list_geminigen_accounts()
-    generation_stats = await db.get_geminigen_account_generation_stats([account.id for account in accounts if account.id])
-    if geminigen_service is not None:
-        geminigen_service.schedule_stale_account_profile_refresh(accounts)
+async def get_geminigen_admin_config(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
+    cfg = await container.db.get_geminigen_config()
+    accounts = await container.db.list_geminigen_accounts()
+    generation_stats = await container.db.get_geminigen_account_generation_stats(
+        [account.id for account in accounts if account.id]
+    )
+    if container.geminigen_service is not None:
+        container.geminigen_service.schedule_stale_account_profile_refresh(accounts)
     return {
         "success": True,
         "config": _geminigen_config_payload(cfg),
         "accounts": [
-            _geminigen_account_payload(account, generation_stats.get(int(account.id or 0), {}))
-            for account in accounts
+            _geminigen_account_payload(account, generation_stats.get(int(account.id or 0), {})) for account in accounts
         ],
         "models": GeminiGenService.model_catalog(video_enabled=bool(getattr(cfg, "video_enabled", True))),
     }
@@ -3023,8 +3031,9 @@ async def get_geminigen_admin_config(token: str = Depends(verify_admin_token)):
 async def update_geminigen_admin_config(
     request: GeminiGenConfigUpdateRequest,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
-    cfg = await db.update_geminigen_config(
+    cfg = await container.db.update_geminigen_config(
         enabled=request.enabled,
         video_enabled=request.video_enabled,
         base_url=request.base_url,
@@ -3046,13 +3055,14 @@ async def update_geminigen_admin_config(
 async def get_geminigen_model_status(
     window: str = Query("1h"),
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
-    service = _require_geminigen_service()
+    service = _require_geminigen_service(container.geminigen_service)
     try:
         return await service.get_model_status(window=window)
     except Exception as exc:
-        accounts = await db.list_geminigen_accounts()
-        cfg = await db.get_geminigen_config()
+        accounts = await container.db.list_geminigen_accounts()
+        cfg = await container.db.get_geminigen_config()
         return {
             "success": False,
             "status": "unavailable",
@@ -3080,11 +3090,12 @@ async def get_geminigen_model_status(
 async def create_geminigen_account(
     request: GeminiGenAccountRequest,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     if not request.bearer_token.strip():
         raise HTTPException(status_code=400, detail="GeminiGen bearer token is required")
     meta = GeminiGenService.describe_credential(request.raw_cookie, request.bearer_token, request.guard_id)
-    account_id = await db.create_geminigen_account(
+    account_id = await container.db.create_geminigen_account(
         label=request.label.strip() or "GeminiGen account",
         raw_cookie="",
         bearer_token=request.bearer_token.strip(),
@@ -3097,7 +3108,7 @@ async def create_geminigen_account(
         last_status=str(meta.get("status") or ""),
         last_error=str(meta.get("error") or ""),
     )
-    account = await db.get_geminigen_account(account_id)
+    account = await container.db.get_geminigen_account(account_id)
     return {"success": True, "account": _geminigen_account_payload(account)}
 
 
@@ -3106,8 +3117,9 @@ async def update_geminigen_account(
     account_id: int,
     request: GeminiGenAccountUpdateRequest,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
-    account = await db.get_geminigen_account(account_id)
+    account = await container.db.get_geminigen_account(account_id)
     if not account:
         raise HTTPException(status_code=404, detail="GeminiGen account not found")
     updates: Dict[str, Any] = {}
@@ -3135,8 +3147,8 @@ async def update_geminigen_account(
         )
         updates["last_status"] = str(meta.get("status") or "")
         updates["last_error"] = str(meta.get("error") or "")
-    await db.update_geminigen_account(account_id, **updates)
-    account = await db.get_geminigen_account(account_id)
+    await container.db.update_geminigen_account(account_id, **updates)
+    account = await container.db.get_geminigen_account(account_id)
     return {"success": True, "account": _geminigen_account_payload(account)}
 
 
@@ -3144,24 +3156,28 @@ async def update_geminigen_account(
 async def delete_geminigen_account(
     account_id: int,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
-    account = await db.get_geminigen_account(account_id)
+    account = await container.db.get_geminigen_account(account_id)
     if not account:
         raise HTTPException(status_code=404, detail="GeminiGen account not found")
-    cleared = await db.clear_geminigen_queue(
+    cleared = await container.db.clear_geminigen_queue(
         account_id=account_id,
         reason="GeminiGen account deleted by admin",
     )
-    deleted = await db.delete_geminigen_account(account_id)
+    deleted = await container.db.delete_geminigen_account(account_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="GeminiGen account not found")
     return {"success": True, "account_id": account_id, **cleared}
 
 
 @router.post("/api/admin/geminigen/queue/clear")
-async def clear_geminigen_queue(token: str = Depends(verify_admin_token)):
-    result = await db.clear_geminigen_queue(reason="Manually cleared by admin")
-    accounts = await db.list_geminigen_accounts()
+async def clear_geminigen_queue(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
+    result = await container.db.clear_geminigen_queue(reason="Manually cleared by admin")
+    accounts = await container.db.list_geminigen_accounts()
     return {
         "success": True,
         **result,
@@ -3173,12 +3189,13 @@ async def clear_geminigen_queue(token: str = Depends(verify_admin_token)):
 async def clear_geminigen_account_slots(
     account_id: int,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
-    account = await db.get_geminigen_account(account_id)
+    account = await container.db.get_geminigen_account(account_id)
     if not account:
         raise HTTPException(status_code=404, detail="GeminiGen account not found")
-    result = await db.clear_geminigen_queue(account_id=account_id, reason="Manually cleared by admin")
-    account = await db.get_geminigen_account(account_id)
+    result = await container.db.clear_geminigen_queue(account_id=account_id, reason="Manually cleared by admin")
+    account = await container.db.get_geminigen_account(account_id)
     return {
         "success": True,
         **result,
@@ -3190,10 +3207,11 @@ async def clear_geminigen_account_slots(
 async def test_geminigen_account(
     account_id: int,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
-    service = _require_geminigen_service()
+    service = _require_geminigen_service(container.geminigen_service)
     result = await service.test_account(account_id)
-    account = await db.get_geminigen_account(account_id)
+    account = await container.db.get_geminigen_account(account_id)
     return {
         "success": bool(result.get("success")),
         "status": result.get("status"),
@@ -3207,7 +3225,10 @@ def _event_calendar_path() -> Path:
 
 
 @router.get("/api/admin/event-calendar")
-async def get_event_calendar(token: str = Depends(verify_admin_token)):
+async def get_event_calendar(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     """Read editable event calendar rows from CSV."""
     csv_path = _event_calendar_path()
     if not csv_path.exists():
@@ -3235,6 +3256,7 @@ async def get_event_calendar(token: str = Depends(verify_admin_token)):
 async def update_event_calendar(
     request: EventCalendarUpdateRequest,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Replace editable event calendar CSV rows."""
     normalized_rows: List[Dict[str, str]] = []
@@ -3265,9 +3287,12 @@ async def update_event_calendar(
 
 
 @router.get("/api/call-logic/config")
-async def get_call_logic_config(token: str = Depends(verify_admin_token)):
+async def get_call_logic_config(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     """Get token call logic configuration."""
-    config_obj = await db.get_call_logic_config()
+    config_obj = await container.db.get_call_logic_config()
     call_mode = getattr(config_obj, "call_mode", None)
     if call_mode not in ("default", "polling"):
         call_mode = "polling" if getattr(config_obj, "polling_mode_enabled", False) else "default"
@@ -3276,22 +3301,23 @@ async def get_call_logic_config(token: str = Depends(verify_admin_token)):
         "config": {
             "call_mode": call_mode,
             "polling_mode_enabled": call_mode == "polling",
-        }
+        },
     }
 
 
 @router.post("/api/call-logic/config")
 async def update_call_logic_config(
     request: CallLogicConfigRequest,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Update token call logic configuration."""
     call_mode = request.call_mode if request.call_mode in ("default", "polling") else None
     if call_mode is None:
         raise HTTPException(status_code=400, detail="Invalid call_mode")
 
-    await db.update_call_logic_config(call_mode)
-    await db.reload_config_to_memory()
+    await container.db.update_call_logic_config(call_mode)
+    await container.db.reload_config_to_memory()
 
     return {
         "success": True,
@@ -3299,16 +3325,20 @@ async def update_call_logic_config(
         "config": {
             "call_mode": call_mode,
             "polling_mode_enabled": call_mode == "polling",
-        }
+        },
     }
 
 
 # ========== System Info ==========
 
+
 @router.get("/api/system/info")
-async def get_system_info(token: str = Depends(verify_admin_token)):
+async def get_system_info(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     """Get system information"""
-    stats = await db.get_system_info_stats()
+    stats = await container.db.get_system_info_stats()
 
     return {
         "success": True,
@@ -3316,15 +3346,21 @@ async def get_system_info(token: str = Depends(verify_admin_token)):
             "total_tokens": stats["total_tokens"],
             "active_tokens": stats["active_tokens"],
             "total_credits": stats["total_credits"],
-            "version": "1.0.0"
-        }
+            "version": "1.0.0",
+        },
     }
 
 
 # ========== Additional Routes for Frontend Compatibility ==========
 
+
 @router.post("/api/login")
-async def login(payload: LoginRequest, request: Request, response: Response):
+async def login(
+    payload: LoginRequest,
+    request: Request,
+    response: Response,
+    container: AppContainer = Depends(get_container),
+):
     """Login endpoint (alias for /api/admin/login)"""
     return await admin_login(payload, request, response)
 
@@ -3334,17 +3370,20 @@ async def logout(
     request: Request,
     response: Response,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Logout endpoint (alias for /api/admin/logout)"""
     return await admin_logout(request, response, token)
 
 
 @router.get("/health")
-async def health_check():
+async def health_check(
+    container: AppContainer = Depends(get_container),
+):
     """Public health check endpoint - no auth required"""
     try:
-        snapshot = await build_public_health_snapshot(db)
-        database_status = await db.health_snapshot()
+        snapshot = await build_public_health_snapshot(container.db)
+        database_status = await container.db.health_snapshot()
         snapshot.update(database_status)
         redis_status = redis_runtime.status_snapshot()
         snapshot["redis_ready"] = redis_status["redis_ready"]
@@ -3354,8 +3393,8 @@ async def health_check():
             not database_status.get("database_ready", False)
             or redis_runtime.maintenance_active
             or (
-            redis_runtime.mode != "off"
-            and (not redis_status["redis_ready"] or not redis_status["event_consumer_ready"])
+                redis_runtime.mode != "off"
+                and (not redis_status["redis_ready"] or not redis_status["event_consumer_ready"])
             )
         )
         snapshot["redis"] = redis_status
@@ -3366,8 +3405,8 @@ async def health_check():
             content={
                 "backend_running": True,
                 "database_ready": False,
-                "database_backend": getattr(db, "backend", "unknown"),
-                "database_revision": getattr(db, "database_revision", None),
+                "database_backend": getattr(container.db, "backend", "unknown"),
+                "database_revision": getattr(container.db, "database_revision", None),
                 "redis_ready": redis_runtime.ready,
                 "event_consumer_ready": redis_runtime.event_consumer_ready,
                 "degraded": True,
@@ -3379,7 +3418,10 @@ async def health_check():
 
 
 @router.get("/api/admin/maintenance")
-async def get_maintenance_state(token: str = Depends(verify_admin_token)):
+async def get_maintenance_state(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     return {"success": True, "maintenance": redis_runtime.maintenance_snapshot()}
 
 
@@ -3387,6 +3429,7 @@ async def get_maintenance_state(token: str = Depends(verify_admin_token)):
 async def update_maintenance_state(
     payload: MaintenanceRequest,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     try:
         state = await redis_runtime.set_maintenance(
@@ -3439,7 +3482,10 @@ def _websocket_origin_is_same_origin(websocket: WebSocket) -> bool:
 
 
 @router.websocket("/api/admin/events/ws")
-async def admin_events_websocket(websocket: WebSocket):
+async def admin_events_websocket(
+    websocket: WebSocket,
+    container: AppContainer = Depends(get_container),
+):
     """Authenticated dashboard event feed with Redis cursor replay."""
     if _websocket_uses_api_only_host(websocket):
         await websocket.close(code=1008, reason="admin_websocket_not_available_on_api_host")
@@ -3448,7 +3494,7 @@ async def admin_events_websocket(websocket: WebSocket):
         await websocket.close(code=1008, reason="same_origin_required")
         return
     session_token = str(websocket.cookies.get(ADMIN_SESSION_COOKIE_NAME) or "").strip()
-    if not await is_admin_session_token_valid(session_token):
+    if not await is_admin_session_token_valid(session_token, container.db):
         await websocket.close(code=1008, reason="admin_session_required")
         return
 
@@ -3499,6 +3545,7 @@ async def get_stats(
     request: Request,
     response: Response,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Get statistics for dashboard"""
     if get_admin_token_from_cookie(request) != token:
@@ -3508,7 +3555,7 @@ async def get_stats(
             token,
             remember_me=True,
         )
-    return await db.get_dashboard_stats()
+    return await container.db.get_dashboard_stats()
 
 
 @router.get("/api/logs")
@@ -3521,6 +3568,7 @@ async def get_logs(
         description="Comma-separated operation values to exclude (e.g. generate_image,generate_video)",
     ),
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Get lightweight request logs for list view (paginated)."""
     limit = max(1, min(limit, 100))
@@ -3529,8 +3577,8 @@ async def get_logs(
     if exclude_operations and exclude_operations.strip():
         exclude_list = [x.strip() for x in exclude_operations.split(",") if x.strip()]
     search_text = (search or "").strip()
-    total = await db.count_request_logs(exclude_operations=exclude_list, search=search_text)
-    logs = await db.get_logs(
+    total = await container.db.count_request_logs(exclude_operations=exclude_list, search=search_text)
+    logs = await container.db.get_logs(
         limit=limit, offset=offset, include_payload=False, exclude_operations=exclude_list, search=search_text
     )
 
@@ -3542,47 +3590,52 @@ async def get_logs(
         except (TypeError, ValueError):
             status_code = None
         captcha_ua = _extract_captcha_user_agent_metadata(log.get("response_body_excerpt"))
-        result.append({
-            "id": log.get("id"),
-            "job_id": log.get("job_id") or _extract_log_job_id(log.get("response_body_excerpt")),
-            "token_id": log.get("token_id"),
-            "token_email": log.get("token_email"),
-            "token_username": log.get("token_username"),
-            "api_key_id": log.get("api_key_id"),
-            "api_key_label": log.get("api_key_label"),
-            "api_key_prefix": log.get("api_key_prefix"),
-            "operation": log.get("operation"),
-            "status_code": status_code if status_code is not None else raw_status_code,
-            "duration": log.get("duration"),
-            "status_text": log.get("status_text") or "",
-            "progress": log.get("progress") or 0,
-            "created_at": log.get("created_at"),
-            "updated_at": log.get("updated_at"),
-            "payload_available": bool(log.get("payload_available")),
-            "payload_storage_error": log.get("payload_storage_error"),
-            "error_summary": _extract_error_summary(log.get("response_body_excerpt")) if status_code is not None and status_code >= 400 else "",
-            "captcha_user_agent_set": captcha_ua["captcha_user_agent_set"],
-            "captcha_provider": captcha_ua["captcha_provider"],
-        })
+        result.append(
+            {
+                "id": log.get("id"),
+                "job_id": log.get("job_id") or _extract_log_job_id(log.get("response_body_excerpt")),
+                "token_id": log.get("token_id"),
+                "token_email": log.get("token_email"),
+                "token_username": log.get("token_username"),
+                "api_key_id": log.get("api_key_id"),
+                "api_key_label": log.get("api_key_label"),
+                "api_key_prefix": log.get("api_key_prefix"),
+                "operation": log.get("operation"),
+                "status_code": status_code if status_code is not None else raw_status_code,
+                "duration": log.get("duration"),
+                "status_text": log.get("status_text") or "",
+                "progress": log.get("progress") or 0,
+                "created_at": log.get("created_at"),
+                "updated_at": log.get("updated_at"),
+                "payload_available": bool(log.get("payload_available")),
+                "payload_storage_error": log.get("payload_storage_error"),
+                "error_summary": _extract_error_summary(log.get("response_body_excerpt"))
+                if status_code is not None and status_code >= 400
+                else "",
+                "captcha_user_agent_set": captcha_ua["captcha_user_agent_set"],
+                "captcha_provider": captcha_ua["captcha_provider"],
+            }
+        )
     return {"logs": result, "total": total, "limit": limit, "offset": offset}
 
 
 @router.get("/api/logs/{log_id}")
 async def get_log_detail(
     log_id: int,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Get single request log detail (payload loaded on demand)"""
-    log = await db.get_log_detail(log_id)
+    log = await container.db.get_log_detail(log_id)
     if not log:
         raise HTTPException(status_code=404, detail="日志不存在")
 
     request_body = log.get("request_body")
     response_body = log.get("response_body")
     payload_available = bool(log.get("payload_available"))
-    if payload_available and log.get("payload_object_key") and db.log_payload_manager is not None:
+    if payload_available and log.get("payload_object_key") and container.db.log_payload_manager is not None:
         try:
-            stored_payload = await db.log_payload_manager.load(str(log["payload_object_key"]))
+            stored_payload = await container.db.log_payload_manager.load(str(log["payload_object_key"]))
             if stored_payload:
                 request_body = stored_payload.get("request_body", request_body)
                 response_body = stored_payload.get("response_body", response_body)
@@ -3624,8 +3677,9 @@ async def get_log_detail(
 async def cancel_geminigen_log_task(
     log_id: int,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
-    result = await db.cancel_geminigen_task_by_log_id(log_id, reason="Cancelled by admin")
+    result = await container.db.cancel_geminigen_task_by_log_id(log_id, reason="Cancelled by admin")
     if not result.get("success"):
         raise HTTPException(
             status_code=int(result.get("status_code") or 400),
@@ -3635,33 +3689,40 @@ async def cancel_geminigen_log_task(
 
 
 @router.delete("/api/logs")
-async def clear_logs(token: str = Depends(verify_admin_token)):
+async def clear_logs(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     """Clear all logs"""
     try:
-        await db.clear_all_logs()
+        await container.db.clear_all_logs()
         return {"success": True, "message": "所有日志已清空"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/api/admin/config")
-async def get_admin_config(token: str = Depends(verify_admin_token)):
+async def get_admin_config(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     """Get admin configuration"""
-    admin_config = await db.get_admin_config()
+    admin_config = await container.db.get_admin_config()
 
     return {
         "admin_username": config.admin_username,
         "api_key": config.api_key,
         "error_ban_threshold": admin_config.error_ban_threshold,
         "error_ban_enabled": admin_config.error_ban_enabled,
-        "debug_enabled": config.debug_enabled  # Return actual debug status
+        "debug_enabled": config.debug_enabled,  # Return actual debug status
     }
 
 
 @router.post("/api/admin/config")
 async def update_admin_config(
     request: UpdateAdminConfigRequest,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Update admin configuration (error ban threshold and/or auto-disable toggle)"""
     kwargs: Dict[str, Any] = {}
@@ -3671,7 +3732,7 @@ async def update_admin_config(
         kwargs["error_ban_enabled"] = 1 if request.error_ban_enabled else 0
     if not kwargs:
         raise HTTPException(status_code=400, detail="No fields to update")
-    await db.update_admin_config(**kwargs)
+    await container.db.update_admin_config(**kwargs)
 
     return {"success": True, "message": "配置更新成功"}
 
@@ -3681,7 +3742,8 @@ async def update_admin_password(
     payload: ChangePasswordRequest,
     request: Request,
     response: Response,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Update admin password"""
     return await change_password(payload, request, response, token)
@@ -3690,14 +3752,15 @@ async def update_admin_password(
 @router.post("/api/admin/apikey")
 async def update_api_key(
     request: UpdateAPIKeyRequest,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Update API key (for external API calls, NOT for admin login)"""
     # Update API key in database
-    await db.update_admin_config(api_key=request.new_api_key)
+    await container.db.update_admin_config(api_key=request.new_api_key)
 
     # 🔥 Hot reload: sync database config to memory
-    await db.reload_config_to_memory()
+    await container.db.reload_config_to_memory()
 
     return {"success": True, "message": "API Key更新成功"}
 
@@ -3706,23 +3769,22 @@ async def update_api_key(
 async def restore_sqlite_database(
     database: UploadFile = File(...),
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Restore flow.db from an uploaded SQLite file."""
-    if db is None:
+    if container.db is None:
         raise HTTPException(status_code=500, detail="Database service is not initialized")
-    if getattr(db, "backend", "sqlite") != "sqlite":
+    if getattr(container.db, "backend", "sqlite") != "sqlite":
         raise HTTPException(status_code=410, detail="sqlite_restore_removed")
 
-    db_path = Path(db.db_path)
+    db_path = Path(container.db.db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     upload_path = db_path.with_name(f"{db_path.name}.upload-{int(time.time())}-{secrets.token_hex(4)}")
-    backup_path = db_path.with_name(
-        f"{db_path.name}.backup-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
-    )
+    backup_path = db_path.with_name(f"{db_path.name}.backup-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}")
 
     written = 0
     try:
-        async with _database_restore_lock:
+        async with container.database_restore_lock:
             with open(upload_path, "wb") as out:
                 while True:
                     chunk = await database.read(1024 * 1024)
@@ -3735,16 +3797,16 @@ async def restore_sqlite_database(
 
             validation = _validate_uploaded_sqlite_database(upload_path)
 
-            await db.close_runtime_connections()
+            await container.db.close_runtime_connections()
             if db_path.exists():
                 await asyncio.to_thread(_create_sqlite_database_snapshot, db_path, backup_path)
 
             upload_path.replace(db_path)
 
-            await db.init_db()
-            await db.check_and_migrate_db(config.get_raw_config())
-            await db.cache_schema_capabilities()
-            await db.reload_config_to_memory()
+            await container.db.init_db()
+            await container.db.check_and_migrate_db(config.get_raw_config())
+            await container.db.cache_schema_capabilities()
+            await container.db.reload_config_to_memory()
 
         return {
             "success": True,
@@ -3764,14 +3826,17 @@ async def restore_sqlite_database(
 
 
 @router.get("/api/admin/database/download")
-async def download_sqlite_database(token: str = Depends(verify_admin_token)):
+async def download_sqlite_database(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     """Download a consistent snapshot of the current flow.db SQLite database."""
-    if db is None:
+    if container.db is None:
         raise HTTPException(status_code=500, detail="Database service is not initialized")
-    if getattr(db, "backend", "sqlite") != "sqlite":
+    if getattr(container.db, "backend", "sqlite") != "sqlite":
         raise HTTPException(status_code=410, detail="sqlite_download_removed")
 
-    db_path = Path(db.db_path)
+    db_path = Path(container.db.db_path)
     if not db_path.is_file():
         raise HTTPException(status_code=404, detail="Database file not found")
 
@@ -3782,7 +3847,7 @@ async def download_sqlite_database(token: str = Depends(verify_admin_token)):
     download_filename = f"{db_path.stem}-{timestamp}.db"
 
     try:
-        async with _database_restore_lock:
+        async with container.database_restore_lock:
             await asyncio.to_thread(_create_sqlite_database_snapshot, db_path, snapshot_path)
 
         if not snapshot_path.is_file() or snapshot_path.stat().st_size <= 0:
@@ -3802,10 +3867,10 @@ async def download_sqlite_database(token: str = Depends(verify_admin_token)):
         raise HTTPException(status_code=500, detail=f"Database download failed: {exc}") from exc
 
 
-def _google_drive_backups() -> GoogleDriveBackupService:
-    if google_drive_backup_service is None:
+def _google_drive_backups(service: Optional[GoogleDriveBackupService]) -> GoogleDriveBackupService:
+    if service is None:
         raise HTTPException(status_code=503, detail="Google Drive backup service is not initialized")
-    return google_drive_backup_service
+    return service
 
 
 def _google_drive_error(exc: GoogleDriveBackupError) -> HTTPException:
@@ -3815,16 +3880,20 @@ def _google_drive_error(exc: GoogleDriveBackupError) -> HTTPException:
 
 
 @router.get("/api/admin/backups/google-drive/status")
-async def google_drive_backup_status(token: str = Depends(verify_admin_token)):
-    return {"success": True, **_google_drive_backups().public_status()}
+async def google_drive_backup_status(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
+    return {"success": True, **_google_drive_backups(container.google_drive_backup_service).public_status()}
 
 
 @router.put("/api/admin/backups/google-drive/config")
 async def update_google_drive_backup_config(
     payload: GoogleDriveBackupConfigRequest,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
-    service = _google_drive_backups()
+    service = _google_drive_backups(container.google_drive_backup_service)
     try:
         status = service.update_config(
             enabled=payload.enabled,
@@ -3838,9 +3907,12 @@ async def update_google_drive_backup_config(
 
 
 @router.post("/api/admin/backups/google-drive/oauth/start")
-async def start_google_drive_oauth(token: str = Depends(verify_admin_token)):
+async def start_google_drive_oauth(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     try:
-        authorization_url = _google_drive_backups().begin_oauth(token)
+        authorization_url = _google_drive_backups(container.google_drive_backup_service).begin_oauth(token)
     except GoogleDriveBackupError as exc:
         raise _google_drive_error(exc) from exc
     return {"success": True, "authorization_url": authorization_url}
@@ -3852,6 +3924,7 @@ async def finish_google_drive_oauth(
     state: str = Query(""),
     code: str = Query(""),
     error: str = Query(""),
+    container: AppContainer = Depends(get_container),
 ):
     if error:
         return RedirectResponse(url="/manage?google_drive=denied", status_code=303)
@@ -3859,7 +3932,7 @@ async def finish_google_drive_oauth(
     if not session_token or not code or not state:
         raise HTTPException(status_code=400, detail="OAuth callback is incomplete")
     try:
-        await _google_drive_backups().finish_oauth(
+        await _google_drive_backups(container.google_drive_backup_service).finish_oauth(
             state=state,
             code=code,
             admin_session=session_token,
@@ -3870,36 +3943,51 @@ async def finish_google_drive_oauth(
 
 
 @router.post("/api/admin/backups/google-drive/test")
-async def test_google_drive_backup(token: str = Depends(verify_admin_token)):
+async def test_google_drive_backup(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     try:
-        return await _google_drive_backups().test_connection()
+        return await _google_drive_backups(container.google_drive_backup_service).test_connection()
     except GoogleDriveBackupError as exc:
         raise _google_drive_error(exc) from exc
 
 
 @router.post("/api/admin/backups/google-drive/disconnect")
-async def disconnect_google_drive_backup(token: str = Depends(verify_admin_token)):
-    await _google_drive_backups().disconnect()
+async def disconnect_google_drive_backup(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
+    await _google_drive_backups(container.google_drive_backup_service).disconnect()
     return {"success": True}
 
 
 @router.post("/api/admin/backups/google-drive/backups")
-async def create_google_drive_backup(token: str = Depends(verify_admin_token)):
+async def create_google_drive_backup(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     try:
-        job = await _google_drive_backups().start_backup("manual")
+        job = await _google_drive_backups(container.google_drive_backup_service).start_backup("manual")
     except GoogleDriveBackupError as exc:
         raise _google_drive_error(exc) from exc
     return JSONResponse(status_code=202, content={"success": True, "job": job})
 
 
 @router.get("/api/admin/backups/google-drive/job")
-async def get_google_drive_backup_job(token: str = Depends(verify_admin_token)):
-    return {"success": True, "job": _google_drive_backups().public_status().get("job")}
+async def get_google_drive_backup_job(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
+    return {"success": True, "job": _google_drive_backups(container.google_drive_backup_service).public_status().get("job")}
 
 
 @router.get("/api/admin/backups/google-drive/backups")
-async def list_google_drive_backups(token: str = Depends(verify_admin_token)):
-    service = _google_drive_backups()
+async def list_google_drive_backups(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
+    service = _google_drive_backups(container.google_drive_backup_service)
     if not service.public_status().get("connected"):
         return {"success": True, "backups": []}
     try:
@@ -3910,9 +3998,13 @@ async def list_google_drive_backups(token: str = Depends(verify_admin_token)):
 
 
 @router.delete("/api/admin/backups/google-drive/backups/{file_id}")
-async def delete_google_drive_backup(file_id: str, token: str = Depends(verify_admin_token)):
+async def delete_google_drive_backup(
+    file_id: str,
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     try:
-        await _google_drive_backups().delete_backup(file_id)
+        await _google_drive_backups(container.google_drive_backup_service).delete_backup(file_id)
     except GoogleDriveBackupError as exc:
         raise _google_drive_error(exc) from exc
     return {"success": True}
@@ -3923,24 +4015,28 @@ async def restore_google_drive_backup(
     file_id: str,
     payload: GoogleDriveRestoreRequest,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     if payload.confirmation.strip() != "RESTORE":
         raise HTTPException(status_code=400, detail="Type RESTORE to confirm")
-    if not await db.is_admin_session_recent(token, 15 * 60):
+    if not await container.db.is_admin_session_recent(token, 15 * 60):
         raise HTTPException(status_code=403, detail="Log in again before restoring a backup")
     try:
-        job = await _google_drive_backups().start_restore(file_id)
+        job = await _google_drive_backups(container.google_drive_backup_service).start_restore(file_id)
     except GoogleDriveBackupError as exc:
         raise _google_drive_error(exc) from exc
     return JSONResponse(status_code=202, content={"success": True, "job": job})
 
 
 @router.get("/api/admin/managed-apikeys")
-async def list_managed_api_keys(token: str = Depends(verify_admin_token)):
-    if not api_key_manager:
+async def list_managed_api_keys(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
+    if not container.api_key_manager:
         raise HTTPException(status_code=503, detail="API key manager not initialized")
-    keys = await db.list_api_keys()
-    runtime = getattr(api_key_manager, "redis_runtime", None)
+    keys = await container.db.list_api_keys()
+    runtime = getattr(container.api_key_manager, "redis_runtime", None)
     if runtime is not None and runtime.ready:
         for row in keys:
             row["is_online"] = await runtime.is_present(int(row["id"]))
@@ -3951,14 +4047,15 @@ async def list_managed_api_keys(token: str = Depends(verify_admin_token)):
 async def create_managed_api_key(
     request: CreateManagedApiKeyRequest,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
-    if not api_key_manager:
+    if not container.api_key_manager:
         raise HTTPException(status_code=503, detail="API key manager not initialized")
     scopes_str = (request.scopes or "").strip()
     if not scopes_str:
         raise HTTPException(status_code=400, detail="scopes cannot be empty")
     try:
-        created = await api_key_manager.create_api_key(
+        created = await container.api_key_manager.create_api_key(
             client_name=request.client_name,
             label=request.label,
             scopes=scopes_str,
@@ -3981,9 +4078,10 @@ async def update_managed_api_key(
     key_id: int,
     request: UpdateManagedApiKeyRequest,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     # Keep account mappings clean even when account_ids are not edited.
-    await db.prune_stale_api_key_accounts(key_id)
+    await container.db.prune_stale_api_key_accounts(key_id)
 
     valid_account_ids = request.account_ids
     if request.account_ids is not None:
@@ -3991,7 +4089,7 @@ async def update_managed_api_key(
         if cleaned_ids:
             missing_ids = []
             for account_id in cleaned_ids:
-                token_obj = await db.get_token(account_id)
+                token_obj = await container.db.get_token(account_id)
                 if token_obj is None:
                     missing_ids.append(account_id)
             if missing_ids:
@@ -4007,7 +4105,7 @@ async def update_managed_api_key(
         if not scopes_arg:
             raise HTTPException(status_code=400, detail="scopes cannot be empty when provided")
 
-    await db.update_api_key(
+    await container.db.update_api_key(
         key_id,
         client_name=request.client_name,
         label=request.label,
@@ -4017,8 +4115,8 @@ async def update_managed_api_key(
         account_ids=valid_account_ids,
         endpoint_limits=request.endpoint_limits,
     )
-    if api_key_manager:
-        await api_key_manager.invalidate(key_id)
+    if container.api_key_manager:
+        await container.api_key_manager.invalidate(key_id)
     return {"success": True, "message": "Managed API key updated"}
 
 
@@ -4027,13 +4125,14 @@ async def get_managed_api_key_adobe_usage(
     key_id: int,
     months: int = Query(12, ge=1, le=60),
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Monthly successful Adobe-suite request counts (from request_logs)."""
-    detail = await db.get_api_key_detail(key_id)
+    detail = await container.db.get_api_key_detail(key_id)
     if not detail:
         raise HTTPException(status_code=404, detail="Managed API key not found")
     months = int(months)
-    stats = await db.get_adobe_usage_stats(key_id, months_back=months)
+    stats = await container.db.get_adobe_usage_stats(key_id, months_back=months)
     return {
         "success": True,
         "key_id": key_id,
@@ -4044,7 +4143,10 @@ async def get_managed_api_key_adobe_usage(
 
 
 @router.get("/api/admin/storage/status")
-async def get_storage_status(token: str = Depends(verify_admin_token)):
+async def get_storage_status(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     """Return sanitized persistent-volume usage and BrowserMetrics cleanup totals."""
     data_dir = get_runtime_data_dir()
     usage = await asyncio.to_thread(shutil.disk_usage, data_dir)
@@ -4064,22 +4166,19 @@ async def get_storage_status(token: str = Depends(verify_admin_token)):
 async def get_managed_api_key_generation_stats(
     key_id: int,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Durable dashboard-style generation counters for one managed API key."""
-    detail = await db.get_api_key_detail(key_id)
+    detail = await container.db.get_api_key_detail(key_id)
     if not detail:
         raise HTTPException(status_code=404, detail="Managed API key not found")
     native_image_models = [
-        model_id
-        for model_id, model_config in MODEL_CONFIG.items()
-        if model_config.get("type") == "image"
+        model_id for model_id, model_config in MODEL_CONFIG.items() if model_config.get("type") == "image"
     ]
     native_video_models = [
-        model_id
-        for model_id, model_config in MODEL_CONFIG.items()
-        if model_config.get("type") == "video"
+        model_id for model_id, model_config in MODEL_CONFIG.items() if model_config.get("type") == "video"
     ]
-    stats = await db.get_api_key_generation_stats(
+    stats = await container.db.get_api_key_generation_stats(
         key_id,
         native_image_models=native_image_models,
         native_video_models=native_video_models,
@@ -4093,21 +4192,23 @@ async def list_managed_api_key_audit(
     limit: int = 50,
     offset: int = 0,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Must be registered before /managed-apikeys/{key_id} or 'audit' is parsed as key_id (422)."""
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
-    total = await db.count_api_key_audit_logs(key_id=key_id)
-    logs = await db.list_api_key_audit_logs(limit=limit, offset=offset, key_id=key_id)
+    total = await container.db.count_api_key_audit_logs(key_id=key_id)
+    logs = await container.db.list_api_key_audit_logs(limit=limit, offset=offset, key_id=key_id)
     return {"success": True, "logs": logs, "total": total, "limit": limit, "offset": offset}
 
 
 @router.delete("/api/admin/managed-apikeys/audit")
 async def clear_managed_api_key_audit(
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Clear all managed API key audit logs."""
-    deleted = await db.clear_api_key_audit_logs()
+    deleted = await container.db.clear_api_key_audit_logs()
     return {"success": True, "message": "Managed API key audit logs cleared", "deleted": deleted}
 
 
@@ -4117,16 +4218,17 @@ async def list_managed_api_key_projects(
     limit: int = 10,
     offset: int = 0,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Paginated VideoFX projects scoped to a managed API key + per-account current project cursors."""
     raise HTTPException(status_code=410, detail="Project management has been removed")
-    detail = await db.get_api_key_detail(key_id)
+    detail = await container.db.get_api_key_detail(key_id)
     if not detail:
         raise HTTPException(status_code=404, detail="Managed API key not found")
     limit = max(1, min(limit, 100))
     offset = max(0, offset)
-    total = await db.count_projects_by_api_key(key_id)
-    projects = await db.list_projects_by_api_key(key_id, limit=limit, offset=offset)
+    total = await container.db.count_projects_by_api_key(key_id)
+    projects = await container.db.list_projects_by_api_key(key_id, limit=limit, offset=offset)
     projects_by_token: dict[int, list[Any]] = {}
     for p in projects:
         try:
@@ -4139,11 +4241,13 @@ async def list_managed_api_key_projects(
 
     accounts_out = []
     active_by_token: dict[int, str] = {}
-    for account_id in await db.get_api_key_account_ids(key_id):
-        t = await token_manager.get_token(account_id)
+    for account_id in await container.db.get_api_key_account_ids(key_id):
+        t = await container.token_manager.get_token(account_id)
         if t:
             token_scoped_projects = projects_by_token.get(int(t.id), [])
-            active_project = next((proj for proj in token_scoped_projects if bool(getattr(proj, "is_active", False))), None)
+            active_project = next(
+                (proj for proj in token_scoped_projects if bool(getattr(proj, "is_active", False))), None
+            )
             active_pid = str(active_project.project_id) if active_project and active_project.project_id else None
             active_name = str(active_project.project_name) if active_project and active_project.project_name else None
             if active_pid:
@@ -4175,9 +4279,7 @@ async def list_managed_api_key_projects(
         pd = _project_to_dict(p)
         tid_raw = pd.get("token_id")
         tid = int(tid_raw) if isinstance(tid_raw, int) else None
-        is_current_for_token = bool(
-            tid is not None and active_by_token.get(tid) == str(pd.get("project_id") or "")
-        )
+        is_current_for_token = bool(tid is not None and active_by_token.get(tid) == str(pd.get("project_id") or ""))
         pd["is_current_for_token"] = is_current_for_token
         pd["project_status"] = "active" if is_current_for_token else "old"
         projects_out.append(pd)
@@ -4197,10 +4299,11 @@ async def create_managed_api_key_project(
     key_id: int,
     request: dict,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Create a VideoFX project for a token assigned to this managed key; tags projects.api_key_id."""
     raise HTTPException(status_code=410, detail="Project management has been removed")
-    detail = await db.get_api_key_detail(key_id)
+    detail = await container.db.get_api_key_detail(key_id)
     if not detail:
         raise HTTPException(status_code=404, detail="Managed API key not found")
 
@@ -4211,11 +4314,11 @@ async def create_managed_api_key_project(
         token_id = int(raw_tid)
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="token_id must be an integer")
-    allowed = set(await db.get_api_key_account_ids(key_id))
+    allowed = set(await container.db.get_api_key_account_ids(key_id))
     if token_id not in allowed:
         raise HTTPException(status_code=400, detail="token_id is not assigned to this API key")
 
-    t = await token_manager.get_token(token_id)
+    t = await container.token_manager.get_token(token_id)
     if not t:
         raise HTTPException(status_code=404, detail="Token not found")
 
@@ -4229,13 +4332,13 @@ async def create_managed_api_key_project(
         raise HTTPException(status_code=400, detail="set_as_current must be a boolean")
 
     try:
-        project = await token_manager.create_project_for_token(
+        project = await container.token_manager.create_project_for_token(
             token_id,
             title=title,
             set_as_current=set_as_current,
             api_key_id=key_id,
         )
-        updated = await token_manager.get_token(token_id) if set_as_current else None
+        updated = await container.token_manager.get_token(token_id) if set_as_current else None
         return {
             "success": True,
             "message": "Project created",
@@ -4261,8 +4364,9 @@ async def get_managed_api_key(
     key_id: int,
     reveal_plaintext: bool = False,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
-    detail = await db.get_api_key_detail(key_id, include_plaintext=reveal_plaintext)
+    detail = await container.db.get_api_key_detail(key_id, include_plaintext=reveal_plaintext)
     if not detail:
         raise HTTPException(status_code=404, detail="Managed API key not found")
     return {"success": True, "key": detail}
@@ -4272,15 +4376,16 @@ async def get_managed_api_key(
 async def delete_managed_api_key(
     key_id: int,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
-    detail = await db.get_api_key_detail(key_id)
+    detail = await container.db.get_api_key_detail(key_id)
     if not detail:
         raise HTTPException(status_code=404, detail="Managed API key not found")
 
-    cache_rows = await db.list_cache_files_for_api_key_cleanup(key_id)
+    cache_rows = await container.db.list_cache_files_for_api_key_cleanup(key_id)
     cache_objects_deleted = 0
     if cache_rows:
-        file_cache = getattr(generation_handler, "file_cache", None)
+        file_cache = getattr(container.generation_handler, "file_cache", None)
         if file_cache is None or getattr(file_cache, "backend", None) is None:
             raise HTTPException(status_code=503, detail="Cache storage is unavailable; managed API key was not deleted")
         try:
@@ -4299,17 +4404,17 @@ async def delete_managed_api_key(
                 detail="Cache storage cleanup failed; managed API key was not deleted",
             ) from exc
 
-    result = await db.delete_api_key(key_id)
+    result = await container.db.delete_api_key(key_id)
     if not result.get("deleted"):
         raise HTTPException(status_code=404, detail="Managed API key not found")
-    if api_key_manager:
-        await api_key_manager.invalidate(key_id)
+    if container.api_key_manager:
+        await container.api_key_manager.invalidate(key_id)
 
     worker_sessions_terminated = 0
     try:
         from ..services.browser_captcha_extension import ExtensionCaptchaService
 
-        extension_service = await ExtensionCaptchaService.get_instance(db=db)
+        extension_service = await ExtensionCaptchaService.get_instance(db=container.db)
         worker_sessions_terminated = await extension_service.kill_managed_api_key_sessions(key_id)
     except Exception as exc:
         from ..core.logger import debug_logger
@@ -4329,16 +4434,16 @@ async def delete_managed_api_key(
 
 
 @router.get("/api/admin/captcha-worker-keys")
-async def list_captcha_worker_keys(token: str = Depends(verify_admin_token)):
+async def list_captcha_worker_keys(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     from ..services.browser_captcha_extension import ExtensionCaptchaService
 
-    keys = await db.list_captcha_worker_keys()
-    service = await ExtensionCaptchaService.get_instance(db=db)
+    keys = await container.db.list_captcha_worker_keys()
+    service = await ExtensionCaptchaService.get_instance(db=container.db)
     active_workers = await service.list_active_workers()
-    captcha_sessions = [
-        w for w in active_workers
-        if w.get("captcha_worker_id") is not None
-    ]
+    captcha_sessions = [w for w in active_workers if w.get("captcha_worker_id") is not None]
     return {"success": True, "keys": keys, "sessions": captcha_sessions}
 
 
@@ -4346,15 +4451,16 @@ async def list_captcha_worker_keys(token: str = Depends(verify_admin_token)):
 async def create_captcha_worker_key(
     request: CaptchaWorkerKeyCreateRequest,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     raw_key = _generate_captcha_worker_key()
-    key_id = await db.create_captcha_worker_key(
+    key_id = await container.db.create_captcha_worker_key(
         key_prefix=_worker_key_prefix(raw_key),
         key_hash=_hash_worker_registration_key(raw_key),
         label=(request.label or "").strip(),
         key_plaintext=raw_key.strip(),
     )
-    row = await db.get_captcha_worker_key(key_id)
+    row = await container.db.get_captcha_worker_key(key_id)
     return {"success": True, "key": row, "captcha_worker_key": raw_key}
 
 
@@ -4363,8 +4469,9 @@ async def update_captcha_worker_key(
     key_id: int,
     request: CaptchaWorkerKeyUpdateRequest,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
-    existing = await db.get_captcha_worker_key(key_id)
+    existing = await container.db.get_captcha_worker_key(key_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Captcha worker key not found")
     fs = request.model_fields_set
@@ -4373,8 +4480,8 @@ async def update_captcha_worker_key(
         updates["label"] = request.label
     if "is_active" in fs:
         updates["is_active"] = request.is_active
-    await db.update_captcha_worker_key(key_id, **updates)
-    updated = await db.get_captcha_worker_key(key_id)
+    await container.db.update_captcha_worker_key(key_id, **updates)
+    updated = await container.db.get_captcha_worker_key(key_id)
     return {"success": True, "key": updated}
 
 
@@ -4382,11 +4489,12 @@ async def update_captcha_worker_key(
 async def delete_captcha_worker_key(
     key_id: int,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
-    existing = await db.get_captcha_worker_key(key_id)
+    existing = await container.db.get_captcha_worker_key(key_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Captcha worker key not found")
-    await db.delete_captcha_worker_key(key_id)
+    await container.db.delete_captcha_worker_key(key_id)
     return {"success": True, "key_id": key_id}
 
 
@@ -4394,28 +4502,34 @@ async def delete_captcha_worker_key(
 async def kill_captcha_worker_key_sessions(
     key_id: int,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
-    existing = await db.get_captcha_worker_key(key_id)
+    existing = await container.db.get_captcha_worker_key(key_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Captcha worker key not found")
     from ..services.browser_captcha_extension import ExtensionCaptchaService
 
-    service = await ExtensionCaptchaService.get_instance(db=db)
+    service = await ExtensionCaptchaService.get_instance(db=container.db)
     killed = await service.kill_captcha_worker_sessions_for_key(key_id)
     return {
         "success": True,
         "killed_count": killed,
-        "message": f"Terminated {killed} active session(s)" if killed else "No active captcha worker sessions for this key",
+        "message": f"Terminated {killed} active session(s)"
+        if killed
+        else "No active captcha worker sessions for this key",
     }
 
 
 @router.get("/api/admin/extension/workers")
-async def list_extension_workers(token: str = Depends(verify_admin_token)):
+async def list_extension_workers(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     from ..services.browser_captcha_extension import ExtensionCaptchaService
 
-    service = await ExtensionCaptchaService.get_instance(db=db)
+    service = await ExtensionCaptchaService.get_instance(db=container.db)
     active_workers = await service.list_active_workers()
-    bindings = await db.list_extension_worker_bindings()
+    bindings = await container.db.list_extension_worker_bindings()
     queue_stats = service.get_queue_stats()
     return {
         "success": True,
@@ -4431,16 +4545,17 @@ async def list_extension_workers(token: str = Depends(verify_admin_token)):
 async def bind_extension_worker(
     request: ExtensionWorkerBindRequest,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     from ..services.browser_captcha_extension import ExtensionCaptchaService
 
     route_key = (request.route_key or "").strip()
     if not route_key:
         raise HTTPException(status_code=400, detail="route_key is required")
-    detail = await db.get_api_key_detail(int(request.api_key_id))
+    detail = await container.db.get_api_key_detail(int(request.api_key_id))
     if not detail:
         raise HTTPException(status_code=404, detail="Managed API key not found")
-    service = await ExtensionCaptchaService.get_instance(db=db)
+    service = await ExtensionCaptchaService.get_instance(db=container.db)
     await service.bind_route_key(route_key, int(request.api_key_id))
     return {
         "success": True,
@@ -4452,13 +4567,14 @@ async def bind_extension_worker(
 async def unbind_extension_worker(
     request: ExtensionWorkerUnbindRequest,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     from ..services.browser_captcha_extension import ExtensionCaptchaService
 
     route_key = (request.route_key or "").strip()
     if not route_key:
         raise HTTPException(status_code=400, detail="route_key is required")
-    service = await ExtensionCaptchaService.get_instance(db=db)
+    service = await ExtensionCaptchaService.get_instance(db=container.db)
     await service.unbind_route_key(route_key)
     return {
         "success": True,
@@ -4470,13 +4586,14 @@ async def unbind_extension_worker(
 async def kill_extension_worker(
     request: ExtensionWorkerKillRequest,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     from ..services.browser_captcha_extension import ExtensionCaptchaService
 
     worker_session_id = (request.worker_session_id or "").strip()
     if not worker_session_id:
         raise HTTPException(status_code=400, detail="worker_session_id is required")
-    service = await ExtensionCaptchaService.get_instance(db=db)
+    service = await ExtensionCaptchaService.get_instance(db=container.db)
     killed = await service.kill_worker(worker_session_id)
     if not killed:
         return {"success": False, "message": "Worker not found"}
@@ -4486,14 +4603,15 @@ async def kill_extension_worker(
 @router.post("/api/admin/debug")
 async def update_debug_config(
     request: UpdateDebugConfigRequest,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Update debug configuration"""
     try:
         # Persist to database so value survives restart/rebuild.
-        await db.update_debug_config(enabled=request.enabled)
+        await container.db.update_debug_config(enabled=request.enabled)
         # Hot reload updated value into runtime config.
-        await db.reload_config_to_memory()
+        await container.db.reload_config_to_memory()
 
         actual_enabled = config.debug_enabled
         status = "enabled" if actual_enabled else "disabled"
@@ -4512,7 +4630,10 @@ async def update_debug_config(
 
 
 @router.get("/api/generation/timeout")
-async def get_generation_timeout(token: str = Depends(verify_admin_token)):
+async def get_generation_timeout(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     """Get generation timeout configuration"""
     return await get_generation_config(token)
 
@@ -4520,16 +4641,15 @@ async def get_generation_timeout(token: str = Depends(verify_admin_token)):
 @router.post("/api/generation/timeout")
 async def update_generation_timeout(
     request: GenerationConfigRequest,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Update generation timeout configuration"""
-    captcha_cfg = await db.get_captcha_config()
+    captcha_cfg = await container.db.get_captcha_config()
     extension_mode_active = str(getattr(captcha_cfg, "captcha_method", "") or "").strip().lower() == "extension"
     extension_generation_enabled = bool(request.extension_generation_enabled) if extension_mode_active else False
-    extension_generation_fallback_mode = (
-        request.extension_generation_fallback_mode if extension_mode_active else "none"
-    )
-    await db.update_generation_config(
+    extension_generation_fallback_mode = request.extension_generation_fallback_mode if extension_mode_active else "none"
+    await container.db.update_generation_config(
         image_timeout=request.image_timeout,
         video_timeout=request.video_timeout,
         max_retries=request.max_retries,
@@ -4576,52 +4696,53 @@ async def update_generation_timeout(
     )
 
     # 🔥 Hot reload: sync database config to memory
-    await db.reload_config_to_memory()
+    await container.db.reload_config_to_memory()
 
     return {"success": True, "message": "生成配置更新成功"}
 
 
 # ========== AT Auto Refresh Config ==========
 
+
 @router.get("/api/token-refresh/config")
-async def get_token_refresh_config(token: str = Depends(verify_admin_token)):
+async def get_token_refresh_config(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     """Get scheduled AT and protocol ST refresh configuration."""
-    captcha_config = await db.get_captcha_config()
-    protocol_config = await db.get_token_refresh_config()
+    captcha_config = await container.db.get_captcha_config()
+    protocol_config = await container.db.get_token_refresh_config()
     return {
         "success": True,
         "config": {
-            "at_auto_refresh_enabled": bool(
-                getattr(captcha_config, "session_refresh_scheduler_enabled", False)
-            ),
+            "at_auto_refresh_enabled": bool(getattr(captcha_config, "session_refresh_scheduler_enabled", False)),
             "protocol_refresh_enabled": protocol_config.enabled,
             "refresh_interval_minutes": protocol_config.refresh_interval_minutes,
-        }
+        },
     }
 
 
 @router.post("/api/token-refresh/enabled")
 async def update_token_refresh_enabled(
     request: dict,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Update scheduled AT auto refresh enabled."""
     enabled = bool(request.get("enabled", False))
-    await db.update_captcha_config(session_refresh_scheduler_enabled=enabled)
-    await db.reload_config_to_memory()
-    return {
-        "success": True,
-        "message": f"定时自动刷新已{'启用' if enabled else '禁用'}"
-    }
+    await container.db.update_captcha_config(session_refresh_scheduler_enabled=enabled)
+    await container.db.reload_config_to_memory()
+    return {"success": True, "message": f"定时自动刷新已{'启用' if enabled else '禁用'}"}
 
 
 @router.post("/api/token-refresh/config")
 async def update_protocol_token_refresh_config(
     request: TokenRefreshConfigRequest,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Update global protocol ST refresh settings."""
-    updated = await db.update_token_refresh_config(
+    updated = await container.db.update_token_refresh_config(
         enabled=request.enabled,
         refresh_interval_minutes=request.refresh_interval_minutes,
     )
@@ -4634,10 +4755,9 @@ async def update_protocol_token_refresh_config(
     }
 
 
-async def _sync_runtime_cache_config():
-    from . import routes
-    if generation_handler and generation_handler.file_cache:
-        file_cache = generation_handler.file_cache
+async def _sync_runtime_cache_config(handler: Optional[GenerationHandler]):
+    if handler and handler.file_cache:
+        file_cache = handler.file_cache
         file_cache.set_timeout(config.cache_timeout)
         await file_cache.configure_backend(
             config.cache_provider,
@@ -4646,15 +4766,21 @@ async def _sync_runtime_cache_config():
         )
         await file_cache.refresh_cleanup_task()
 
+
 # ========== Cache Configuration Endpoints ==========
 
+
 @router.get("/api/cache/config")
-async def get_cache_config(token: str = Depends(verify_admin_token)):
+async def get_cache_config(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     """Get cache configuration"""
-    cache_config = await db.get_cache_config()
+    cache_config = await container.db.get_cache_config()
     cache_base_url = config.cache_base_url
     from . import routes
-    file_cache = generation_handler.file_cache if generation_handler else None
+
+    file_cache = container.generation_handler.file_cache if container.generation_handler else None
     do_env = file_cache.digitalocean_environment(cache_config.cache_delivery_mode) if file_cache else {}
 
     # Calculate effective base URL
@@ -4670,7 +4796,9 @@ async def get_cache_config(token: str = Depends(verify_admin_token)):
             "timeout": cache_config.cache_timeout,
             "timeout_days": timeout_days,
             "base_url": cache_base_url or "",
-            "effective_base_url": effective_base_url if cache_config.cache_delivery_mode != "cdn" else do_env.get("cdn_base_url", ""),
+            "effective_base_url": effective_base_url
+            if cache_config.cache_delivery_mode != "cdn"
+            else do_env.get("cdn_base_url", ""),
             "provider": cache_config.cache_provider,
             "delivery_mode": cache_config.cache_delivery_mode,
             "digitalocean": {
@@ -4692,27 +4820,35 @@ async def get_cache_config(token: str = Depends(verify_admin_token)):
                 "api_token_configured": bool(do_env.get("api_token_configured")),
                 "cdn_endpoint_configured": bool(do_env.get("cdn_endpoint_configured")),
             },
-        }
+        },
     }
 
 
 @router.get("/api/cache/stats")
-async def get_cache_stats(token: str = Depends(verify_admin_token)):
+async def get_cache_stats(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     """Disk usage for the file cache directory."""
     from . import routes
-    if not generation_handler or not generation_handler.file_cache:
+
+    if not container.generation_handler or not container.generation_handler.file_cache:
         raise HTTPException(status_code=503, detail="File cache not initialized")
-    stats = await generation_handler.file_cache.get_stats()
+    stats = await container.generation_handler.file_cache.get_stats()
     return {"success": True, **stats}
 
 
 @router.get("/api/cache/files")
-async def list_cache_files(token: str = Depends(verify_admin_token)):
+async def list_cache_files(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     """List cached files for admin gallery (names, sizes, image/video/other)."""
     from . import routes
-    if not generation_handler or not generation_handler.file_cache:
+
+    if not container.generation_handler or not container.generation_handler.file_cache:
         raise HTTPException(status_code=503, detail="File cache not initialized")
-    files = await generation_handler.file_cache.list_files()
+    files = await container.generation_handler.file_cache.list_files()
     return {"success": True, "files": files}
 
 
@@ -4721,17 +4857,16 @@ async def get_cache_file_admin_preview(
     filename: str,
     request: Request,
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Stream a cache file for the admin UI (Bearer auth). Plain <img src> cannot use managed-key /api/cache/blob/… URLs."""
     from . import routes
 
-    if not generation_handler or not generation_handler.file_cache:
+    if not container.generation_handler or not container.generation_handler.file_cache:
         raise HTTPException(status_code=503, detail="File cache not initialized")
     safe_name = Path(filename).name
     try:
-        cached = await generation_handler.file_cache.open_cached(
-            safe_name, request.headers.get("range")
-        )
+        cached = await container.generation_handler.file_cache.open_cached(safe_name, request.headers.get("range"))
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Cache file not found")
     except ValueError as exc:
@@ -4754,13 +4889,17 @@ async def get_cache_file_admin_preview(
 
 
 @router.post("/api/cache/clear")
-async def clear_cache_files(token: str = Depends(verify_admin_token)):
+async def clear_cache_files(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     """Delete all files in the cache directory (admin only)."""
     from . import routes
-    if not generation_handler or not generation_handler.file_cache:
+
+    if not container.generation_handler or not container.generation_handler.file_cache:
         raise HTTPException(status_code=503, detail="File cache not initialized")
     try:
-        file_cache = generation_handler.file_cache
+        file_cache = container.generation_handler.file_cache
         removed_count, removed_bytes = await file_cache.backend.clear()
         if file_cache.db is not None and hasattr(file_cache.db, "delete_all_cache_file_metadata"):
             await file_cache.db.delete_all_cache_file_metadata()
@@ -4777,15 +4916,16 @@ async def clear_cache_files(token: str = Depends(verify_admin_token)):
 @router.post("/api/cache/enabled")
 async def update_cache_enabled(
     request: dict,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Update cache enabled status"""
     enabled = request.get("enabled", False)
-    await db.update_cache_config(enabled=enabled)
+    await container.db.update_cache_config(enabled=enabled)
 
     # 🔥 Hot reload: sync database config to memory
-    await db.reload_config_to_memory()
-    await _sync_runtime_cache_config()
+    await container.db.reload_config_to_memory()
+    await _sync_runtime_cache_config(container.generation_handler)
 
     return {"success": True, "message": f"缓存已{'启用' if enabled else '禁用'}"}
 
@@ -4793,7 +4933,8 @@ async def update_cache_enabled(
 @router.post("/api/cache/config")
 async def update_cache_config_full(
     request: dict,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Update complete cache configuration"""
     enabled = request.get("enabled")
@@ -4828,22 +4969,25 @@ async def update_cache_config_full(
             )
 
     from . import routes
-    file_cache = generation_handler.file_cache if generation_handler else None
-    current = await db.get_cache_config()
+
+    file_cache = container.generation_handler.file_cache if container.generation_handler else None
+    current = await container.db.get_cache_config()
     target_provider = provider or current.cache_provider
     target_mode = delivery_mode or current.cache_delivery_mode
     changed_backend = target_provider != current.cache_provider or target_mode != current.cache_delivery_mode
     if file_cache and changed_backend:
         stats = await file_cache.get_stats()
         if int(stats.get("file_count", 0)) > 0:
-            raise HTTPException(status_code=409, detail="Clear the current cache before changing provider or delivery mode")
+            raise HTTPException(
+                status_code=409, detail="Clear the current cache before changing provider or delivery mode"
+            )
     if file_cache and target_provider == "digitalocean":
         try:
             await file_cache.validate_backend(target_provider, target_mode)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"DigitalOcean validation failed: {exc}")
 
-    await db.update_cache_config(
+    await container.db.update_cache_config(
         enabled=enabled,
         timeout=timeout,
         base_url=base_url,
@@ -4852,21 +4996,26 @@ async def update_cache_config_full(
     )
 
     # 🔥 Hot reload: sync database config to memory
-    await db.reload_config_to_memory()
-    await _sync_runtime_cache_config()
+    await container.db.reload_config_to_memory()
+    await _sync_runtime_cache_config(container.generation_handler)
 
     return {"success": True, "message": "缓存配置更新成功"}
 
 
 @router.post("/api/cache/provider/test")
-async def test_cache_provider(request: dict, token: str = Depends(verify_admin_token)):
+async def test_cache_provider(
+    request: dict,
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     from . import routes
-    if not generation_handler or not generation_handler.file_cache:
+
+    if not container.generation_handler or not container.generation_handler.file_cache:
         raise HTTPException(status_code=503, detail="File cache not initialized")
     provider = str(request.get("provider") or "digitalocean").strip().lower()
     delivery_mode = str(request.get("delivery_mode") or "proxy").strip().lower()
     try:
-        status = await generation_handler.file_cache.validate_backend(provider, delivery_mode)
+        status = await container.generation_handler.file_cache.validate_backend(provider, delivery_mode)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Provider validation failed: {exc}")
     return {"success": True, "status": status}
@@ -4875,15 +5024,16 @@ async def test_cache_provider(request: dict, token: str = Depends(verify_admin_t
 @router.post("/api/cache/base-url")
 async def update_cache_base_url(
     request: dict,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Update cache base URL"""
     base_url = request.get("base_url", "")
-    await db.update_cache_config(base_url=base_url)
+    await container.db.update_cache_config(base_url=base_url)
 
     # 🔥 Hot reload: sync database config to memory
-    await db.reload_config_to_memory()
-    await _sync_runtime_cache_config()
+    await container.db.reload_config_to_memory()
+    await _sync_runtime_cache_config(container.generation_handler)
 
     return {"success": True, "message": "缓存Base URL更新成功"}
 
@@ -4891,7 +5041,8 @@ async def update_cache_base_url(
 @router.post("/api/captcha/config")
 async def update_captcha_config(
     request: dict,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Update captcha configuration"""
     from ..services.browser_captcha import validate_browser_proxy_url
@@ -4934,7 +5085,9 @@ async def update_captcha_config(
     session_refresh_scheduler_enabled = request.get("session_refresh_scheduler_enabled")
     session_refresh_scheduler_interval_minutes = request.get("session_refresh_scheduler_interval_minutes")
     session_refresh_scheduler_batch_size = request.get("session_refresh_scheduler_batch_size")
-    session_refresh_scheduler_only_expiring_within_minutes = request.get("session_refresh_scheduler_only_expiring_within_minutes")
+    session_refresh_scheduler_only_expiring_within_minutes = request.get(
+        "session_refresh_scheduler_only_expiring_within_minutes"
+    )
     st_only_refresh_scheduler_enabled = request.get("st_only_refresh_scheduler_enabled")
     st_only_refresh_scheduler_interval_minutes = request.get("st_only_refresh_scheduler_interval_minutes")
     st_only_refresh_scheduler_batch_size = request.get("st_only_refresh_scheduler_batch_size")
@@ -5010,14 +5163,20 @@ async def update_captcha_config(
         except Exception:
             return {"success": False, "message": "dedicated_extension_captcha_timeout_seconds must be an integer"}
         if dedicated_extension_captcha_timeout_seconds < 5 or dedicated_extension_captcha_timeout_seconds > 180:
-            return {"success": False, "message": "dedicated_extension_captcha_timeout_seconds must be between 5 and 180"}
+            return {
+                "success": False,
+                "message": "dedicated_extension_captcha_timeout_seconds must be between 5 and 180",
+            }
     if dedicated_extension_st_refresh_timeout_seconds is not None:
         try:
             dedicated_extension_st_refresh_timeout_seconds = int(dedicated_extension_st_refresh_timeout_seconds)
         except Exception:
             return {"success": False, "message": "dedicated_extension_st_refresh_timeout_seconds must be an integer"}
         if dedicated_extension_st_refresh_timeout_seconds < 10 or dedicated_extension_st_refresh_timeout_seconds > 300:
-            return {"success": False, "message": "dedicated_extension_st_refresh_timeout_seconds must be between 10 and 300"}
+            return {
+                "success": False,
+                "message": "dedicated_extension_st_refresh_timeout_seconds must be between 10 and 300",
+            }
 
     if captcha_method == "remote_browser":
         if not (remote_browser_base_url or "").strip():
@@ -5025,7 +5184,7 @@ async def update_captcha_config(
         if not (remote_browser_api_key or "").strip():
             return {"success": False, "message": "remote_browser 模式需要配置远程打码服务 API Key"}
 
-    await db.update_captcha_config(
+    await container.db.update_captcha_config(
         captcha_method=captcha_method,
         yescaptcha_api_key=yescaptcha_api_key,
         yescaptcha_base_url=yescaptcha_base_url,
@@ -5078,11 +5237,11 @@ async def update_captcha_config(
     )
 
     # 🔥 Hot reload: sync database config to memory
-    await db.reload_config_to_memory()
+    await container.db.reload_config_to_memory()
 
     # 如果使用 browser 打码，热重载浏览器数量配置
     if captcha_method in {"browser", "personal"}:
-        runtime_prepare_started = _schedule_captcha_runtime_prepare(captcha_method)
+        runtime_prepare_started = _schedule_captcha_runtime_prepare(captcha_method, container)
         return {
             "success": True,
             "message": "Captcha configuration updated successfully",
@@ -5097,19 +5256,22 @@ async def update_captcha_config(
 async def get_captcha_runtime_status(
     method: str = "browser",
     token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     runtime_method = _normalize_runtime_method(method)
-    task = captcha_runtime_prepare_tasks.get(runtime_method)
     status = get_runtime_status(runtime_method)
     status["method"] = runtime_method
-    status["task_running"] = bool(task and not task.done())
+    status["task_running"] = container.tasks.is_running(f"captcha-runtime-{runtime_method}")
     return status
 
 
 @router.get("/api/captcha/config")
-async def get_captcha_config(token: str = Depends(verify_admin_token)):
+async def get_captcha_config(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     """Get captcha configuration"""
-    captcha_config = await db.get_captcha_config()
+    captcha_config = await container.db.get_captcha_config()
     return {
         "captcha_method": captcha_config.captcha_method,
         "yescaptcha_api_key": captcha_config.yescaptcha_api_key,
@@ -5125,9 +5287,7 @@ async def get_captcha_config(token: str = Depends(verify_admin_token)):
         "remote_browser_base_url": captcha_config.remote_browser_base_url,
         "remote_browser_api_key": captcha_config.remote_browser_api_key,
         "remote_browser_timeout": captcha_config.remote_browser_timeout,
-        "browser_fallback_to_remote_browser": bool(
-            getattr(captcha_config, "browser_fallback_to_remote_browser", True)
-        ),
+        "browser_fallback_to_remote_browser": bool(getattr(captcha_config, "browser_fallback_to_remote_browser", True)),
         "browser_proxy_enabled": captcha_config.browser_proxy_enabled,
         "browser_proxy_url": captcha_config.browser_proxy_url or "",
         "browser_count": captcha_config.browser_count,
@@ -5169,9 +5329,7 @@ async def get_captcha_config(token: str = Depends(verify_admin_token)):
             getattr(captcha_config, "session_refresh_fail_if_st_refresh_fails", True)
         ),
         "session_refresh_local_only": bool(getattr(captcha_config, "session_refresh_local_only", True)),
-        "session_refresh_scheduler_enabled": bool(
-            getattr(captcha_config, "session_refresh_scheduler_enabled", False)
-        ),
+        "session_refresh_scheduler_enabled": bool(getattr(captcha_config, "session_refresh_scheduler_enabled", False)),
         "session_refresh_scheduler_interval_minutes": int(
             getattr(captcha_config, "session_refresh_scheduler_interval_minutes", 30) or 30
         ),
@@ -5181,9 +5339,7 @@ async def get_captcha_config(token: str = Depends(verify_admin_token)):
         "session_refresh_scheduler_only_expiring_within_minutes": int(
             getattr(captcha_config, "session_refresh_scheduler_only_expiring_within_minutes", 60) or 60
         ),
-        "st_only_refresh_scheduler_enabled": bool(
-            getattr(captcha_config, "st_only_refresh_scheduler_enabled", False)
-        ),
+        "st_only_refresh_scheduler_enabled": bool(getattr(captcha_config, "st_only_refresh_scheduler_enabled", False)),
         "st_only_refresh_scheduler_interval_minutes": int(
             getattr(captcha_config, "st_only_refresh_scheduler_interval_minutes", 5) or 5
         ),
@@ -5210,9 +5366,12 @@ async def get_captcha_config(token: str = Depends(verify_admin_token)):
 
 
 @router.get("/api/agent-gateway/mode")
-async def get_agent_gateway_mode(token: str = Depends(verify_admin_token)):
+async def get_agent_gateway_mode(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     """Probe configured agent-gateway mode via remote_browser_base_url health."""
-    captcha_config = await db.get_captcha_config()
+    captcha_config = await container.db.get_captcha_config()
     base_url = (getattr(captcha_config, "remote_browser_base_url", "") or "").strip()
     if not base_url:
         return {
@@ -5252,9 +5411,12 @@ async def get_agent_gateway_mode(token: str = Depends(verify_admin_token)):
 
 
 @router.get("/api/agent-gateway/connections")
-async def get_agent_gateway_connections(token: str = Depends(verify_admin_token)):
+async def get_agent_gateway_connections(
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     """Fetch currently connected agent sessions from configured gateway."""
-    captcha_config = await db.get_captcha_config()
+    captcha_config = await container.db.get_captcha_config()
     base_url = (getattr(captcha_config, "remote_browser_base_url", "") or "").strip()
     api_key = (getattr(captcha_config, "remote_browser_api_key", "") or "").strip()
     if not base_url:
@@ -5302,7 +5464,8 @@ async def get_agent_gateway_connections(token: str = Depends(verify_admin_token)
 @router.post("/api/captcha/score-test")
 async def test_captcha_score(
     _request: Optional[CaptchaScoreTestRequest] = None,
-    _token: str = Depends(verify_admin_token)
+    _token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """分数测试已禁用。"""
     raise HTTPException(status_code=403, detail="已禁用分数测试")
@@ -5310,8 +5473,9 @@ async def test_captcha_score(
 
 # ========== Plugin Configuration Endpoints ==========
 
-async def _verify_plugin_connection_token(authorization: Optional[str]) -> None:
-    plugin_config = await db.get_plugin_config()
+
+async def _verify_plugin_connection_token(authorization: Optional[str], database: Database) -> None:
+    plugin_config = await database.get_plugin_config()
     provided_token = authorization[7:] if authorization and authorization.startswith("Bearer ") else authorization
     if not plugin_config.connection_token or not secrets.compare_digest(
         str(provided_token or ""),
@@ -5321,9 +5485,13 @@ async def _verify_plugin_connection_token(authorization: Optional[str]) -> None:
 
 
 @router.get("/api/plugin/config")
-async def get_plugin_config(request: Request, token: str = Depends(verify_admin_token)):
+async def get_plugin_config(
+    request: Request,
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
+):
     """Get plugin configuration"""
-    plugin_config = await db.get_plugin_config()
+    plugin_config = await container.db.get_plugin_config()
 
     # Get the actual domain and port from the request
     # This allows the connection URL to reflect the user's actual access path
@@ -5336,6 +5504,7 @@ async def get_plugin_config(request: Request, token: str = Depends(verify_admin_
     else:
         # Fallback to config-based URL
         from ..core.config import config
+
         server_host = config.server_host
         server_port = config.server_port
 
@@ -5349,15 +5518,16 @@ async def get_plugin_config(request: Request, token: str = Depends(verify_admin_
         "config": {
             "connection_token": plugin_config.connection_token,
             "connection_url": connection_url,
-            "auto_enable_on_update": plugin_config.auto_enable_on_update
-        }
+            "auto_enable_on_update": plugin_config.auto_enable_on_update,
+        },
     }
 
 
 @router.post("/api/plugin/config")
 async def update_plugin_config(
     request: dict,
-    token: str = Depends(verify_admin_token)
+    token: str = Depends(verify_admin_token),
+    container: AppContainer = Depends(get_container),
 ):
     """Update plugin configuration"""
     connection_token = request.get("connection_token", "")
@@ -5367,24 +5537,27 @@ async def update_plugin_config(
     if not connection_token:
         connection_token = secrets.token_urlsafe(32)
 
-    await db.update_plugin_config(
-        connection_token=connection_token,
-        auto_enable_on_update=auto_enable_on_update
+    await container.db.update_plugin_config(
+        connection_token=connection_token, auto_enable_on_update=auto_enable_on_update
     )
 
     return {
         "success": True,
         "message": "插件配置更新成功",
         "connection_token": connection_token,
-        "auto_enable_on_update": auto_enable_on_update
+        "auto_enable_on_update": auto_enable_on_update,
     }
 
 
 @router.post("/api/plugin/update-token")
-async def plugin_update_token(request: dict, authorization: Optional[str] = Header(None)):
+async def plugin_update_token(
+    request: dict,
+    authorization: Optional[str] = Header(None),
+    container: AppContainer = Depends(get_container),
+):
     """Receive token update from Chrome extension (no admin auth required, uses connection_token)"""
-    await _verify_plugin_connection_token(authorization)
-    plugin_config = await db.get_plugin_config()
+    await _verify_plugin_connection_token(authorization, container.db)
+    plugin_config = await container.db.get_plugin_config()
 
     # Extract session token from request
     session_token = request.get("session_token")
@@ -5394,7 +5567,7 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
 
     # Step 1: Convert ST to AT to get user info (including email)
     try:
-        result = await token_manager.flow_client.st_to_at(session_token)
+        result = await container.token_manager.flow_client.st_to_at(session_token)
         at = result["access_token"]
         expires = result.get("expires")
         user_info = result.get("user", {})
@@ -5405,10 +5578,11 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
 
         # Parse expiration time
         from datetime import datetime
+
         at_expires = None
         if expires:
             try:
-                at_expires = datetime.fromisoformat(expires.replace('Z', '+00:00'))
+                at_expires = datetime.fromisoformat(expires.replace("Z", "+00:00"))
             except:
                 pass
 
@@ -5416,13 +5590,13 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
         raise HTTPException(status_code=400, detail=f"Invalid session token: {str(e)}")
 
     # Step 2: Check if token with this email exists
-    existing_token = await db.get_token_by_email(email)
+    existing_token = await container.db.get_token_by_email(email)
 
     if existing_token:
         # Update existing token
         try:
             # Update token
-            await token_manager.update_token(
+            await container.token_manager.update_token(
                 token_id=existing_token.id,
                 st=session_token,
                 at=at,
@@ -5438,25 +5612,21 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
 
             # Check if auto-enable is enabled and token is disabled
             if plugin_config.auto_enable_on_update and not existing_token.is_active:
-                await token_manager.enable_token(existing_token.id)
+                await container.token_manager.enable_token(existing_token.id)
                 return {
                     "success": True,
                     "message": f"Token updated and auto-enabled for {email}",
                     "action": "updated",
-                    "auto_enabled": True
+                    "auto_enabled": True,
                 }
 
-            return {
-                "success": True,
-                "message": f"Token updated for {email}",
-                "action": "updated"
-            }
+            return {"success": True, "message": f"Token updated for {email}", "action": "updated"}
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to update token: {str(e)}")
     else:
         # Add new token
         try:
-            new_token = await token_manager.add_token(
+            new_token = await container.token_manager.add_token(
                 st=session_token,
                 remark="Added by Chrome Extension",
                 protocol_mode=request.get("protocol_mode", "session"),
@@ -5472,7 +5642,7 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
                 "success": True,
                 "message": f"Token added for {new_token.email}",
                 "action": "added",
-                "token_id": new_token.id
+                "token_id": new_token.id,
             }
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to add token: {str(e)}")
@@ -5482,9 +5652,10 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
 async def plugin_check_tokens(
     request: Optional[dict] = None,
     authorization: Optional[str] = Header(None),
+    container: AppContainer = Depends(get_container),
 ):
     """Return token status for external syncers using the plugin connection token."""
-    await _verify_plugin_connection_token(authorization)
+    await _verify_plugin_connection_token(authorization, container.db)
 
     requested_emails = (request or {}).get("emails") if isinstance(request, dict) else None
     email_filter = {
@@ -5493,7 +5664,7 @@ async def plugin_check_tokens(
         if str(email or "").strip()
     }
     result = []
-    for row in await db.get_all_tokens_with_stats():
+    for row in await container.db.get_all_tokens_with_stats():
         email = str(row.get("email") or "").strip()
         if email_filter and email.lower() not in email_filter:
             continue
@@ -5501,20 +5672,22 @@ async def plugin_check_tokens(
             token_obj = Token(**row)
         except Exception:
             token_obj = None
-        result.append({
-            "id": row.get("id"),
-            "email": email,
-            "is_active": bool(row.get("is_active")),
-            "needs_refresh": token_manager.needs_at_refresh(token_obj) if token_obj else True,
-            "at_expires": _to_iso(row.get("at_expires")) if row.get("at_expires") else None,
-            "last_used_at": _to_iso(row.get("last_used_at")) if row.get("last_used_at") else None,
-            "protocol_mode": row.get("protocol_mode") or "session",
-            "auto_refresh_enabled": bool(row.get("auto_refresh_enabled", True)),
-            "refresh_interval_minutes": row.get("refresh_interval_minutes") or 120,
-            "last_st_refresh_at": _to_iso(row.get("last_st_refresh_at")) if row.get("last_st_refresh_at") else None,
-            "last_st_refresh_result": row.get("last_st_refresh_result") or "",
-            "credits": row.get("credits", 0),
-        })
+        result.append(
+            {
+                "id": row.get("id"),
+                "email": email,
+                "is_active": bool(row.get("is_active")),
+                "needs_refresh": container.token_manager.needs_at_refresh(token_obj) if token_obj else True,
+                "at_expires": _to_iso(row.get("at_expires")) if row.get("at_expires") else None,
+                "last_used_at": _to_iso(row.get("last_used_at")) if row.get("last_used_at") else None,
+                "protocol_mode": row.get("protocol_mode") or "session",
+                "auto_refresh_enabled": bool(row.get("auto_refresh_enabled", True)),
+                "refresh_interval_minutes": row.get("refresh_interval_minutes") or 120,
+                "last_st_refresh_at": _to_iso(row.get("last_st_refresh_at")) if row.get("last_st_refresh_at") else None,
+                "last_st_refresh_result": row.get("last_st_refresh_result") or "",
+                "credits": row.get("credits", 0),
+            }
+        )
     return {"success": True, "tokens": result}
 
 

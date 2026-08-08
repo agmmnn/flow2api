@@ -782,7 +782,6 @@ def test_geminigen_admin_delete_cancels_assigned_jobs_before_removing_account():
         tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         tmp.close()
         db = Database(tmp.name)
-        previous_db = admin_routes.db
         try:
             await db.init_db()
             account_id = await db.create_geminigen_account(
@@ -801,14 +800,15 @@ def test_geminigen_admin_delete_cancels_assigned_jobs_before_removing_account():
                     status="processing",
                 )
             )
-            admin_routes.db = db
-
-            result = await admin_routes.delete_geminigen_account(account_id, token="admin-token")
+            result = await admin_routes.delete_geminigen_account(
+                account_id,
+                token="admin-token",
+                container=SimpleNamespace(db=db),
+            )
             account = await db.get_geminigen_account(account_id)
             task = await db.get_geminigen_task("geminigen-delete-active")
             return result, account, task
         finally:
-            admin_routes.db = previous_db
             os.unlink(tmp.name)
 
     result, account, task = asyncio.run(run())
