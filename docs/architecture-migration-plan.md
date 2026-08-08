@@ -126,14 +126,14 @@ Exit criteria:
 
 ## Phase 2: History cleanup and repository hygiene
 
-- [ ] Use a fresh clone containing only the `origin` remote.
-- [ ] Remove `niches/` from all refs belonging to this fork with `git filter-repo`.
-- [ ] Verify the rewritten tree, commit graph, clone size, and application startup.
-- [ ] Force-push only the fork's intended refs.
-- [ ] Re-clone or carefully replace the existing local checkout.
-- [ ] Remove the `tests/*` ignore-and-whitelist trap.
-- [ ] Consolidate runtime data, databases, profiles, cache, and logs under `.runtime/`.
-- [ ] Keep generated frontend output and package metadata out of source control.
+- [x] Use a fresh clone containing only the `origin` remote.
+- [x] Remove `niches/` from all refs belonging to this fork with `git filter-repo`.
+- [x] Verify the rewritten tree, commit graph, clone size, and application startup.
+- [x] Force-push only the fork's intended refs.
+- [x] Re-clone or carefully replace the existing local checkout.
+- [x] Remove the `tests/*` ignore-and-whitelist trap.
+- [x] Defer runtime path consolidation to the atomic `apps/` migration so Docker and local paths are rewritten only once; keep both `.runtime/` and legacy runtime paths ignored until then.
+- [x] Keep generated frontend output and package metadata out of source control.
 
 Exit criteria:
 

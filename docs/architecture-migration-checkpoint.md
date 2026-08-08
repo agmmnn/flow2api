@@ -76,3 +76,21 @@ Before rewriting history:
 - [ ] User explicitly approves rewriting and force-pushing the fork's `main` history.
 
 The rewrite must be executed from a fresh, origin-only clone. The current multi-remote checkout must not be used as the rewrite workspace.
+
+## Rewrite result
+
+The user approved the destructive rewrite on 2026-08-08.
+
+- Rewritten `main`: `93a0e8b300491470645a9a5c04e00da1d1271384`
+- Commits processed: 651
+- Rewrite workspace: fresh origin-only clone
+- Push protection: explicit `--force-with-lease` against checkpoint commit `96035568ea61d9630ff82965f5158e57291a7998`
+- Remote verification: GitHub `refs/heads/main` resolved to the rewritten commit
+- `niches/` commits remaining in rewritten history: 0
+- Rewritten HEAD tree: byte-identical to checkpoint HEAD except for removal of `niches/`
+- `git fsck --full`: clean
+- Rewritten packed history: approximately 5.53 MiB
+
+The primary checkout was reset to the verified rewritten `origin/main`. The two fully merged legacy local branches were removed. The `upstream` and `original` remotes were re-added without fetching their old tracking refs, and their push URLs remain disabled.
+
+The Codex desktop application maintains internal `refs/codex/turn-diffs/...` refs for its own review history. Those local-only refs were not deleted, so this existing checkout may retain unreachable pre-rewrite objects until Codex releases them. They are not present on GitHub and do not affect fresh clone size.

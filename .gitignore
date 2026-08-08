@@ -8,6 +8,11 @@ env/
 venv/
 .venv/
 .uv-cache/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+coverage.xml
 ENV/
 build/
 develop-eggs/
@@ -64,7 +69,10 @@ logs.txt
 browser_data
 browser_data_rt
 
-data
+# Canonical local runtime root. The legacy data/ and tmp/ paths remain ignored
+# until the atomic apps/ migration moves existing installations safely.
+.runtime/
+data/
 tmp/
 config/setting.toml
 config/setting_warp.toml
@@ -72,20 +80,8 @@ config/setting_warp_example.toml
 
 # 根目录临时测试文件
 /test_*
-tests/__pycache__/
 *.har
-node_modules
-tests/*
-!tests/test_client_presence.py
-!tests/test_browser_profile_lifecycle.py
-!tests/test_cache_backends.py
-!tests/test_capmonster_enterprise_ua_status.py
-!tests/test_geminigen_generation_capacity.py
-!tests/test_cliproxy_gateway.py
-!tests/test_performance_runtime.py
-!tests/test_postgres_bridge.py
-!tests/test_postgres_integration.py
-!tests/test_project_pinning.py
+node_modules/
 
 # Root GUI static build (keep local-only)
 /static/
