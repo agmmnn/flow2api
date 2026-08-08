@@ -289,7 +289,8 @@ handling, worker health accounting, solver user-agent capture, and upstream verd
 binding. The extension worker decomposition item is complete; personal/browser worker
 pools are the next slice. Personal-mode pool affinity, reservations, health ranking,
 round-robin state, and candidate ordering now live in `workers/personal/routing.py`;
-the legacy pool delegates through compatibility properties while session, tab, CAPTCHA,
+resident-tab and token-pool lease state now live in `workers/personal/models.py`. The
+legacy pool delegates through compatibility properties while session, tab, CAPTCHA,
 and refresh responsibilities are separated incrementally.
 
 Exit criteria:

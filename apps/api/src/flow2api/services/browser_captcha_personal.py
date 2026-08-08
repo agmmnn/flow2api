@@ -6,7 +6,6 @@
 import asyncio
 import base64
 from collections import deque
-from dataclasses import dataclass
 from datetime import datetime
 import gc
 import inspect
@@ -32,7 +31,12 @@ from curl_cffi.requests import AsyncSession
 
 from ..core.logger import debug_logger
 from ..core.config import config
-from ..workers.personal import PersonalWorkerRouting
+from ..workers.personal import (
+    PersonalWorkerRouting,
+    ResidentTabInfo,
+    TokenPoolLease,
+    TokenPoolTimeoutError,
+)
 from .browser_cookie_utils import (
     build_browser_cookie_targets,
     build_cookie_signature,
@@ -1391,52 +1395,6 @@ def _create_proxy_auth_extension(protocol: str, host: str, port: str, username: 
     with open(os.path.join(ext_dir, "background.js"), "w", encoding="utf-8") as f:
         f.write(background_js)
     return ext_dir
-
-
-class ResidentTabInfo:
-    """常驻标签页信息结构"""
-    def __init__(
-        self,
-        tab,
-        slot_id: str,
-        project_id: Optional[str] = None,
-        *,
-        token_id: Optional[int] = None,
-        browser_context_id: Any = None,
-    ):
-        self.tab = tab
-        self.slot_id = slot_id
-        self.project_id = project_id or slot_id
-        self.token_id = token_id
-        self.browser_context_id = browser_context_id
-        self.recaptcha_ready = False
-        self.created_at = time.time()
-        self.last_used_at = time.time()  # 最后使用时间
-        self.use_count = 0  # 使用次数
-        self.fingerprint: Optional[Dict[str, Any]] = None
-        self.cookie_signature: Optional[str] = None
-        self.session_cookies: Optional[Dict[str, str]] = None
-        self.session_cookies_fetched_at: float = 0.0
-        self.solve_lock = asyncio.Lock()  # 串行化同一标签页上的执行，降低并发冲突
-        self.pending_assignment_count = 0  # 选中但尚未真正进入 solve_lock 的请求数
-
-
-@dataclass
-class TokenPoolLease:
-    bucket_key: str
-    token: str
-    project_id: str
-    action: str
-    token_id: Optional[int]
-    slot_id: Optional[str]
-    worker_index: Optional[int]
-    solve_bundle: Optional[Dict[str, Any]]
-    created_at: float
-    expires_at: float
-
-
-class TokenPoolTimeoutError(TimeoutError):
-    """严格 token 池模式下，请求在等待可用 token 时超时。"""
 
 
 class BrowserCaptchaService:
