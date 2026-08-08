@@ -5526,3 +5526,9 @@ router.include_router(
     prefix="/api/admin/cliproxy",
     dependencies=[Depends(verify_admin_token)],
 )
+
+# Keep the public aggregate stable while assigning every route to one focused
+# transport router. Handler dependencies move to AppContainer in Phase 7.
+from ..transport.admin import build_admin_router
+
+router = build_admin_router(router)

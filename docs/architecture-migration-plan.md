@@ -1,6 +1,6 @@
 # Flow2API Architecture Migration Plan
 
-Status: in progress; Phases 1-5 are complete and Phase 6 is next.
+Status: in progress; Phases 1-6 are complete and Phase 7 is next.
 
 This plan restructures Flow2API as a modular monolith in a monorepo. It avoids a full rewrite, preserves existing API contracts, and keeps these commands working throughout the migration:
 
@@ -190,10 +190,16 @@ Exit criteria:
 
 ## Phase 6: Split HTTP transport
 
-- [ ] Divide the admin router into auth, tokens, projects, API keys, workers, cache, settings, logs, Runway, and GeminiGen routers.
-- [ ] Divide public routes into OpenAI, Gemini, projects, media/cache, extensions, and provider-specific routers.
-- [ ] Keep paths, methods, status codes, headers, streaming format, and payloads unchanged.
-- [ ] Compare OpenAPI output before and after the move.
+- [x] Divide the admin router into auth, tokens, projects, API keys, workers, cache, settings, logs, Runway, and GeminiGen routers.
+- [x] Divide public routes into OpenAI, Gemini, projects, media/cache, extensions, and provider-specific routers.
+- [x] Keep paths, methods, status codes, headers, streaming format, and payloads unchanged.
+- [x] Compare OpenAPI output before and after the move.
+
+The public handlers now live in feature transport modules. The admin surface is
+partitioned into feature routers while its existing handlers remain in the legacy
+module; moving their dependencies at the same time would duplicate the module-global
+service locator that Phase 7 removes. Transport ownership is enforced by an automated
+route-partition test, and the temporary dependency bridge is retired with `AppContainer`.
 
 Exit criteria:
 

@@ -72,9 +72,7 @@ async def list_model_aliases(auth_ctx: AuthContext = Depends(verify_api_key_flex
     """List simplified model aliases for generationConfig-based resolution."""
     active_tokens = await legacy._get_active_native_tokens()
     aliases = (
-        legacy.get_base_model_aliases(
-            include_4k=legacy._has_active_native_ultra_account(active_tokens)
-        )
+        legacy.get_base_model_aliases(include_4k=legacy._has_active_native_ultra_account(active_tokens))
         if active_tokens
         else {}
     )
@@ -99,8 +97,7 @@ async def list_gemini_models(auth_ctx: AuthContext = Depends(verify_api_key_flex
     catalog = await legacy._get_gemini_model_catalog()
     return {
         "models": [
-            legacy._build_gemini_model_resource(model_id, description)
-            for model_id, description in catalog.items()
+            legacy._build_gemini_model_resource(model_id, description) for model_id, description in catalog.items()
         ]
     }
 

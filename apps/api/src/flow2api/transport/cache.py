@@ -27,9 +27,7 @@ def _cache_file_row_to_list_item(row: Dict[str, Any]) -> Dict[str, Any]:
     if row.get("delivery_mode") == "cdn" and legacy.generation_handler is not None:
         file_cache = getattr(legacy.generation_handler, "file_cache", None)
         direct = (
-            file_cache.backend.public_url(filename)
-            if file_cache and getattr(file_cache, "backend", None)
-            else None
+            file_cache.backend.public_url(filename) if file_cache and getattr(file_cache, "backend", None) else None
         )
         if direct:
             download_path = direct

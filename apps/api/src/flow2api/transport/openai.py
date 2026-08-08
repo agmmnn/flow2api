@@ -245,9 +245,7 @@ async def create_chat_completion_async(
                 status="processing",
                 progress=0,
                 requested_resolution=legacy._infer_requested_resolution(normalized.model),
-                upscale_status="pending"
-                if legacy._infer_requested_resolution(normalized.model)
-                else "not_requested",
+                upscale_status="pending" if legacy._infer_requested_resolution(normalized.model) else "not_requested",
                 job_phase="queued",
                 captcha_status="pending",
             )

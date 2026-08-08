@@ -89,9 +89,7 @@ async def list_runway_models(auth_ctx: AuthContext = Depends(verify_api_key_flex
                 "feature_flags": load_json(model.feature_flags, []),
                 "cost_feature": model.cost_feature or "",
                 "source_version": model.source_version or "",
-                "last_synced_at": model.last_synced_at.isoformat()
-                if model.last_synced_at
-                else None,
+                "last_synced_at": model.last_synced_at.isoformat() if model.last_synced_at else None,
             }
             for model in models
         ],
