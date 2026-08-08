@@ -1,6 +1,6 @@
 # Flow2API Architecture Migration Plan
 
-Status: in progress; Phases 1-3 are complete and Phase 4 is under verification.
+Status: in progress; Phases 1-4 are complete and Phase 5 is next.
 
 This plan restructures Flow2API as a modular monolith in a monorepo. It avoids a full rewrite, preserves existing API contracts, and keeps these commands working throughout the migration:
 
@@ -159,13 +159,13 @@ Exit criteria:
 
 This is one migration phase but may use several reviewable commits.
 
-- [ ] Move files without behavioral changes.
-- [ ] Rename the Python import package from `src` to `flow2api`.
-- [ ] Introduce the `apps/`, `packages/`, and `infra/` layout.
-- [ ] Add a root Bun workspace for the web application and extensions.
-- [ ] Rewrite Python and TypeScript imports.
-- [ ] Update all Dockerfiles, Compose files, CI workflows, scripts, and documentation.
-- [ ] Keep `uv run setup` and `uv run flow2api` unchanged from the user's perspective.
+- [x] Move files without behavioral changes.
+- [x] Rename the Python import package from `src` to `flow2api`.
+- [x] Introduce the `apps/`, `packages/`, and `infra/` layout.
+- [x] Add a root Bun workspace for the web application and extensions.
+- [x] Rewrite Python and TypeScript imports.
+- [x] Update all Dockerfiles, Compose files, CI workflows, scripts, and documentation.
+- [x] Keep `uv run setup` and `uv run flow2api` unchanged from the user's perspective.
 
 Exit criteria:
 
