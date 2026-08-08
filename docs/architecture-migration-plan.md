@@ -276,8 +276,10 @@ Exit criteria:
 Phase 9 is underway. Extension worker connection/result models, the bounded
 large-generation-response upload side channel, and health-aware worker routing have
 moved to `workers/extension`. Routing now owns worker scoring, cooldowns, latency
-tracking, and round-robin cursors; the existing service exposes compatibility delegates
-while the connection registry and job state machines are separated in subsequent slices.
+tracking, and round-robin cursors. The connection registry now owns active connections,
+instance replacement, change notifications, waiter accounting, and managed-key cursor
+cleanup. The existing service exposes compatibility delegates while CAPTCHA, refresh,
+and generation job state machines are separated in subsequent slices.
 
 Exit criteria:
 

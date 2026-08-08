@@ -16,6 +16,7 @@ from ..workers.extension.models import (
     normalize_extension_captcha_user_agent,
 )
 from ..workers.extension.routing import ExtensionWorkerRouting
+from ..workers.extension.registry import ExtensionConnectionRegistry
 from ..workers.extension.uploads import GenerationUploadStore
 
 
@@ -25,7 +26,8 @@ class ExtensionCaptchaService:
 
     def __init__(self, db=None):
         self.db = db
-        self.active_connections: list[ExtensionConnection] = []
+        self.connection_registry = ExtensionConnectionRegistry()
+        self.active_connections = self.connection_registry.connections
         self.pending_requests: dict[str, tuple[asyncio.Future, WebSocket]] = {}
         # generation_req_id -> websocket owner (submit_generation / poll_generation)
         self.pending_generation_requests: dict[str, tuple[asyncio.Future, WebSocket]] = {}
@@ -34,12 +36,12 @@ class ExtensionCaptchaService:
         # req_id -> validated UA returned by the WebSocket that solved that request.
         # The raw value is consumed immediately by FlowClient and is never persisted.
         self._token_user_agents: dict[str, str] = {}
-        self._state_lock = asyncio.Lock()
-        self._connection_changed = asyncio.Condition()
-        self._queue_waiters: dict[str, int] = {}
+        self._connection_changed = self.connection_registry.changed
+        self._queue_waiters = self.connection_registry.waiters
+        self._state_lock = self.connection_registry.state_lock
         # Round-robin cursor per managed API key (see _queue_key). Lock-free counter:
         # concurrent picks may occasionally duplicate; modulo on read keeps indices valid.
-        self._rr_cursor: dict[str, int] = {}
+        self._rr_cursor = self.connection_registry.managed_round_robin
         self.worker_routing = ExtensionWorkerRouting()
         # Compatibility aliases for in-flight callers during the strangler migration.
         self._dedicated_worker_stats = self.worker_routing.worker_stats
@@ -128,8 +130,7 @@ class ExtensionCaptchaService:
         return f"key:{managed_api_key_id}" if managed_api_key_id is not None else "unscoped"
 
     async def _notify_connection_change(self) -> None:
-        async with self._connection_changed:
-            self._connection_changed.notify_all()
+        await self.connection_registry.notify_changed()
 
     async def _load_persisted_binding(self, route_key: str) -> Tuple[Optional[int], str]:
         normalized = (route_key or "").strip()
@@ -195,14 +196,7 @@ class ExtensionCaptchaService:
             route_key="",
             client_label=(websocket.query_params.get("client_label") or "").strip(),
         )
-        if conn.instance_id:
-            for existing in list(self.active_connections):
-                if existing.instance_id and existing.instance_id == conn.instance_id:
-                    try:
-                        await existing.websocket.close(code=1000, reason="Replaced by reconnect")
-                    except Exception:
-                        pass
-                    self.disconnect(existing.websocket)
+        await self.connection_registry.replace_instance(conn, disconnect=self.disconnect)
         if authenticated_captcha_worker:
             conn.captcha_worker_id = int(authenticated_captcha_worker.get("id"))
             conn.captcha_worker_key_label = str(authenticated_captcha_worker.get("label") or "").strip()
@@ -232,7 +226,7 @@ class ExtensionCaptchaService:
             conn.allow_captcha = False
             conn.allow_session_refresh = True
             conn.allow_generation = False
-        self.active_connections.append(conn)
+        await self.connection_registry.add(conn)
         debug_logger.log_info(
             f"[Extension Captcha] Client connected. Total: {len(self.active_connections)}, "
             f"worker_session_id={conn.worker_session_id}, "
@@ -241,51 +235,38 @@ class ExtensionCaptchaService:
             f"managed_api_key_id={conn.managed_api_key_id}, captcha_worker_id={conn.captcha_worker_id}, "
             f"source={conn.binding_source}"
         )
-        await self._notify_connection_change()
 
     def disconnect(self, websocket: WebSocket):
-        for conn in list(self.active_connections):
-            if conn.websocket is websocket:
-                self.active_connections.remove(conn)
-                stale_reqs = [rid for rid, ws in list(self._upstream_verdict_targets.items()) if ws is websocket]
-                for rid in stale_reqs:
-                    self._upstream_verdict_targets.pop(rid, None)
-                    self._token_user_agents.pop(rid, None)
-                stale_gen_reqs = [
-                    rid for rid, (_fut, ws) in list(self.pending_generation_requests.items()) if ws is websocket
-                ]
-                for rid in stale_gen_reqs:
-                    future, _ = self.pending_generation_requests.pop(rid, (None, None))
-                    if future is not None and not future.done():
-                        try:
-                            future.set_exception(RuntimeError("Extension worker disconnected"))
-                        except Exception:
-                            pass
-                debug_logger.log_info(
-                    f"[Extension Captcha] Client disconnected. Total: {len(self.active_connections)}, "
-                    f"worker_session_id={conn.worker_session_id}, label={conn.client_label or '-'}"
-                )
-                mid = conn.managed_api_key_id
-                if mid is not None:
-                    qk = self._queue_key(int(mid))
-                    if not any(
-                        c.managed_api_key_id is not None and int(c.managed_api_key_id) == int(mid)
-                        for c in self.active_connections
-                    ):
-                        self._rr_cursor.pop(qk, None)
-                self._dedicated_worker_stats.pop(conn.worker_session_id, None)
-                try:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(self._notify_connection_change())
-                except Exception:
-                    pass
-                return
+        conn = self.connection_registry.remove(websocket)
+        if conn is not None:
+            stale_reqs = [rid for rid, ws in list(self._upstream_verdict_targets.items()) if ws is websocket]
+            for rid in stale_reqs:
+                self._upstream_verdict_targets.pop(rid, None)
+                self._token_user_agents.pop(rid, None)
+            stale_gen_reqs = [
+                rid for rid, (_fut, ws) in list(self.pending_generation_requests.items()) if ws is websocket
+            ]
+            for rid in stale_gen_reqs:
+                future, _ = self.pending_generation_requests.pop(rid, (None, None))
+                if future is not None and not future.done():
+                    try:
+                        future.set_exception(RuntimeError("Extension worker disconnected"))
+                    except Exception:
+                        pass
+            debug_logger.log_info(
+                f"[Extension Captcha] Client disconnected. Total: {len(self.active_connections)}, "
+                f"worker_session_id={conn.worker_session_id}, label={conn.client_label or '-'}"
+            )
+            if conn.managed_api_key_id is not None:
+                self.connection_registry.clear_managed_cursor_if_unused(int(conn.managed_api_key_id))
+            self._dedicated_worker_stats.pop(conn.worker_session_id, None)
+            try:
+                asyncio.get_running_loop().create_task(self._notify_connection_change())
+            except Exception:
+                pass
 
     def _find_connection(self, websocket: WebSocket) -> Optional[ExtensionConnection]:
-        for conn in self.active_connections:
-            if conn.websocket is websocket:
-                return conn
-        return None
+        return self.connection_registry.find(websocket)
 
     @staticmethod
     def _conn_eligible_for_captcha(conn: ExtensionConnection) -> bool:
@@ -525,8 +506,7 @@ class ExtensionCaptchaService:
     ) -> Optional[ExtensionConnection]:
         deadline = time.time() + max(0.0, float(timeout))
         queue_key = self._queue_key(managed_api_key_id)
-        async with self._state_lock:
-            self._queue_waiters[queue_key] = self._queue_waiters.get(queue_key, 0) + 1
+        await self.connection_registry.begin_wait(queue_key)
         try:
             while True:
                 conn = self._select_connection(
@@ -552,18 +532,9 @@ class ExtensionCaptchaService:
                 remaining = deadline - time.time()
                 if remaining <= 0:
                     return None
-                async with self._connection_changed:
-                    try:
-                        await asyncio.wait_for(self._connection_changed.wait(), timeout=min(remaining, 1.5))
-                    except asyncio.TimeoutError:
-                        pass
+                await self.connection_registry.wait_for_change(min(remaining, 1.5))
         finally:
-            async with self._state_lock:
-                current = self._queue_waiters.get(queue_key, 0)
-                if current <= 1:
-                    self._queue_waiters.pop(queue_key, None)
-                else:
-                    self._queue_waiters[queue_key] = current - 1
+            await self.connection_registry.end_wait(queue_key)
 
     async def handle_message(self, websocket: WebSocket, data: str):
         try:
