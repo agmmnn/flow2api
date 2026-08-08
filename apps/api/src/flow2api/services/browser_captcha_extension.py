@@ -1,19 +1,21 @@
 import asyncio
 import json
-import secrets
 import time
 import uuid
-from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from fastapi import WebSocket
 
 from ..core.config import config
 from ..core.logger import debug_logger
-
-
-class NoExtensionGenerationWorkerError(RuntimeError):
-    """No connected dedicated worker with allow_generation for this token (extension-first gen cannot run)."""
+from ..workers.extension.models import (
+    DedicatedWorkerStats,
+    ExtensionConnection,
+    ExtensionStRefreshResult,
+    NoExtensionGenerationWorkerError,
+    normalize_extension_captcha_user_agent,
+)
+from ..workers.extension.uploads import GenerationUploadStore
 
 
 # Dedicated-worker hybrid routing (health + score + RR tie-break)
@@ -27,65 +29,6 @@ _DEDICATED_SCORE_WEIGHT_INFLIGHT = 15.0
 _DEDICATED_SCORE_WEIGHT_EMA_DIVISOR = 50.0
 _DEDICATED_SCORE_WEIGHT_TIMEOUT = 20.0
 _DEDICATED_TIMEOUT_WINDOW_SEC = 60.0
-_CAPTCHA_USER_AGENT_MAX_LENGTH = 512
-
-
-def normalize_extension_captcha_user_agent(value: Any) -> Optional[str]:
-    """Return a safe solver-produced UA without weakening token compatibility."""
-    if not isinstance(value, str):
-        return None
-    normalized = value.strip()
-    if (
-        not normalized
-        or len(normalized) > _CAPTCHA_USER_AGENT_MAX_LENGTH
-        or "\r" in normalized
-        or "\n" in normalized
-    ):
-        return None
-    return normalized
-
-
-@dataclass
-class DedicatedWorkerStats:
-    """In-memory health/latency signals per extension worker_session_id (dedicated workers)."""
-
-    inflight_count: int = 0
-    success_count: int = 0
-    fail_count: int = 0
-    ema_latency_ms: float = 0.0
-    has_latency_sample: bool = False
-    fail_timestamps: List[float] = field(default_factory=list)
-    timeout_timestamps: List[float] = field(default_factory=list)
-    cooldown_until: float = 0.0
-
-
-@dataclass
-class ExtensionStRefreshResult:
-    """Outcome of extension-based ST refresh for a token-ID-bound worker."""
-
-    session_token: Optional[str] = None
-    failure_code: Optional[str] = None
-
-
-@dataclass
-class ExtensionConnection:
-    websocket: WebSocket
-    worker_session_id: str = field(default_factory=lambda: uuid.uuid4().hex)
-    instance_id: str = ""
-    route_key: str = ""
-    client_label: str = ""
-    managed_api_key_id: Optional[int] = None
-    binding_source: str = "none"
-    captcha_worker_id: Optional[int] = None
-    captcha_worker_key_label: str = ""
-    captcha_worker_key_prefix: str = ""
-    refresh_token_id: Optional[int] = None
-    allow_captcha: bool = True
-    allow_session_refresh: bool = True
-    allow_generation: bool = False
-    connected_at: float = field(default_factory=time.time)
-    # Serialize send+wait on this WebSocket (FIFO waiters); matches extension tokenQueue.
-    dispatch_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class ExtensionCaptchaService:
@@ -114,109 +57,24 @@ class ExtensionCaptchaService:
         # RR cursor among top-scoring dedicated workers per token_id (keys dedicated:{id}:captcha|generation)
         self._dedicated_hybrid_rr: dict[str, int] = {}
         self._dedicated_stats_lock = asyncio.Lock()
-        # upload_id -> slot for extension HTTP side-channel (large generation responses)
-        self._generation_upload_slots: dict[str, dict[str, Any]] = {}
-        self._generation_upload_lock = asyncio.Lock()
-
-    def _prune_generation_upload_slots_unlocked(self) -> None:
-        now = time.time()
-        expired = [k for k, v in self._generation_upload_slots.items() if float(v.get("expires_at") or 0) < now]
-        for k in expired:
-            self._generation_upload_slots.pop(k, None)
+        self.generation_uploads = GenerationUploadStore()
 
     async def register_generation_upload_slot(
         self, *, req_id: str, max_body_bytes: int, ttl_seconds: int
     ) -> tuple[str, str]:
-        async with self._generation_upload_lock:
-            self._prune_generation_upload_slots_unlocked()
-            upload_id = uuid.uuid4().hex
-            upload_secret = secrets.token_urlsafe(48)
-            self._generation_upload_slots[upload_id] = {
-                "req_id": req_id,
-                "secret": upload_secret,
-                "body": None,
-                "expires_at": time.time() + float(ttl_seconds),
-                "max_body_bytes": int(max_body_bytes),
-            }
-            return upload_id, upload_secret
+        return await self.generation_uploads.register(
+            req_id=req_id,
+            max_body_bytes=max_body_bytes,
+            ttl_seconds=ttl_seconds,
+        )
 
-    async def ingest_generation_upload_body(
-        self, upload_id: str, upload_secret: str, body: bytes
-    ) -> tuple[bool, str]:
-        async with self._generation_upload_lock:
-            self._prune_generation_upload_slots_unlocked()
-            slot = self._generation_upload_slots.get(upload_id)
-            if not slot:
-                return False, "unknown_or_expired_upload_id"
-            if slot.get("secret") != upload_secret:
-                return False, "invalid_upload_secret"
-            if slot.get("body") is not None:
-                return False, "duplicate_upload"
-            max_b = int(slot.get("max_body_bytes") or 0)
-            if len(body) > max_b:
-                return False, "body_too_large"
-            slot["body"] = body
-            debug_logger.log_info(
-                f"[EXT-GEN] generation upload ingested: upload_id={upload_id}, bytes={len(body)}"
-            )
-            return True, ""
+    async def ingest_generation_upload_body(self, upload_id: str, upload_secret: str, body: bytes) -> tuple[bool, str]:
+        return await self.generation_uploads.ingest(upload_id, upload_secret, body)
 
     async def resolve_generation_upload_for_ws(
         self, *, req_id: str, upload_id: str, base_payload: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Wait for HTTP POST body then merge into extension result dict for ExtensionGenerationService."""
-        deadline = time.time() + 8.0
-        while time.time() < deadline:
-            async with self._generation_upload_lock:
-                self._prune_generation_upload_slots_unlocked()
-                slot = self._generation_upload_slots.get(upload_id)
-                if slot is None:
-                    return {
-                        **base_payload,
-                        "upload_status": "failed",
-                        "upload_error": "unknown_or_expired_upload_id",
-                    }
-                if str(slot.get("req_id") or "") != str(req_id):
-                    return {
-                        **base_payload,
-                        "upload_status": "failed",
-                        "upload_error": "upload_req_mismatch",
-                    }
-                body = slot.get("body")
-                if body is not None:
-                    text = body.decode("utf-8", errors="replace")
-                    parsed: Any = None
-                    try:
-                        parsed = json.loads(text) if text else None
-                    except Exception:
-                        parsed = None
-                    self._generation_upload_slots.pop(upload_id, None)
-                    out = {
-                        **base_payload,
-                        "response_text": text,
-                        "response_json": parsed if isinstance(parsed, dict) else None,
-                    }
-                    if not isinstance(out.get("response_json"), dict) and text:
-                        debug_logger.log_warning(
-                            f"[EXT-GEN] upload JSON parse failed for upload_id={upload_id}, text_len={len(text)}"
-                        )
-                        return {
-                            **base_payload,
-                            "upload_status": "failed",
-                            "upload_error": "upload_invalid_json",
-                            "response_text": text[:500],
-                        }
-                    out["upload_status"] = "uploaded"
-                    return out
-            await asyncio.sleep(0.05)
-        debug_logger.log_warning(
-            f"[EXT-GEN] upload body wait timeout: req_id={req_id}, upload_id={upload_id}"
-        )
-        return {
-            **base_payload,
-            "upload_status": "failed",
-            "upload_error": "upload_body_missing_or_timeout",
-        }
+        return await self.generation_uploads.resolve(req_id=req_id, upload_id=upload_id, base_payload=base_payload)
 
     def _dedicated_stats(self, worker_session_id: str) -> DedicatedWorkerStats:
         sid = (worker_session_id or "").strip()
@@ -573,15 +431,11 @@ class ExtensionCaptchaService:
             return False
         tid = int(token_id)
         return any(
-            c.refresh_token_id is not None
-            and int(c.refresh_token_id) == tid
-            and self._conn_eligible_for_generation(c)
+            c.refresh_token_id is not None and int(c.refresh_token_id) == tid and self._conn_eligible_for_generation(c)
             for c in self.active_connections
         )
 
-    def _connection_pool(
-        self, *, exclude_dedicated_token_id: Optional[int] = None
-    ) -> list[ExtensionConnection]:
+    def _connection_pool(self, *, exclude_dedicated_token_id: Optional[int] = None) -> list[ExtensionConnection]:
         """Active connections, optionally excluding dedicated worker(s) bound to a token."""
         if exclude_dedicated_token_id is None:
             return list(self.active_connections)
@@ -612,9 +466,7 @@ class ExtensionCaptchaService:
             if int(conn.refresh_token_id) == int(preferred_token_id):
                 return
         pool = self._connection_pool(exclude_dedicated_token_id=exclude_dedicated_token_id)
-        candidate_connections = [
-            c for c in pool if c.managed_api_key_id == managed_api_key_id
-        ]
+        candidate_connections = [c for c in pool if c.managed_api_key_id == managed_api_key_id]
         if not candidate_connections:
             return
         sorted_candidates = sorted(candidate_connections, key=lambda c: c.worker_session_id)
@@ -723,15 +575,9 @@ class ExtensionCaptchaService:
                 )
                 continue
             label = conn.client_label or "-"
-            managed = (
-                str(conn.managed_api_key_id)
-                if conn.managed_api_key_id is not None
-                else "unbound"
-            )
+            managed = str(conn.managed_api_key_id) if conn.managed_api_key_id is not None else "unbound"
             source = conn.binding_source or "none"
-            parts.append(
-                f"label={label}, managed_key={managed}, binding={source}"
-            )
+            parts.append(f"label={label}, managed_key={managed}, binding={source}")
         return " | ".join(parts)
 
     def describe_routes(self) -> str:
@@ -752,7 +598,10 @@ class ExtensionCaptchaService:
     async def has_connection_for_managed_key(self, managed_api_key_id: Optional[int]) -> bool:
         if managed_api_key_id is None:
             return False
-        if any(conn.captcha_worker_id is not None and self._conn_eligible_for_captcha(conn) for conn in self.active_connections):
+        if any(
+            conn.captcha_worker_id is not None and self._conn_eligible_for_captcha(conn)
+            for conn in self.active_connections
+        ):
             return True
         return any(conn.managed_api_key_id == int(managed_api_key_id) for conn in self.active_connections)
 
@@ -769,7 +618,8 @@ class ExtensionCaptchaService:
         if managed_api_key_id is None:
             return False
         return any(
-            conn.managed_api_key_id == int(managed_api_key_id) and conn.binding_source in {"authenticated", "manual", "claimed"}
+            conn.managed_api_key_id == int(managed_api_key_id)
+            and conn.binding_source in {"authenticated", "manual", "claimed"}
             for conn in self.active_connections
         )
 
@@ -943,10 +793,7 @@ class ExtensionCaptchaService:
                     )
                     return
                 if not future.done():
-                    if (
-                        str(payload.get("status") or "") == "success"
-                        and payload.get("large_response_upload_id")
-                    ):
+                    if str(payload.get("status") or "") == "success" and payload.get("large_response_upload_id"):
                         upload_id = str(payload.get("large_response_upload_id") or "").strip()
                         merged = await self.resolve_generation_upload_for_ws(
                             req_id=req_id,
@@ -985,10 +832,7 @@ class ExtensionCaptchaService:
                 req_id=req_id, max_body_bytes=max_b, ttl_seconds=ttl
             )
             url_lower = str(request_payload.get("url") or "").lower()
-            force = bool(
-                config.extension_generation_upload_force_upsample_image
-                and "upsampleimage" in url_lower
-            )
+            force = bool(config.extension_generation_upload_force_upsample_image and "upsampleimage" in url_lower)
             thr = 0 if force else int(config.extension_generation_upload_threshold_bytes)
             message["large_response_upload"] = {
                 "upload_id": upload_id,
@@ -1032,7 +876,9 @@ class ExtensionCaptchaService:
                 captcha_config = await self.db.get_captcha_config()
                 queue_wait_timeout = int(getattr(captcha_config, "extension_queue_wait_timeout_seconds", 20) or 20)
             except Exception as exc:
-                debug_logger.log_warning(f"[Extension Captcha] Failed to load queue timeout for generation submit: {exc}")
+                debug_logger.log_warning(
+                    f"[Extension Captcha] Failed to load queue timeout for generation submit: {exc}"
+                )
         queue_wait_timeout = max(1, min(120, queue_wait_timeout))
         selection_meta: Dict[str, Any] = {}
         conn = await self._wait_for_connection(
@@ -1169,10 +1015,7 @@ class ExtensionCaptchaService:
                 if selection_meta.get("dedicated_hybrid"):
                     dispatch_parts.append(f"dedicated_score={selection_meta.get('dedicated_score', '-')}")
                     dispatch_parts.append(f"dedicated_rr_idx={selection_meta.get('dedicated_rr_idx', '-')}")
-            debug_logger.log_info(
-                "[Extension Captcha] Dispatching token request via "
-                + ", ".join(dispatch_parts)
-            )
+            debug_logger.log_info("[Extension Captcha] Dispatching token request via " + ", ".join(dispatch_parts))
             await conn.websocket.send_text(json.dumps(request_data))
             result = await asyncio.wait_for(future, timeout=timeout)
             latency_ms = (time.time() - t0) * 1000.0
@@ -1362,11 +1205,7 @@ class ExtensionCaptchaService:
                     return token_cw_alt, ext_req_id_cw_alt
 
         # One-shot retry on another dedicated worker for the same token (before managed fallback).
-        if (
-            token_id is not None
-            and conn.refresh_token_id is not None
-            and int(conn.refresh_token_id) == int(token_id)
-        ):
+        if token_id is not None and conn.refresh_token_id is not None and int(conn.refresh_token_id) == int(token_id):
             sel_meta_alt: Dict[str, Any] = {}
             conn_alt = self._select_connection(
                 route_key,
@@ -1463,9 +1302,7 @@ class ExtensionCaptchaService:
         """Reason code when no eligible token-ID refresh worker exists for ST refresh."""
         tid = int(token_id)
         workers_for_token = [
-            c
-            for c in self.active_connections
-            if c.refresh_token_id is not None and int(c.refresh_token_id) == tid
+            c for c in self.active_connections if c.refresh_token_id is not None and int(c.refresh_token_id) == tid
         ]
         if workers_for_token and not any(self._conn_eligible_for_session_refresh(c) for c in workers_for_token):
             return "extension_session_refresh_disabled"
