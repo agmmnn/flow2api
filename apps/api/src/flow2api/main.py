@@ -23,7 +23,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from .core.config import REPO_ROOT, config
-from .core.database import create_database
 from .core.postgres_database import DatabaseUnavailableError
 from .core.storage_errors import (
     is_sqlite_recoverable_storage_error,
@@ -35,24 +34,13 @@ from .core.monitoring import (
     render_main_metrics,
     set_event_loop_lag,
 )
-from .services.flow_client import FlowClient
-from .services.proxy_manager import ProxyManager
-from .services.token_manager import TokenManager
-from .services.load_balancer import LoadBalancer
-from .services.concurrency_manager import ConcurrencyManager
-from .services.generation_handler import GenerationHandler
-from .services.geminigen_service import GeminiGenService
-from .services.runway_service import RunwayService
 from .services.st_refresh_reasons import describe_st_refresh_reason
 from .services.browser_profile_service import BrowserProfileService
 from .services.browser_metrics_cleanup import cleanup_browser_metrics
-from .services.google_drive_backup import GoogleDriveBackupService
-from .services.redis_runtime import redis_runtime
-from .services.failed_payload_store import failed_payload_manager
 from .api import routes, admin
-from .core.api_key_manager import ApiKeyManager
 from .core.auth import set_api_key_manager
 from .core.logger import debug_logger
+from .bootstrap import AppContainer, build_container
 
 
 _LOCAL_NO_PROXY_HOSTS = ("127.0.0.1", "localhost", "::1")
@@ -257,6 +245,7 @@ class MaintenanceMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         method = request.method.upper()
         path = request.url.path.rstrip("/") or "/"
+        redis_runtime = request.app.state.container.redis_runtime
         if (
             redis_runtime.maintenance_active
             and method not in {"GET", "HEAD", "OPTIONS"}
@@ -576,6 +565,18 @@ async def _init_database_with_storage_recovery(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
+    container: AppContainer = app.state.container
+    db = container.db
+    flow_client = container.flow_client
+    token_manager = container.token_manager
+    concurrency_manager = container.concurrency_manager
+    generation_handler = container.generation_handler
+    geminigen_service = container.geminigen_service
+    google_drive_backup_service = container.google_drive_backup_service
+    redis_runtime = container.redis_runtime
+    failed_payload_manager = container.failed_payload_manager
+    tasks = container.tasks
+
     # Startup
     print("=" * 60)
     print("Flow2API Starting...")
@@ -719,7 +720,7 @@ async def lifespan(app: FastAPI):
             except asyncio.CancelledError:
                 raise
 
-    event_loop_lag_handle = asyncio.create_task(event_loop_lag_task())
+    tasks.start("event-loop-lag", event_loop_lag_task())
 
     async def request_log_cleanup_task():
         """Run bounded seven-day cleanup after the maintenance rollout enables it."""
@@ -757,7 +758,7 @@ async def lifespan(app: FastAPI):
                 debug_logger.log_warning(f"[REQUEST_LOG_CLEANUP] task error: {e}")
                 await asyncio.sleep(3600)
 
-    request_log_cleanup_handle = asyncio.create_task(request_log_cleanup_task())
+    tasks.start("request-log-cleanup", request_log_cleanup_task())
 
     async def auto_unban_task():
         """定时任务：每小时检查并解禁429被禁用的token"""
@@ -770,7 +771,7 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 print(f"ERR Auto-unban task error: {e}")
 
-    auto_unban_task_handle = asyncio.create_task(auto_unban_task())
+    tasks.start("auto-unban", auto_unban_task())
 
     async def browser_metrics_cleanup_task():
         while True:
@@ -792,7 +793,7 @@ async def lifespan(app: FastAPI):
                     f"[BrowserMetrics] periodic cleanup failed: {type(exc).__name__}"
                 )
 
-    browser_metrics_cleanup_handle = asyncio.create_task(browser_metrics_cleanup_task())
+    tasks.start("browser-metrics-cleanup", browser_metrics_cleanup_task())
 
     async def scheduled_token_refresh_task():
         """Configurable scheduled token refresh that reuses existing refresh path."""
@@ -849,7 +850,7 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 print(f"ERR Scheduled token refresh task error: {e}")
 
-    scheduled_token_refresh_handle = asyncio.create_task(scheduled_token_refresh_task())
+    tasks.start("scheduled-token-refresh", scheduled_token_refresh_task())
 
     async def scheduled_st_only_refresh_task():
         """ST-only refresh scheduler.
@@ -935,7 +936,7 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 debug_logger.log_error(f"[ST_SCHEDULER] task error: {e}")
 
-    scheduled_st_only_refresh_handle = asyncio.create_task(scheduled_st_only_refresh_task())
+    tasks.start("scheduled-st-only-refresh", scheduled_st_only_refresh_task())
     resumed_geminigen_tasks = await geminigen_service.resume_active_tasks()
 
     # Restore/cutover maintenance is cleared only after the new PostgreSQL
@@ -1003,39 +1004,7 @@ async def lifespan(app: FastAPI):
     # Stop file cache cleanup task
     await generation_handler.file_cache.stop_cleanup_task()
     await google_drive_backup_service.stop()
-    # Stop auto-unban task
-    request_log_cleanup_handle.cancel()
-    try:
-        await request_log_cleanup_handle
-    except asyncio.CancelledError:
-        pass
-    event_loop_lag_handle.cancel()
-    try:
-        await event_loop_lag_handle
-    except asyncio.CancelledError:
-        pass
-    auto_unban_task_handle.cancel()
-    try:
-        await auto_unban_task_handle
-    except asyncio.CancelledError:
-        pass
-    # Stop scheduled token refresh task
-    scheduled_token_refresh_handle.cancel()
-    try:
-        await scheduled_token_refresh_handle
-    except asyncio.CancelledError:
-        pass
-    # Stop scheduled ST-only refresh task
-    scheduled_st_only_refresh_handle.cancel()
-    try:
-        await scheduled_st_only_refresh_handle
-    except asyncio.CancelledError:
-        pass
-    browser_metrics_cleanup_handle.cancel()
-    try:
-        await browser_metrics_cleanup_handle
-    except asyncio.CancelledError:
-        pass
+    await tasks.cancel_all()
     await token_manager.stop_protocol_refresher()
     await failed_payload_manager.stop()
     await redis_runtime.stop()
@@ -1057,45 +1026,24 @@ async def lifespan(app: FastAPI):
     print("OK Protocol token refresh task stopped")
 
 
-# Initialize components
-db = create_database()
-proxy_manager = ProxyManager(db)
-flow_client = FlowClient(proxy_manager, db)
-token_manager = TokenManager(db, flow_client)
-concurrency_manager = ConcurrencyManager(redis_runtime=redis_runtime)
-load_balancer = LoadBalancer(token_manager, concurrency_manager)
-generation_handler = GenerationHandler(
-    flow_client,
-    token_manager,
-    load_balancer,
-    db,
-    concurrency_manager,
-    proxy_manager  # 添加 proxy_manager 参数
-)
-runway_service = RunwayService(db, generation_handler.file_cache, proxy_manager)
-geminigen_service = GeminiGenService(db, generation_handler.file_cache, proxy_manager)
-google_drive_backup_service = GoogleDriveBackupService(db, app_version="1.0.0")
-managed_api_key_manager = ApiKeyManager(
-    db,
-    legacy_api_key_provider=lambda: config.api_key,
-    redis_runtime=redis_runtime,
-)
+def _bind_legacy_dependencies(app: FastAPI) -> None:
+    """Bridge old route modules while their handlers move to request dependencies."""
 
-# Set dependencies
-routes.set_generation_handler(generation_handler)
-routes.set_runway_service(runway_service)
-routes.set_geminigen_service(geminigen_service)
-admin.set_dependencies(
-    token_manager,
-    proxy_manager,
-    db,
-    concurrency_manager,
-    managed_api_key_manager,
-    runway_service,
-    geminigen_service,
-    google_drive_backup_service,
-)
-set_api_key_manager(managed_api_key_manager)
+    container: AppContainer = app.state.container
+    routes.set_generation_handler(container.generation_handler)
+    routes.set_runway_service(container.runway_service)
+    routes.set_geminigen_service(container.geminigen_service)
+    admin.set_dependencies(
+        container.token_manager,
+        container.proxy_manager,
+        container.db,
+        container.concurrency_manager,
+        container.api_key_manager,
+        container.runway_service,
+        container.geminigen_service,
+        container.google_drive_backup_service,
+    )
+    set_api_key_manager(container.api_key_manager)
 
 # Create FastAPI app
 app = FastAPI(
@@ -1104,6 +1052,8 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+app.state.container = build_container()
+_bind_legacy_dependencies(app)
 app.add_exception_handler(sqlite3.OperationalError, sqlite_operational_error_handler)
 
 
@@ -1135,9 +1085,13 @@ app.include_router(admin.router)
 
 
 @app.get("/metrics")
-async def metrics():
+async def metrics(request: Request):
     """Prometheus metrics endpoint for the main Flow2API service."""
-    payload = await render_main_metrics(db, concurrency_manager=concurrency_manager)
+    container: AppContainer = request.app.state.container
+    payload = await render_main_metrics(
+        container.db,
+        concurrency_manager=container.concurrency_manager,
+    )
     return Response(content=payload, media_type=CONTENT_TYPE_LATEST)
 
 # HTML routes for frontend
