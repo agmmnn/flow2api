@@ -75,11 +75,11 @@ When using captcha method `extension`, Flow2API keeps one global captcha mode bu
 
 1. Run `bun install --frozen-lockfile` and `bun run --cwd apps/captcha-extension build`, then load [`apps/captcha-extension/dist/`](./apps/captcha-extension/) as an unpacked Chrome extension.
 2. Create a managed API key in **API key manager**. Add `tokens:import` if this extension may add or refresh the Google account signed in to its Chrome profile.
-3. Select **End User Worker**, enter the WebSocket URL and managed API key, then save the connection.
-4. Click **Save / Import Current Google Account** to create or update the dashboard token by Google email. The imported account is automatically assigned to that managed key, uses `protocol` refresh, and stores the required Google cookies.
-5. Optionally enable automatic account sync and choose its interval. This keeps the account current without a separate Refresh Worker profile.
+3. Open the extension settings, select **My account**, enter the WebSocket URL and managed API key, then save.
+4. Click the extension icon and choose **Sync Google account** to create or update the dashboard token by Google email. The imported account is automatically assigned to that managed key, uses `protocol` refresh, and stores the required Google cookies.
+5. Optionally enable **Account sync** in the popup and choose its interval under settings. This keeps the account current without a separate Refresh-only profile.
 
-Use **Captcha Worker** for server-wide CAPTCHA capacity, or **Refresh Worker** only when binding a dedicated Chrome profile to an already existing Token ID.
+Use **CAPTCHA only** for server-wide CAPTCHA capacity, or **Refresh only** when binding a dedicated Chrome profile to an already existing Token ID.
 
 If a managed key has no matching extension worker online, requests wait up to `extension_queue_wait_timeout_seconds` and then fail (no gateway fallback).
 

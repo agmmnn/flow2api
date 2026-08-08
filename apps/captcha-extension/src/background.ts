@@ -1548,6 +1548,11 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 function mergeStateForStatus(settings) {
     return {
         ...runtimeState,
+        serverUrl: settings.serverUrl,
+        clientLabel: settings.clientLabel,
+        accountAutoImportEnabled: settings.accountAutoImportEnabled,
+        accountAutoImportIntervalMinutes: settings.accountAutoImportIntervalMinutes,
+        accountRefreshIntervalMinutes: settings.accountRefreshIntervalMinutes,
         workerPageUrl: settings.workerPageUrl,
         usePersistentWorkerTab: settings.usePersistentWorkerTab,
         autoRecycleWorkerTabOnCaptchaFailure: settings.autoRecycleWorkerTabOnCaptchaFailure,

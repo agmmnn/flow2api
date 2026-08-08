@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Flow2API Worker</title>
+    <link rel="stylesheet" href="ui.css" />
+  </head>
+  <body class="popup-shell">
+    <header class="popup-header">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg class="icon" viewBox="0 0 24 24"><path d="m8 3-4 9h7l-1 9 7-11h-7l2-7Z" /></svg>
+        </span>
+        <div>
+          <h1 class="brand-title">Flow2API Worker</h1>
+          <p class="brand-subtitle" id="headerSubtitle">Checking status…</p>
+        </div>
+      </div>
+      <button class="icon-button" id="settingsButton" type="button" aria-label="Open worker settings" title="Settings">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" /><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.08A1.7 1.7 0 0 0 8.97 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.53-1.03H3v-4h.08A1.7 1.7 0 0 0 4.6 8.94a1.7 1.7 0 0 0-.34-1.88L4.2 7l2.83-2.83.06.06a1.7 1.7 0 0 0 1.88.34A1.7 1.7 0 0 0 10 3.08V3h4v.08a1.7 1.7 0 0 0 1.03 1.53 1.7 1.7 0 0 0 1.88-.34l.06-.06L19.8 7l-.06.06a1.7 1.7 0 0 0-.34 1.88A1.7 1.7 0 0 0 20.92 10H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z" /></svg>
+      </button>
+    </header>
+
+    <main class="popup-main">
+      <section class="popup-card connection-card" id="connectionCard" data-tone="neutral">
+        <div class="connection-heading">
+          <span class="status-dot" aria-hidden="true"></span>
+          <div>
+            <h2 class="connection-title" id="connectionTitle">Checking connection</h2>
+            <p class="connection-detail" id="connectionDetail">Reading worker status…</p>
+          </div>
+        </div>
+        <span class="mode-chip" id="modeChip">Worker</span>
+      </section>
+
+      <button class="button button-primary primary-action" id="primaryAction" type="button">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66" /><path d="M20 4v6h-6" /></svg>
+        <span id="primaryActionLabel">Sync Google account</span>
+      </button>
+
+      <div class="action-grid" id="secondaryActions">
+        <button class="button button-secondary" id="testButton" type="button">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v3M12 18v3M3 12h3M18 12h3" /><circle cx="12" cy="12" r="4" /></svg>
+          Test CAPTCHA
+        </button>
+        <button class="button button-secondary" id="reconnectButton" type="button">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5" /><path d="M4 17v-5h5" /><path d="M6.1 9a7 7 0 0 1 11.8-2L20 9M4 15l2.1 2a7 7 0 0 0 11.8-2" /></svg>
+          Reconnect
+        </button>
+      </div>
+
+      <p class="inline-status" id="actionStatus" role="status" aria-live="polite"></p>
+
+      <p class="section-label">Automation</p>
+      <section class="popup-card">
+        <div class="switch-row compact-row" id="autoSyncRow">
+          <div class="switch-copy">
+            <span class="switch-title">Account sync</span>
+            <span class="switch-description" id="syncDescription">Runs every 30 minutes</span>
+          </div>
+          <label class="switch">
+            <input id="autoSyncToggle" type="checkbox" aria-label="Automatically sync Google account" />
+            <span class="switch-track" aria-hidden="true"></span>
+          </label>
+        </div>
+        <div class="switch-row compact-row" id="persistentRow">
+          <div class="switch-copy">
+            <span class="switch-title">Keep CAPTCHA ready</span>
+            <span class="switch-description" id="workerDescription">Uses one lightweight Labs tab</span>
+          </div>
+          <label class="switch">
+            <input id="persistentToggle" type="checkbox" aria-label="Keep CAPTCHA worker tab ready" />
+            <span class="switch-track" aria-hidden="true"></span>
+          </label>
+        </div>
+      </section>
+
+      <p class="section-label">Today</p>
+      <section class="popup-card">
+        <div class="stat-line" id="workerTabStatRow">
+          <span class="stat-label">CAPTCHA jobs</span>
+          <span class="stat-value" id="captchaSummary">No jobs yet</span>
+        </div>
+        <div class="stat-line">
+          <span class="stat-label">Last account sync</span>
+          <span class="stat-value" id="lastSync">Never</span>
+        </div>
+        <div class="stat-line">
+          <span class="stat-label">Worker tab</span>
+          <button class="button button-ghost" id="workerTabButton" type="button">Open</button>
+        </div>
+      </section>
+
+      <div id="activitySection">
+        <p class="section-label">Recent activity</p>
+        <section class="popup-card">
+          <ul class="activity-list" id="activityList"></ul>
+        </section>
+      </div>
+    </main>
+
+    <footer class="popup-footer">
+      <button class="button button-ghost" id="advancedSettingsButton" type="button">
+        Advanced settings
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
+      </button>
+    </footer>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

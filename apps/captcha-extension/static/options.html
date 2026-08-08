@@ -1,642 +1,188 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Flow2API Settings</title>
-  <style>
-    :root {
-      --bg: #0b1020;
-      --panel: #11182b;
-      --panel-soft: #0f172a;
-      --muted: #94a3b8;
-      --text: #e2e8f0;
-      --accent: #3b82f6;
-      --accent-hover: #2563eb;
-      --border: #24324a;
-      --ok: #34d399;
-      --bad: #f87171;
-      --nav-bg: #070b16;
-    }
-
-    body {
-      margin: 0;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: radial-gradient(circle at 20% 0%, #1a2442 0%, #0b1020 45%, #070b16 100%);
-      color: var(--text);
-      min-height: 100vh;
-    }
-
-    .wrap {
-      max-width: 1000px;
-      margin: 0 auto;
-      padding: 24px;
-    }
-
-    /* Header & Navigation */
-    header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 24px;
-    }
-
-    header h1 {
-      font-size: 24px;
-      margin: 0;
-      background: linear-gradient(135deg, #fff 0%, #94a3b8 100%);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      font-weight: 800;
-    }
-
-    .main-nav {
-      display: flex;
-      background: var(--nav-bg);
-      padding: 4px;
-      border-radius: 12px;
-      border: 1px solid var(--border);
-      margin-bottom: 24px;
-    }
-
-    .main-tab {
-      flex: 1;
-      padding: 10px 16px;
-      font-size: 14px;
-      font-weight: 600;
-      color: var(--muted);
-      background: transparent;
-      border: none;
-      border-radius: 8px;
-      cursor: pointer;
-      transition: all 0.2s ease;
-    }
-
-    .main-tab:hover {
-      color: var(--text);
-      background: rgba(255, 255, 255, 0.05);
-    }
-
-    .main-tab.active {
-      color: #fff;
-      background: var(--panel);
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-    }
-
-    /* Panels */
-    .panel {
-      background: linear-gradient(180deg, rgba(17, 24, 43, 0.98) 0%, rgba(11, 16, 32, 0.98) 100%);
-      border: 1px solid var(--border);
-      border-radius: 16px;
-      padding: 24px;
-      box-shadow: 0 18px 44px rgba(2, 6, 23, 0.45);
-      display: none;
-    }
-
-    .panel.active {
-      display: block;
-      animation: fadeIn 0.3s ease-out;
-    }
-
-    @keyframes fadeIn {
-      from { opacity: 0; transform: translateY(10px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-
-    h2 {
-      font-size: 18px;
-      margin: 0 0 16px;
-      color: var(--text);
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }
-
-    h2::after {
-      content: "";
-      flex: 1;
-      height: 1px;
-      background: var(--border);
-    }
-
-    p {
-      color: var(--muted);
-      line-height: 1.6;
-      font-size: 14px;
-      margin-bottom: 20px;
-    }
-
-    /* Metrics Grid */
-    .metrics-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-      gap: 16px;
-      margin-bottom: 24px;
-    }
-
-    .metric-card {
-      background: var(--panel-soft);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 16px;
-      transition: transform 0.2s ease;
-    }
-
-    .metric-card:hover {
-      transform: translateY(-2px);
-      border-color: var(--accent);
-    }
-
-    .metric-label {
-      display: block;
-      font-size: 11px;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      margin-bottom: 8px;
-    }
-
-    .metric-value {
-      font-size: 26px;
-      font-weight: 700;
-      color: var(--text);
-      line-height: 1;
-    }
-
-    .metric-value.ok { color: var(--ok); }
-    .metric-value.bad { color: var(--bad); }
-
-    .metric-sub {
-      font-size: 12px;
-      color: var(--muted);
-      margin-top: 8px;
-    }
-
-    /* Tables */
-    .table-wrap {
-      background: var(--panel-soft);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      overflow: hidden;
-      margin-bottom: 24px;
-    }
-
-    .table-head {
-      padding: 12px 16px;
-      background: rgba(255, 255, 255, 0.03);
-      border-bottom: 1px solid var(--border);
-      font-size: 14px;
-      font-weight: 600;
-    }
-
-    .job-table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 13px;
-    }
-
-    .job-table th, .job-table td {
-      padding: 12px 16px;
-      text-align: left;
-      border-bottom: 1px solid var(--border);
-    }
-
-    .job-table th {
-      background: rgba(255, 255, 255, 0.02);
-      color: var(--muted);
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-    }
-
-    .job-table tr:last-child td { border-bottom: none; }
-    .job-table tr:hover td { background: rgba(255, 255, 255, 0.02); }
-
-    .job-ok { color: var(--ok); font-weight: 600; }
-    .job-fail { color: var(--bad); font-weight: 600; }
-
-    /* Forms */
-    .form-group {
-      margin-bottom: 20px;
-    }
-
-    label {
-      display: block;
-      margin-bottom: 8px;
-      font-size: 13px;
-      font-weight: 600;
-      color: var(--text);
-    }
-
-    input[type="text"],
-    input[type="password"],
-    input[type="number"],
-    select {
-      width: 100%;
-      box-sizing: border-box;
-      padding: 12px;
-      background: #0b1327;
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      color: var(--text);
-      font-size: 14px;
-      transition: border-color 0.2s ease;
-    }
-
-    input:focus, select:focus {
-      outline: none;
-      border-color: var(--accent);
-      box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
-    }
-
-    .hint {
-      font-size: 12px;
-      color: var(--muted);
-      margin-top: 6px;
-    }
-
-    code {
-      background: #0b1327;
-      color: #bfdbfe;
-      padding: 2px 6px;
-      border-radius: 4px;
-      font-size: 12px;
-    }
-
-    /* Tabs (Inner) */
-    .inner-tabs {
-      display: flex;
-      gap: 8px;
-      margin-bottom: 20px;
-      background: var(--nav-bg);
-      padding: 4px;
-      border-radius: 10px;
-      width: fit-content;
-    }
-
-    .inner-tab {
-      padding: 8px 16px;
-      font-size: 13px;
-      font-weight: 600;
-      color: var(--muted);
-      background: transparent;
-      border: none;
-      border-radius: 7px;
-      cursor: pointer;
-    }
-
-    .inner-tab[aria-selected="true"] {
-      color: #fff;
-      background: var(--panel);
-    }
-
-    .tabpanel {
-      display: none;
-      padding: 16px;
-      background: var(--panel-soft);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      margin-bottom: 20px;
-    }
-
-    .tabpanel[aria-hidden="false"] { display: block; }
-
-    /* Buttons */
-    .btn-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 12px;
-      margin-top: 24px;
-    }
-
-    button {
-      background: linear-gradient(180deg, var(--accent) 0%, var(--accent-hover) 100%);
-      color: #fff;
-      border: none;
-      border-radius: 10px;
-      padding: 12px 20px;
-      font-size: 14px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.2s ease;
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-    }
-
-    button:hover:not(:disabled) {
-      transform: translateY(-1px);
-      box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
-    }
-
-    button:active:not(:disabled) { transform: translateY(0); }
-
-    button.secondary {
-      background: #1e293b;
-      color: var(--text);
-      border: 1px solid var(--border);
-    }
-
-    button.secondary:hover {
-      background: #2d3748;
-    }
-
-    button.danger {
-      background: #7f1d1d;
-    }
-
-    button:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-
-    /* Status Cards */
-    .status-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-      gap: 12px;
-    }
-
-    .status-card {
-      background: var(--panel-soft);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 12px;
-    }
-
-    .status-label {
-      display: block;
-      font-size: 10px;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      margin-bottom: 4px;
-    }
-
-    .status-value {
-      font-size: 13px;
-      font-weight: 600;
-      word-break: break-all;
-    }
-
-    .status-value.error { color: var(--bad); }
-
-    /* Log List */
-    .event-list {
-      list-style: none;
-      padding: 0;
-      margin: 0;
-      max-height: 500px;
-      overflow-y: auto;
-    }
-
-    .event-item {
-      padding: 12px 16px;
-      border-bottom: 1px solid var(--border);
-      font-size: 13px;
-      display: flex;
-      gap: 12px;
-      align-items: flex-start;
-    }
-
-    .event-time { color: var(--muted); font-family: monospace; min-width: 80px; }
-    .event-level {
-      padding: 2px 8px;
-      border-radius: 999px;
-      font-size: 10px;
-      font-weight: 700;
-      text-transform: uppercase;
-    }
-
-    .event-level.info { background: #1e40af; color: #dbeafe; }
-    .event-level.warn { background: #92400e; color: #fef3c7; }
-    .event-level.error { background: #991b1b; color: #fee2e2; }
-
-    .checkbox-row {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      margin-bottom: 16px;
-      cursor: pointer;
-    }
-
-    .checkbox-row input[type="checkbox"] {
-      width: 18px;
-      height: 18px;
-      cursor: pointer;
-    }
-
-    .status-msg {
-      margin-top: 16px;
-      font-size: 14px;
-      font-weight: 500;
-      padding: 12px;
-      border-radius: 8px;
-      display: none;
-    }
-
-    .status-msg.active { display: block; }
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <header>
-      <h1>Flow2API Captcha Worker</h1>
-      <div id="statusMeta" class="hint">Last update: —</div>
-    </header>
-
-    <nav class="main-nav" role="tablist">
-      <button type="button" class="main-tab active" data-tab="dashboard">Dashboard</button>
-      <button type="button" class="main-tab" data-tab="history">Jobs History</button>
-      <button type="button" class="main-tab" data-tab="logs">Activity Log</button>
-      <button type="button" class="main-tab" data-tab="config">Configuration</button>
-    </nav>
-
-    <!-- Dashboard Tab -->
-    <div id="dashboard" class="panel active">
-      <h2>Status Overview</h2>
-      <div class="status-grid" id="statusCards"></div>
-
-      <h2 style="margin-top: 32px;">Captcha Metrics</h2>
-      <div class="metrics-grid" id="metricsGrid"></div>
-
-      <h2>Generation Metrics</h2>
-      <div class="metrics-grid" id="generationMetricsGrid"></div>
-
-      <h2>Recent Session Tokens</h2>
-      <div class="table-wrap">
-        <div class="table-head">Flow session tokens (last 3)</div>
-        <ul class="event-list" id="sessionTokenHistoryList" style="max-height: 200px;">
-          <li class="event-item">No captures yet</li>
-        </ul>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Flow2API Worker Settings</title>
+    <link rel="stylesheet" href="ui.css" />
+  </head>
+  <body>
+    <main class="settings-shell">
+      <div class="settings-container">
+        <header class="settings-header">
+          <div>
+            <h1 class="settings-heading">Worker settings</h1>
+            <p class="settings-intro">Connect this Chrome profile to Flow2API. Most controls now live in the extension popup.</p>
+          </div>
+          <div class="live-pill" id="connectionPill" data-tone="neutral">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span id="connectionPillText">Checking connection…</span>
+          </div>
+        </header>
+
+        <form class="settings-form" id="settingsForm" novalidate>
+          <section class="settings-card" aria-labelledby="connectionTitle">
+            <div class="card-header">
+              <h2 class="card-title" id="connectionTitle">Connection</h2>
+              <p class="card-description">Choose one role for this Chrome profile, then enter its matching credential.</p>
+            </div>
+            <div class="card-content">
+              <label class="field">
+                <span class="field-label">Flow2API WebSocket URL</span>
+                <input class="input" id="serverUrl" type="url" autocomplete="url" spellcheck="false" placeholder="ws://localhost:8000/captcha_ws" />
+                <span class="field-hint">Use <strong>ws://</strong> locally and <strong>wss://</strong> for a public server.</span>
+              </label>
+
+              <div class="field">
+                <span class="field-label">This profile works as</span>
+                <div class="segment-control" role="tablist" aria-label="Worker role">
+                  <button class="segment-button" id="modeEndUser" type="button" role="tab" data-mode="endUser">My account</button>
+                  <button class="segment-button" id="modeCaptcha" type="button" role="tab" data-mode="captchaWorker">CAPTCHA only</button>
+                  <button class="segment-button" id="modeRefresh" type="button" role="tab" data-mode="refreshWorker">Refresh only</button>
+                </div>
+                <p class="mode-description" id="modeDescription"></p>
+              </div>
+
+              <div class="mode-panel" id="panelEndUser" role="tabpanel">
+                <div class="field-grid">
+                  <label class="field">
+                    <span class="field-label">Profile label</span>
+                    <input class="input" id="clientLabel" type="text" autocomplete="off" placeholder="My Chrome" />
+                  </label>
+                  <label class="field">
+                    <span class="field-label">Managed API key</span>
+                    <input class="input" id="apiKey" type="password" autocomplete="off" placeholder="f2a_live_…" />
+                  </label>
+                </div>
+                <p class="field-hint">Use a managed key with <strong>tokens:import</strong> when this profile should import or sync its Google account.</p>
+              </div>
+
+              <div class="mode-panel" id="panelCaptcha" role="tabpanel" hidden>
+                <label class="field">
+                  <span class="field-label">CAPTCHA worker key</span>
+                  <input class="input" id="captchaWorkerAuthKey" type="password" autocomplete="off" placeholder="Paste worker key" />
+                  <span class="field-hint">Create this key under API key manager → CAPTCHA worker keys.</span>
+                </label>
+              </div>
+
+              <div class="mode-panel" id="panelRefresh" role="tabpanel" hidden>
+                <label class="field">
+                  <span class="field-label">Token ID</span>
+                  <input class="input" id="refreshTokenId" type="number" min="1" inputmode="numeric" placeholder="2" />
+                  <span class="field-hint">The token ID shown in Flow2API’s token list. This mode cannot solve CAPTCHA.</span>
+                </label>
+              </div>
+            </div>
+          </section>
+
+          <section class="settings-card" aria-labelledby="automationTitle">
+            <div class="card-header">
+              <h2 class="card-title" id="automationTitle">Automation</h2>
+              <p class="card-description">Safe defaults for account synchronization and CAPTCHA readiness.</p>
+            </div>
+            <div class="card-content">
+              <div class="divider-list">
+                <div class="switch-row" id="accountSyncRow">
+                  <div class="switch-copy">
+                    <span class="switch-title">Keep my Google account synced</span>
+                    <span class="switch-description">Periodically opens Flow briefly, updates the token, then closes it.</span>
+                  </div>
+                  <label class="switch">
+                    <input id="accountAutoImportEnabled" type="checkbox" aria-label="Keep my Google account synced" />
+                    <span class="switch-track" aria-hidden="true"></span>
+                  </label>
+                </div>
+
+                <div class="field-grid" id="accountIntervals">
+                  <label class="field">
+                    <span class="field-label">Account sync interval</span>
+                    <select class="select" id="accountAutoImportIntervalMinutes">
+                      <option value="5">Every 5 minutes</option>
+                      <option value="15">Every 15 minutes</option>
+                      <option value="30">Every 30 minutes</option>
+                      <option value="60">Every hour</option>
+                      <option value="120">Every 2 hours</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span class="field-label">Session refresh interval</span>
+                    <select class="select" id="accountRefreshIntervalMinutes">
+                      <option value="30">Every 30 minutes</option>
+                      <option value="60">Every hour</option>
+                      <option value="120">Every 2 hours</option>
+                      <option value="240">Every 4 hours</option>
+                      <option value="720">Every 12 hours</option>
+                    </select>
+                  </label>
+                </div>
+
+                <div class="switch-row" id="captchaReadyRow">
+                  <div class="switch-copy">
+                    <span class="switch-title">Keep CAPTCHA ready</span>
+                    <span class="switch-description">Leaves one lightweight Google Labs tab open for faster jobs.</span>
+                  </div>
+                  <label class="switch">
+                    <input id="usePersistentWorkerTab" type="checkbox" aria-label="Keep CAPTCHA ready" />
+                    <span class="switch-track" aria-hidden="true"></span>
+                  </label>
+                </div>
+
+                <div class="switch-row" id="captchaRecoveryRow">
+                  <div class="switch-copy">
+                    <span class="switch-title">Recover after CAPTCHA rejection</span>
+                    <span class="switch-description">Recreates the lightweight worker tab when Google rejects a token.</span>
+                  </div>
+                  <label class="switch">
+                    <input id="autoRecycleWorkerTabOnCaptchaFailure" type="checkbox" aria-label="Recover after CAPTCHA rejection" />
+                    <span class="switch-track" aria-hidden="true"></span>
+                  </label>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <details class="settings-card details-card">
+            <summary>Advanced CAPTCHA settings</summary>
+            <div class="details-content">
+              <label class="field">
+                <span class="field-label">Lightweight worker page</span>
+                <input class="input" id="workerPageUrl" type="url" autocomplete="off" spellcheck="false" />
+                <span class="field-hint">The default auth-provider endpoint is intentional: it is fast, stays on labs.google, and contains no account data.</span>
+              </label>
+              <label class="field">
+                <span class="field-label">Page settle delay</span>
+                <select class="select" id="workerRecaptchaSettleMs">
+                  <option value="0">No delay</option>
+                  <option value="1000">1 second</option>
+                  <option value="3000">3 seconds (recommended)</option>
+                  <option value="5000">5 seconds</option>
+                  <option value="10000">10 seconds</option>
+                </select>
+                <span class="field-hint">Increase this only if reCAPTCHA scripts fail to initialize on a slow connection.</span>
+              </label>
+            </div>
+          </details>
+
+          <details class="settings-card details-card">
+            <summary>Reset extension</summary>
+            <div class="details-content">
+              <p class="danger-copy">Clears connection credentials, preferences, worker state, and local history from this extension.</p>
+              <div>
+                <button class="button button-danger" id="resetButton" type="button">Reset all extension data</button>
+              </div>
+            </div>
+          </details>
+
+          <div class="settings-actions">
+            <p class="inline-status" id="formStatus" role="status" aria-live="polite">Changes are saved only when you click Save.</p>
+            <button class="button button-primary" id="saveButton" type="submit">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5 9.2 17 19 7" /></svg>
+              Save changes
+            </button>
+          </div>
+        </form>
       </div>
-    </div>
-
-    <!-- History Tab -->
-    <div id="history" class="panel">
-      <h2>Captcha Job History</h2>
-      <div class="table-wrap">
-        <div class="table-head">Recent server captcha jobs</div>
-        <div style="overflow-x: auto;">
-          <table class="job-table" id="jobHistoryTable">
-            <thead>
-              <tr>
-                <th>Time</th>
-                <th>Action</th>
-                <th>Result</th>
-                <th>req_id</th>
-                <th>Error</th>
-              </tr>
-            </thead>
-            <tbody id="jobHistoryBody"></tbody>
-          </table>
-        </div>
-      </div>
-
-      <h2 style="margin-top: 32px;">Generation Job History</h2>
-      <div class="table-wrap">
-        <div class="table-head">Recent generation jobs</div>
-        <div style="overflow-x: auto;">
-          <table class="job-table" id="generationHistoryTable">
-            <thead>
-              <tr>
-                <th>Time</th>
-                <th>Command</th>
-                <th>Method</th>
-                <th>Result</th>
-                <th>Status</th>
-                <th>URL</th>
-                <th>Error</th>
-              </tr>
-            </thead>
-            <tbody id="generationHistoryBody"></tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-
-    <!-- Logs Tab -->
-    <div id="logs" class="panel">
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
-        <h2 style="margin: 0;">Activity Log</h2>
-        <select id="eventLogFilter" style="width: auto; padding: 6px 12px; font-size: 12px;">
-          <option value="all">All Events</option>
-          <option value="issues">Errors &amp; Warnings Only</option>
-        </select>
-      </div>
-      <div class="table-wrap">
-        <ul class="event-list tall" id="eventLogList">
-          <li class="event-item">No recent events</li>
-        </ul>
-      </div>
-    </div>
-
-    <!-- Configuration Tab -->
-    <div id="config" class="panel">
-      <h2>WebSocket Connection</h2>
-      <div class="form-group">
-        <label for="serverUrl">WebSocket URL</label>
-        <input id="serverUrl" type="text" placeholder="wss://flow-api.prismacreative.online/captcha_ws">
-        <p class="hint">
-          Use <code>wss://</code> for production APIs. WebSocket URL is shared across modes.
-        </p>
-      </div>
-
-      <h2>Authentication Mode</h2>
-      <p>Choose <strong>End user worker</strong>, <strong>Captcha worker</strong>, or <strong>Refresh worker</strong>.</p>
-      <div class="inner-tabs" role="tablist">
-        <button type="button" class="inner-tab" id="tabEndUser" role="tab" aria-selected="true" aria-controls="panelEndUser">End User Worker</button>
-        <button type="button" class="inner-tab" id="tabCaptchaWorker" role="tab" aria-selected="false" aria-controls="panelCaptchaWorker">Captcha Worker</button>
-        <button type="button" class="inner-tab" id="tabRefreshWorker" role="tab" aria-selected="false" aria-controls="panelRefreshWorker">Refresh Worker</button>
-      </div>
-
-      <div id="panelEndUser" class="tabpanel" role="tabpanel" aria-hidden="false">
-        <div class="form-group">
-          <label for="clientLabel">Client Label</label>
-          <input id="clientLabel" type="text" placeholder="e.g. main-worker">
-        </div>
-        <div class="form-group">
-          <label for="apiKey">API Key</label>
-          <input id="apiKey" type="password" placeholder="Paste managed API key here">
-          <p class="hint">Managed keys need the <code>tokens:import</code> scope to import this Chrome profile.</p>
-        </div>
-        <div class="form-group">
-          <label for="accountRefreshIntervalMinutes">Token refresh interval (minutes)</label>
-          <input id="accountRefreshIntervalMinutes" type="number" min="5" max="1440" step="1" value="120">
-        </div>
-        <div class="checkbox-row">
-          <input type="checkbox" id="accountAutoImportEnabled">
-          <label for="accountAutoImportEnabled">Automatically sync the current Google account</label>
-        </div>
-        <div class="form-group">
-          <label for="accountAutoImportIntervalMinutes">Account sync interval (minutes)</label>
-          <input id="accountAutoImportIntervalMinutes" type="number" min="5" max="1440" step="1" value="30">
-        </div>
-        <div class="btn-row">
-          <button id="importAccountBtn" type="button" class="secondary">Save / Import Current Google Account</button>
-        </div>
-      </div>
-
-      <div id="panelCaptchaWorker" class="tabpanel" role="tabpanel" aria-hidden="true">
-        <div class="form-group">
-          <label for="captchaWorkerAuthKey">Captcha Worker Key</label>
-          <input id="captchaWorkerAuthKey" type="password" placeholder="Paste captcha worker key here">
-        </div>
-      </div>
-
-      <div id="panelRefreshWorker" class="tabpanel" role="tabpanel" aria-hidden="true">
-        <div class="form-group">
-          <label for="refreshTokenId">Token ID</label>
-          <input id="refreshTokenId" type="number" min="1" step="1" placeholder="Enter token ID for ST refresh">
-        </div>
-      </div>
-
-      <div class="btn-row">
-        <button id="saveBtn" type="button">Save Connection</button>
-        <button id="reconnectBtn" type="button" class="secondary">Reconnect Now</button>
-        <button id="testBtn" type="button" class="secondary">Test Token</button>
-      </div>
-
-      <h2 style="margin-top: 40px;">Worker Tab (Labs / Flow)</h2>
-      <p class="hint">Keep a background tab for reCAPTCHA to avoid repeated reloads.</p>
-      
-      <div class="form-group">
-        <label for="workerPageUrl">Worker Page URL</label>
-        <input id="workerPageUrl" type="text" placeholder="https://labs.google/fx/api/auth/providers">
-      </div>
-      
-      <div class="form-group">
-        <label for="workerRecaptchaSettleMs">reCAPTCHA Settle Delay (ms)</label>
-        <input id="workerRecaptchaSettleMs" type="number" min="0" max="120000" step="100" value="3000">
-        <p class="hint">Wait time before running reCAPTCHA scripts.</p>
-      </div>
-
-      <div class="checkbox-row">
-        <input type="checkbox" id="usePersistentWorkerTab" checked>
-        <label for="usePersistentWorkerTab">Use persistent worker tab</label>
-      </div>
-      <div class="checkbox-row">
-        <input type="checkbox" id="autoRecycleWorkerTabOnCaptchaFailure">
-        <label for="autoRecycleWorkerTabOnCaptchaFailure">Auto-recycle tab after failure</label>
-      </div>
-
-      <div class="btn-row">
-        <button type="button" id="saveWorkerBtn" class="secondary">Save Worker Settings</button>
-        <button type="button" id="workerOpenBtn" class="secondary">Open Tab</button>
-        <button type="button" id="workerCloseBtn" class="secondary">Close Tab</button>
-        <button type="button" id="workerRecycleBtn" class="secondary">Recycle Tab</button>
-      </div>
-
-      <div style="margin-top: 48px; padding-top: 24px; border-top: 1px solid var(--border);">
-        <button id="resetBtn" type="button" class="danger">Reset Extension</button>
-        <p class="hint" style="margin-top: 12px;">
-          <strong>Warning:</strong> This will clear all settings, keys, and history.
-        </p>
-      </div>
-    </div>
-
-    <div class="status-msg" id="status"></div>
-  </div>
-  <script src="options.js"></script>
-</body>
+    </main>
+    <script src="options.js"></script>
+  </body>
 </html>

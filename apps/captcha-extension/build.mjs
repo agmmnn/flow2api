@@ -15,6 +15,7 @@ await build({
     background: resolve(root, "src/background.ts"),
     content: resolve(root, "src/content.ts"),
     options: resolve(root, "src/options.ts"),
+    popup: resolve(root, "src/popup.ts"),
     stealth: resolve(root, "src/stealth.ts"),
   },
   outdir: dist,

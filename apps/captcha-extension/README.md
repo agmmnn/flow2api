@@ -1,4 +1,4 @@
-# Flow2API CAPTCHA extension
+# Flow2API Worker extension
 
 This Chrome Manifest V3 extension can connect as an end-user, CAPTCHA, or
 token-bound refresh worker. End-user mode can also import and periodically sync
@@ -21,14 +21,21 @@ The source lives in `src/`; `dist/` is generated and intentionally ignored by
 Git. `bun run --cwd apps/captcha-extension check` runs strict checks for the
 extracted state modules, the worker/account tests, and the production bundle.
 
+## Using the extension
+
+Click the extension icon for everyday controls: connection status, account
+sync, CAPTCHA testing, reconnect, automation switches, worker-tab control, and
+recent activity. Use the gear button only for credentials, worker role, sync
+intervals, and advanced CAPTCHA tuning.
+
 ## Modes
 
-- **End User Worker** authenticates with a managed API key. It can solve
+- **My account** authenticates with a managed API key. It can solve
   CAPTCHA jobs assigned to that key and, with the `tokens:import` scope, import
   or automatically synchronize the current Google account.
-- **Captcha Worker** authenticates with a server-side CAPTCHA worker key and
+- **CAPTCHA only** authenticates with a server-side CAPTCHA worker key and
   accepts CAPTCHA jobs only.
-- **Refresh Worker** binds one Chrome profile to an existing token ID and
+- **Refresh only** binds one Chrome profile to an existing token ID and
   accepts session-token refresh jobs only.
 
 One extension instance has one active mode. Use a second Chrome profile only

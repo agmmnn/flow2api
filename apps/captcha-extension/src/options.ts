@@ -1,700 +1,232 @@
-// @ts-nocheck -- the legacy options DOM is typed incrementally through shared state modules.
 import { normalizeWebSocketUrl } from "@flow2api/extension-core"
 
 import {
   DEFAULT_SETTINGS,
   DEFAULT_WORKER_PAGE_URL,
-  STORAGE_DEFAULTS as STORAGE_KEYS,
   clampAccountInterval,
   clampWorkerRecaptchaSettleMs,
-  normalizeSettings,
+  loadSettings,
   normalizeWorkerPageUrl,
+  type CaptchaExtensionSettings,
 } from "./state/storage"
-import { inferWorkerMode } from "./state/worker-mode"
+import { type WorkerMode } from "./state/worker-mode"
+import { connectionPresentation, MODE_PRESENTATION } from "./ui-model"
 
-const $ = (id) => document.getElementById(id);
-let reconnectInProgress = false;
-let eventLogFilter = "all";
-
-function setStatus(message, isError = false) {
-  const status = $("status");
-  status.textContent = message;
-  status.style.color = isError ? "var(--bad)" : "var(--ok)";
-  status.classList.add("active");
-  
-  // Auto-hide success messages after 5 seconds, keep errors visible
-  if (!isError) {
-    setTimeout(() => {
-      status.classList.remove("active");
-    }, 5000);
-  }
+interface RuntimeReply {
+  success: boolean
+  error?: string
+  state?: Record<string, unknown>
 }
 
-function isValidWsUrl(value) {
+let activeMode: WorkerMode = "endUser"
+
+function element<T extends HTMLElement>(id: string): T {
+  const node = document.getElementById(id)
+  if (!node) throw new Error(`Missing settings element: ${id}`)
+  return node as T
+}
+
+function runtimeMessage<T>(message: Record<string, unknown>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(message, (response: T) => {
+      const error = chrome.runtime.lastError
+      if (error) reject(new Error(error.message))
+      else resolve(response)
+    })
+  })
+}
+
+function saveStorage(values: Record<string, unknown>): Promise<void> {
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.set(values, () => {
+      const error = chrome.runtime.lastError
+      if (error) reject(new Error(error.message))
+      else resolve()
+    })
+  })
+}
+
+function setStatus(message: string, tone: "neutral" | "positive" | "negative" = "neutral"): void {
+  const status = element<HTMLParagraphElement>("formStatus")
+  status.textContent = message
+  status.dataset.tone = tone
+}
+
+function setSelectValue(select: HTMLSelectElement, value: number): void {
+  const stringValue = String(value)
+  if (![...select.options].some((option) => option.value === stringValue)) {
+    select.add(new Option(`Every ${value} minutes`, stringValue))
+  }
+  select.value = stringValue
+}
+
+function setMode(mode: WorkerMode): void {
+  activeMode = mode
+  const definitions: Array<[string, string, WorkerMode]> = [
+    ["modeEndUser", "panelEndUser", "endUser"],
+    ["modeCaptcha", "panelCaptcha", "captchaWorker"],
+    ["modeRefresh", "panelRefresh", "refreshWorker"],
+  ]
+
+  for (const [buttonId, panelId, candidate] of definitions) {
+    const selected = candidate === mode
+    element<HTMLButtonElement>(buttonId).setAttribute("aria-selected", String(selected))
+    element<HTMLElement>(panelId).hidden = !selected
+  }
+
+  element<HTMLParagraphElement>("modeDescription").textContent = MODE_PRESENTATION[mode].description
+  element<HTMLElement>("accountSyncRow").classList.toggle("is-hidden", mode !== "endUser")
+  element<HTMLElement>("accountIntervals").classList.toggle("is-hidden", mode !== "endUser")
+  element<HTMLElement>("captchaReadyRow").classList.toggle("is-hidden", mode === "refreshWorker")
+  element<HTMLElement>("captchaRecoveryRow").classList.toggle("is-hidden", mode === "refreshWorker")
+}
+
+function applySettings(settings: CaptchaExtensionSettings): void {
+  element<HTMLInputElement>("serverUrl").value = settings.serverUrl
+  element<HTMLInputElement>("clientLabel").value = settings.clientLabel
+  element<HTMLInputElement>("apiKey").value = settings.apiKey
+  element<HTMLInputElement>("captchaWorkerAuthKey").value = settings.captchaWorkerAuthKey
+  element<HTMLInputElement>("refreshTokenId").value = settings.refreshTokenId
+  element<HTMLInputElement>("accountAutoImportEnabled").checked = settings.accountAutoImportEnabled
+  setSelectValue(
+    element<HTMLSelectElement>("accountAutoImportIntervalMinutes"),
+    settings.accountAutoImportIntervalMinutes,
+  )
+  setSelectValue(
+    element<HTMLSelectElement>("accountRefreshIntervalMinutes"),
+    settings.accountRefreshIntervalMinutes,
+  )
+  element<HTMLInputElement>("usePersistentWorkerTab").checked = settings.usePersistentWorkerTab
+  element<HTMLInputElement>("autoRecycleWorkerTabOnCaptchaFailure").checked =
+    settings.autoRecycleWorkerTabOnCaptchaFailure
+  element<HTMLInputElement>("workerPageUrl").value = settings.workerPageUrl
+  setSelectValue(
+    element<HTMLSelectElement>("workerRecaptchaSettleMs"),
+    settings.workerRecaptchaSettleMs,
+  )
+  setMode(settings.connectionMode)
+}
+
+async function updateConnectionStatus(): Promise<void> {
+  const pill = element<HTMLElement>("connectionPill")
+  const label = element<HTMLSpanElement>("connectionPillText")
   try {
-    const url = new URL(value);
-    return url.protocol === "ws:" || url.protocol === "wss:";
-  } catch (e) {
-    return false;
-  }
-}
-
-function getActiveMode() {
-  if ($("tabCaptchaWorker") && $("tabCaptchaWorker").getAttribute("aria-selected") === "true") return "captchaWorker";
-  if ($("tabRefreshWorker") && $("tabRefreshWorker").getAttribute("aria-selected") === "true") return "refreshWorker";
-  return "endUser";
-}
-
-function setActiveMode(mode) {
-  const normalized = mode === "worker" ? "refreshWorker" : mode;
-  const isEnd = normalized === "endUser";
-  const isCaptcha = normalized === "captchaWorker";
-  const isRefresh = normalized === "refreshWorker";
-  $("tabEndUser").setAttribute("aria-selected", isEnd ? "true" : "false");
-  $("tabCaptchaWorker").setAttribute("aria-selected", isCaptcha ? "true" : "false");
-  $("tabRefreshWorker").setAttribute("aria-selected", isRefresh ? "true" : "false");
-  $("panelEndUser").setAttribute("aria-hidden", isEnd ? "false" : "true");
-  $("panelCaptchaWorker").setAttribute("aria-hidden", isCaptcha ? "false" : "true");
-  $("panelRefreshWorker").setAttribute("aria-hidden", isRefresh ? "false" : "true");
-}
-
-function loadSettings() {
-  chrome.storage.local.get(STORAGE_KEYS, (stored) => {
-    const inferred = inferWorkerMode(stored);
-    const rawUrl = (stored.serverUrl || DEFAULT_SETTINGS.serverUrl).trim();
-    const fixedUrl = normalizeWebSocketUrl(rawUrl);
-    if (fixedUrl && fixedUrl !== rawUrl) {
-      chrome.storage.local.set({ serverUrl: fixedUrl }, () => {
-        chrome.storage.local.get(STORAGE_KEYS, (s2) => {
-          applyLoadedSettings(s2, inferWorkerMode(s2));
-        });
-      });
-      return;
-    }
-    applyLoadedSettings(stored, inferred);
-  });
-}
-
-function applyLoadedSettings(stored, inferredMode) {
-  const settings = normalizeSettings({ ...stored, connectionMode: inferredMode });
-  $("serverUrl").value = settings.serverUrl;
-  $("apiKey").value = settings.apiKey;
-  $("captchaWorkerAuthKey").value = settings.captchaWorkerAuthKey;
-  $("refreshTokenId").value = settings.refreshTokenId;
-  $("clientLabel").value = settings.clientLabel;
-  $("workerPageUrl").value = settings.workerPageUrl;
-  $("workerRecaptchaSettleMs").value = String(settings.workerRecaptchaSettleMs);
-  $("usePersistentWorkerTab").checked = settings.usePersistentWorkerTab;
-  $("autoRecycleWorkerTabOnCaptchaFailure").checked = settings.autoRecycleWorkerTabOnCaptchaFailure;
-  $("accountAutoImportEnabled").checked = settings.accountAutoImportEnabled;
-  $("accountAutoImportIntervalMinutes").value = String(settings.accountAutoImportIntervalMinutes);
-  $("accountRefreshIntervalMinutes").value = String(settings.accountRefreshIntervalMinutes);
-  setActiveMode(settings.connectionMode);
-  updateWorkerActionButtons();
-}
-
-function saveSettings() {
-  const mode = getActiveMode();
-  let serverUrl = normalizeWebSocketUrl(($("serverUrl").value || "").trim());
-  $("serverUrl").value = serverUrl;
-
-  if (!isValidWsUrl(serverUrl)) {
-    setStatus("WebSocket URL must start with ws:// or wss://.", true);
-    return;
-  }
-
-  if (mode === "endUser") {
-    const apiKey = ($("apiKey").value || "").trim();
-    if (!apiKey) {
-      setStatus("API Key is required for End user worker mode.", true);
-      return;
-    }
-    const payload = {
-      serverUrl,
-      connectionMode: "endUser",
-      apiKey,
-      clientLabel: ($("clientLabel").value || "").trim(),
-      accountAutoImportEnabled: $("accountAutoImportEnabled").checked,
-      accountAutoImportIntervalMinutes: clampAccountInterval($("accountAutoImportIntervalMinutes").value, 30),
-      accountRefreshIntervalMinutes: clampAccountInterval($("accountRefreshIntervalMinutes").value, 120)
-    };
-    chrome.storage.local.set(payload, () => {
-      if (chrome.runtime.lastError) {
-        setStatus(`Save failed: ${chrome.runtime.lastError.message}`, true);
-        return;
-      }
-      setStatus("Saved connection (End user worker). Background will reconnect.");
-    });
-    return;
-  }
-
-  if (mode === "captchaWorker") {
-    const captchaWorkerAuthKey = ($("captchaWorkerAuthKey").value || "").trim();
-    if (!captchaWorkerAuthKey) {
-      setStatus("Captcha worker key is required for Captcha worker mode.", true);
-      return;
-    }
-    chrome.storage.local.set(
-      {
-        serverUrl,
-        connectionMode: "captchaWorker",
-        captchaWorkerAuthKey,
-        apiKey: "",
-        clientLabel: ""
-      },
-      () => {
-        if (chrome.runtime.lastError) {
-          setStatus(`Save failed: ${chrome.runtime.lastError.message}`, true);
-          return;
-        }
-        setStatus("Saved connection (Captcha worker). Background will reconnect.");
-        $("apiKey").value = "";
-        $("clientLabel").value = "";
-      }
-    );
-    return;
-  }
-
-  const refreshTokenId = String(($("refreshTokenId").value || "")).trim();
-  if (!/^[1-9]\d*$/.test(refreshTokenId)) {
-    setStatus("A positive Token ID is required for Refresh worker mode.", true);
-    return;
-  }
-  const payload = {
-    serverUrl,
-    connectionMode: "refreshWorker",
-    refreshTokenId,
-    apiKey: "",
-    clientLabel: ""
-  };
-  chrome.storage.local.set(payload, () => {
-    if (chrome.runtime.lastError) {
-      setStatus(`Save failed: ${chrome.runtime.lastError.message}`, true);
-      return;
-    }
-    setStatus("Saved connection (Refresh worker). API key and labels cleared. Background will reconnect.");
-    $("apiKey").value = "";
-    $("clientLabel").value = "";
-  });
-}
-
-async function importCurrentAccount() {
-  if (getActiveMode() !== "endUser") {
-    setStatus("Switch to End User Worker mode before importing an account.", true);
-    return;
-  }
-
-  const serverUrl = normalizeWebSocketUrl(($("serverUrl").value || "").trim());
-  const apiKey = ($("apiKey").value || "").trim();
-  if (!isValidWsUrl(serverUrl)) {
-    setStatus("WebSocket URL must start with ws:// or wss://.", true);
-    return;
-  }
-  if (!apiKey) {
-    setStatus("API Key is required for account import.", true);
-    return;
-  }
-
-  const importButton = $("importAccountBtn");
-  importButton.disabled = true;
-  setStatus("Opening Flow and importing the current Google account...");
-  const settings = {
-    serverUrl,
-    connectionMode: "endUser",
-    apiKey,
-    clientLabel: ($("clientLabel").value || "").trim(),
-    accountAutoImportEnabled: $("accountAutoImportEnabled").checked,
-    accountAutoImportIntervalMinutes: clampAccountInterval($("accountAutoImportIntervalMinutes").value, 30),
-    accountRefreshIntervalMinutes: clampAccountInterval($("accountRefreshIntervalMinutes").value, 120)
-  };
-
-  try {
-    await new Promise((resolve, reject) => {
-      chrome.storage.local.set(settings, () => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
-          return;
-        }
-        resolve();
-      });
-    });
-    const response = await chrome.runtime.sendMessage({ type: "import_current_account" });
-    if (!response || response.success !== true) {
-      throw new Error((response && response.error) || "The extension did not return an import result");
-    }
-    const payload = response.payload || {};
-    setStatus(
-      `Account synchronized: ${payload.email || "unknown"}; added ${payload.added || 0}, updated ${payload.updated || 0}, token ${payload.token_id || "?"}.`
-    );
-    refreshRuntimeStatus();
-  } catch (error) {
-    setStatus(`Account import failed: ${error.message || error}`, true);
-  } finally {
-    importButton.disabled = false;
-  }
-}
-
-function saveWorkerSettings() {
-  let workerPageUrl = normalizeWorkerPageUrl(($("workerPageUrl").value || "").trim());
-  $("workerPageUrl").value = workerPageUrl;
-  try {
-    const u = new URL(workerPageUrl);
-    if (u.hostname.toLowerCase() !== "labs.google") {
-      setStatus("Worker URL must use hostname labs.google (extension host permissions).", true);
-      return;
-    }
-    if (u.protocol !== "https:") {
-      setStatus("Worker URL must use https://", true);
-      return;
-    }
+    const response = await runtimeMessage<RuntimeReply>({ type: "get_status" })
+    if (!response.success || !response.state) throw new Error(response.error || "status_unavailable")
+    const presentation = connectionPresentation(response.state)
+    pill.dataset.tone = presentation.tone
+    label.textContent = presentation.label
   } catch {
-    setStatus("Invalid worker page URL.", true);
-    return;
+    pill.dataset.tone = "negative"
+    label.textContent = "Status unavailable"
   }
-  const usePersistentWorkerTab = $("usePersistentWorkerTab").checked;
-  const autoRecycleWorkerTabOnCaptchaFailure = $("autoRecycleWorkerTabOnCaptchaFailure").checked;
-  const workerRecaptchaSettleMs = clampWorkerRecaptchaSettleMs(
-    parseInt(String($("workerRecaptchaSettleMs").value || "").trim(), 10)
-  );
-  $("workerRecaptchaSettleMs").value = String(workerRecaptchaSettleMs);
-  chrome.storage.local.set(
-    {
-      workerPageUrl,
-      usePersistentWorkerTab,
-      autoRecycleWorkerTabOnCaptchaFailure,
-      workerRecaptchaSettleMs
-    },
-    () => {
-      if (chrome.runtime.lastError) {
-        setStatus(`Save worker settings failed: ${chrome.runtime.lastError.message}`, true);
-        return;
-      }
-      setStatus("Worker tab settings saved.");
-      updateWorkerActionButtons();
-    }
-  );
 }
 
-function escapeHtml(value) {
-  return String(value)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/\"/g, "&quot;")
-    .replace(/'/g, "&#039;");
-}
-
-function formatPercent(solved, total) {
-  if (!total) return "—";
-  return `${((100 * solved) / total).toFixed(1)}%`;
-}
-
-function renderMetrics(state) {
-  const el = $("metricsGrid");
-  if (!state) {
-    el.innerHTML = "";
-    return;
+function validWebSocketUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    return url.protocol === "ws:" || url.protocol === "wss:"
+  } catch {
+    return false
   }
-  const solved = Number(state.captchaJobsSucceeded) || 0;
-  const failed = Number(state.captchaJobsFailed) || 0;
-  const total = solved + failed;
-  const srOk = Number(state.sessionRefreshSucceeded) || 0;
-  const srFail = Number(state.sessionRefreshFailed) || 0;
-
-  el.innerHTML = `
-    <div class="metric-card">
-      <span class="metric-label">Captcha solved</span>
-      <span class="metric-value ok">${escapeHtml(String(solved))}</span>
-    </div>
-    <div class="metric-card">
-      <span class="metric-label">Captcha failed</span>
-      <span class="metric-value bad">${escapeHtml(String(failed))}</span>
-    </div>
-    <div class="metric-card">
-      <span class="metric-label">Captcha total</span>
-      <span class="metric-value">${escapeHtml(String(total))}</span>
-      <div class="metric-sub">Success rate: ${escapeHtml(formatPercent(solved, total))}</div>
-    </div>
-    <div class="metric-card">
-      <span class="metric-label">Session refresh</span>
-      <span class="metric-value">${escapeHtml(String(srOk))} ok / ${escapeHtml(String(srFail))} fail</span>
-      <div class="metric-sub">Worker mode server refresh</div>
-    </div>
-  `;
 }
 
-function renderGenerationMetrics(state) {
-  const el = $("generationMetricsGrid");
-  if (!el) return;
-  if (!state) {
-    el.innerHTML = "";
-    return;
+function readForm(): Record<string, unknown> {
+  const serverUrl = normalizeWebSocketUrl(element<HTMLInputElement>("serverUrl").value.trim())
+  if (!validWebSocketUrl(serverUrl)) throw new Error("Enter a valid ws:// or wss:// WebSocket URL.")
+
+  const clientLabel = element<HTMLInputElement>("clientLabel").value.trim()
+  const apiKey = element<HTMLInputElement>("apiKey").value.trim()
+  const captchaWorkerAuthKey = element<HTMLInputElement>("captchaWorkerAuthKey").value.trim()
+  const refreshTokenId = element<HTMLInputElement>("refreshTokenId").value.trim()
+
+  if (activeMode === "endUser" && !apiKey) throw new Error("Enter a managed API key for My account mode.")
+  if (activeMode === "captchaWorker" && !captchaWorkerAuthKey) {
+    throw new Error("Enter a CAPTCHA worker key for CAPTCHA-only mode.")
   }
-  const ok = Number(state.generationJobsSucceeded) || 0;
-  const fail = Number(state.generationJobsFailed) || 0;
-  const total = ok + fail;
-  const inFlight = !!state.generationInFlight;
-  const fallbackReason = String(state.generationLastPollFallbackReason || "").trim();
-  el.innerHTML = `
-    <div class="metric-card">
-      <span class="metric-label">Generation success</span>
-      <span class="metric-value ok">${escapeHtml(String(ok))}</span>
-    </div>
-    <div class="metric-card">
-      <span class="metric-label">Generation failed</span>
-      <span class="metric-value bad">${escapeHtml(String(fail))}</span>
-    </div>
-    <div class="metric-card">
-      <span class="metric-label">Generation total</span>
-      <span class="metric-value">${escapeHtml(String(total))}</span>
-      <div class="metric-sub">Success rate: ${escapeHtml(formatPercent(ok, total))}</div>
-    </div>
-    <div class="metric-card">
-      <span class="metric-label">Generation state</span>
-      <span class="metric-value">${inFlight ? "Running" : "Idle"}</span>
-      <div class="metric-sub">${escapeHtml(fallbackReason || "No poll fallback error")}</div>
-    </div>
-  `;
-}
-
-function renderGenerationHistory(state) {
-  const body = $("generationHistoryBody");
-  if (!body) return;
-  const list = Array.isArray(state.recentGenerationJobs) ? [...state.recentGenerationJobs].reverse() : [];
-  if (!list.length) {
-    body.innerHTML = `<tr><td colspan="7" class="event-item" style="border:0;">No generation jobs yet</td></tr>`;
-    return;
+  if (activeMode === "refreshWorker" && !refreshTokenId) {
+    throw new Error("Enter the token ID for Refresh-only mode.")
   }
-  body.innerHTML = list.map((row) => {
-    const ts = row && row.ts ? Number(row.ts) : 0;
-    const timeStr = ts ? escapeHtml(new Date(ts).toLocaleString()) : "—";
-    const cmd = escapeHtml(String((row && row.command) || ""));
-    const method = escapeHtml(String((row && row.method) || ""));
-    const status = escapeHtml(String((row && row.status) || "—"));
-    const ok = !!(row && row.ok);
-    const result = ok ? `<span class="job-ok">OK</span>` : `<span class="job-fail">FAIL</span>`;
-    const url = escapeHtml(String((row && row.url) || ""));
-    const err = escapeHtml(String((row && row.error) || ""));
-    return `<tr>
-      <td>${timeStr}</td>
-      <td><code>${cmd}</code></td>
-      <td><code>${method}</code></td>
-      <td>${result}</td>
-      <td>${status}</td>
-      <td><code style="word-break:break-all;">${url || "—"}</code></td>
-      <td>${err || "—"}</td>
-    </tr>`;
-  }).join("");
-}
 
-function renderJobHistory(state) {
-  const body = $("jobHistoryBody");
-  const list = Array.isArray(state.recentCaptchaJobs) ? [...state.recentCaptchaJobs].reverse() : [];
-  if (!list.length) {
-    body.innerHTML = `<tr><td colspan="5" class="event-item" style="border:0;">No captcha jobs yet</td></tr>`;
-    return;
+  return {
+    serverUrl,
+    connectionMode: activeMode,
+    clientLabel: activeMode === "endUser" ? clientLabel : "",
+    apiKey: activeMode === "endUser" ? apiKey : "",
+    captchaWorkerAuthKey: activeMode === "captchaWorker" ? captchaWorkerAuthKey : "",
+    refreshTokenId: activeMode === "refreshWorker" ? refreshTokenId : "",
+    accountAutoImportEnabled:
+      activeMode === "endUser" && element<HTMLInputElement>("accountAutoImportEnabled").checked,
+    accountAutoImportIntervalMinutes: clampAccountInterval(
+      element<HTMLSelectElement>("accountAutoImportIntervalMinutes").value,
+      DEFAULT_SETTINGS.accountAutoImportIntervalMinutes,
+    ),
+    accountRefreshIntervalMinutes: clampAccountInterval(
+      element<HTMLSelectElement>("accountRefreshIntervalMinutes").value,
+      DEFAULT_SETTINGS.accountRefreshIntervalMinutes,
+    ),
+    usePersistentWorkerTab: element<HTMLInputElement>("usePersistentWorkerTab").checked,
+    autoRecycleWorkerTabOnCaptchaFailure: element<HTMLInputElement>(
+      "autoRecycleWorkerTabOnCaptchaFailure",
+    ).checked,
+    workerPageUrl: normalizeWorkerPageUrl(
+      element<HTMLInputElement>("workerPageUrl").value || DEFAULT_WORKER_PAGE_URL,
+    ),
+    workerRecaptchaSettleMs: clampWorkerRecaptchaSettleMs(
+      element<HTMLSelectElement>("workerRecaptchaSettleMs").value,
+    ),
   }
-  body.innerHTML = list
-    .map((row) => {
-      const ts = row && row.ts ? Number(row.ts) : 0;
-      const timeStr = ts ? escapeHtml(new Date(ts).toLocaleString()) : "—";
-      const action = escapeHtml(String((row && row.action) || ""));
-      const ok = row && row.ok;
-      const resCell = ok
-        ? `<span class="job-ok">OK</span>`
-        : `<span class="job-fail">FAIL</span>`;
-      const req = escapeHtml(String((row && row.req_id) || ""));
-      const err = escapeHtml(String((row && row.error) || ""));
-      return `<tr>
-        <td>${timeStr}</td>
-        <td><code>${action}</code></td>
-        <td>${resCell}</td>
-        <td><code style="word-break:break-all;">${req}</code></td>
-        <td>${err || "—"}</td>
-      </tr>`;
-    })
-    .join("");
 }
 
-function renderStatusCards(state) {
-  const cardsEl = $("statusCards");
-  const ws = state.wsStatus || "unknown";
-  const mode = state.connectionMode || "-";
-  const instance = state.instanceId || "-";
-  const workerSession = state.workerSessionId || "-";
-  const managed = state.managedApiKeyId || "-";
-  const captchaWorker = state.captchaWorkerId || "-";
-  const refreshToken = state.refreshTokenId || "-";
-  const ack = state.lastRegisterStatus || "unknown";
-  const source = state.bindingSource || "unknown";
-  const registerError = state.lastRegisterError || "-";
-  const lastError = state.lastError || "-";
-  const persistent = state.usePersistentWorkerTab ? "on" : "off";
-  const workerTabId =
-    state.workerTabId != null && state.workerTabId !== "" ? String(state.workerTabId) : "(none)";
-  const accountImportAt = state.accountImportLastAt
-    ? new Date(Number(state.accountImportLastAt)).toLocaleString()
-    : "never";
-  const accountImportStatus = state.accountImportLastStatus || "never";
-
-  const items = [
-    ["Connection", ws, false],
-    ["Mode", mode, false],
-    ["Register", ack, ack === "error"],
-    ["Binding", source, false],
-    ["Managed key", managed, false],
-    ["Captcha worker", captchaWorker, false],
-    ["Refresh token", refreshToken, false],
-    ["Allow generation", state.allowGeneration ? "yes" : "no", false],
-    ["Instance ID", instance, false],
-    ["Worker session", workerSession, false],
-    ["Persistent worker tab", persistent, false],
-    [
-      "reCAPTCHA settle (ms)",
-      String(state.workerRecaptchaSettleMs != null ? state.workerRecaptchaSettleMs : "—"),
-      false
-    ],
-    ["Worker tab ID", workerTabId, false],
-    ["Register error", registerError, registerError !== "-"],
-    ["Last error", lastError, lastError !== "-"],
-    ["Generation in-flight", state.generationInFlight ? "yes" : "no", false],
-    ["Account sync", state.accountImportInFlight ? "running" : accountImportStatus, accountImportStatus === "error"],
-    ["Last account sync", accountImportAt, false],
-    ["Account sync detail", state.accountImportLastMessage || "-", accountImportStatus === "error"],
-  ];
-
-  cardsEl.innerHTML = items
-    .map(([label, value, isError]) => {
-      return `<div class="status-card">
-        <span class="status-label">${escapeHtml(label)}</span>
-        <span class="status-value${isError ? " error" : ""}">${escapeHtml(value)}</span>
-      </div>`;
-    })
-    .join("");
-}
-
-function formatEventTime(ts) {
-  if (!ts) return "-";
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return "-";
-  return d.toLocaleTimeString();
-}
-
-function renderSessionTokenHistory(entries) {
-  const listEl = $("sessionTokenHistoryList");
-  if (!listEl) return;
-  const list = Array.isArray(entries) ? entries : [];
-  if (!list.length) {
-    listEl.innerHTML = `<li class="event-item">No captures yet (server-requested session refresh only)</li>`;
-    return;
+async function save(event: SubmitEvent): Promise<void> {
+  event.preventDefault()
+  const button = element<HTMLButtonElement>("saveButton")
+  button.disabled = true
+  try {
+    const values = readForm()
+    await saveStorage(values)
+    const shouldKeepWorkerReady = values.usePersistentWorkerTab === true && activeMode !== "refreshWorker"
+    await runtimeMessage<RuntimeReply>({
+      type: shouldKeepWorkerReady ? "worker_tab_open" : "worker_tab_close",
+    }).catch(() => undefined)
+    setStatus("Saved. Reconnecting…", "positive")
+    element<HTMLElement>("connectionPill").dataset.tone = "warning"
+    element<HTMLSpanElement>("connectionPillText").textContent = "Connecting"
+    window.setTimeout(() => void updateConnectionStatus(), 1000)
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : "Could not save settings.", "negative")
+  } finally {
+    button.disabled = false
   }
-  listEl.innerHTML = list
-    .map((row, idx) => {
-      const ts = row && row.capturedAt ? Number(row.capturedAt) : 0;
-      const timeStr = ts ? escapeHtml(new Date(ts).toLocaleString()) : "—";
-      const tokenFull = escapeHtml(String((row && row.sessionToken) || ""));
-      return `<li class="event-item">
-        <span class="event-time">${timeStr}</span>
-        <span class="event-level info">#${idx + 1}</span>
-        <span><code>${tokenFull}</code></span>
-      </li>`;
-    })
-    .join("");
 }
 
-function renderEventLog(events) {
-  const logEl = $("eventLogList");
-  let list = Array.isArray(events) ? [...events] : [];
-  list = list.slice().reverse();
-  if (eventLogFilter === "issues") {
-    list = list.filter((evt) => evt && (evt.level === "warn" || evt.level === "error"));
+async function resetExtension(): Promise<void> {
+  if (!window.confirm("Reset all extension settings, credentials, worker state, and history?")) return
+  const button = element<HTMLButtonElement>("resetButton")
+  button.disabled = true
+  try {
+    const response = await runtimeMessage<RuntimeReply>({ type: "reset_extension" })
+    if (!response.success) throw new Error(response.error || "Reset failed")
+    window.location.reload()
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : "Reset failed.", "negative")
+    button.disabled = false
   }
-  if (!list.length) {
-    logEl.innerHTML = `<li class="event-item">No events match this filter</li>`;
-    return;
+}
+
+async function initialize(): Promise<void> {
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-mode]")) {
+    button.addEventListener("click", () => setMode(button.dataset.mode as WorkerMode))
   }
-  logEl.innerHTML = list
-    .map((evt) => {
-      const level = ["info", "warn", "error"].includes(String(evt.level || ""))
-        ? String(evt.level)
-        : "info";
-      const msg = String(evt.message || evt.type || "-");
-      return `<li class="event-item">
-        <span class="event-time">${escapeHtml(formatEventTime(evt.ts))}</span>
-        <span class="event-level ${escapeHtml(level)}">${escapeHtml(level.toUpperCase())}</span>
-        <span>${escapeHtml(msg)}</span>
-      </li>`;
-    })
-    .join("");
-}
+  element<HTMLFormElement>("settingsForm").addEventListener("submit", (event) => void save(event))
+  element<HTMLButtonElement>("resetButton").addEventListener("click", () => void resetExtension())
 
-function updateRuntimeStatus(state) {
-  const metaEl = $("statusMeta");
-  if (!state) {
-    $("statusCards").innerHTML = `<div class="status-card"><span class="status-label">Connection</span><span class="status-value">unknown</span></div>`;
-    metaEl.textContent = "Last update: no runtime state";
-    renderMetrics(null);
-    renderGenerationMetrics(null);
-    renderJobHistory({ recentCaptchaJobs: [] });
-    renderGenerationHistory({ recentGenerationJobs: [] });
-    renderSessionTokenHistory([]);
-    renderEventLog([]);
-    return;
+  try {
+    applySettings(await loadSettings(chrome.storage.local))
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : "Could not load settings.", "negative")
   }
-  renderMetrics(state);
-  renderGenerationMetrics(state);
-  renderJobHistory(state);
-  renderGenerationHistory(state);
-  renderStatusCards(state);
-  renderSessionTokenHistory(state.flowSessionTokenHistory);
-  renderEventLog(state.events);
-  metaEl.textContent = `Last update: ${new Date().toLocaleTimeString()} • WebSocket: ${state.wsStatus || "unknown"}`;
+  await updateConnectionStatus()
 }
 
-function refreshRuntimeStatus() {
-  chrome.runtime.sendMessage({ type: "get_status" }, (resp) => {
-    if (chrome.runtime.lastError) return;
-    if (resp && resp.success) updateRuntimeStatus(resp.state);
-  });
-}
-
-function reconnectNow() {
-  if (reconnectInProgress) return;
-  reconnectInProgress = true;
-  const reconnectBtn = $("reconnectBtn");
-  if (reconnectBtn) reconnectBtn.disabled = true;
-  setStatus("Reconnecting...", false);
-  chrome.runtime.sendMessage({ type: "reconnect_now" }, (resp) => {
-    if (chrome.runtime.lastError) {
-      setStatus(`Reconnect failed: ${chrome.runtime.lastError.message}`, true);
-    } else if (!resp || !resp.success) {
-      setStatus(`Reconnect failed: ${(resp && resp.error) || "unknown"}`, true);
-    } else {
-      setStatus("Reconnect triggered.");
-      setTimeout(refreshRuntimeStatus, 400);
-    }
-    reconnectInProgress = false;
-    if (reconnectBtn) reconnectBtn.disabled = false;
-  });
-}
-
-function runResetExtension() {
-  if (!confirm("Reset this extension?\n\nThis removes WebSocket URL, API keys, labels, worker tab settings (URL, persistent tab, auto-recycle, reCAPTCHA settle delay), captcha job stats and history, session refresh counters, stored Flow session token history (last 3), worker tab id, and assigns a new instance id. The background worker reconnects with default local URL.")) {
-    return;
-  }
-  setStatus("Resetting extension…", false);
-  chrome.runtime.sendMessage({ type: "reset_extension" }, (resp) => {
-    if (chrome.runtime.lastError) {
-      setStatus(`Reset failed: ${chrome.runtime.lastError.message}`, true);
-      return;
-    }
-    if (!resp || !resp.success) {
-      setStatus(`Reset failed: ${(resp && resp.error) || "unknown"}`, true);
-      return;
-    }
-    loadSettings();
-    setStatus("Extension reset. Defaults loaded; background reconnected.");
-    setTimeout(refreshRuntimeStatus, 400);
-  });
-}
-
-function runTokenTest() {
-  setStatus("Running token test, please wait...", false);
-  chrome.runtime.sendMessage({ type: "test_token", action: "IMAGE_GENERATION" }, (resp) => {
-    if (chrome.runtime.lastError) {
-      setStatus(`Test failed: ${chrome.runtime.lastError.message}`, true);
-      return;
-    }
-    if (resp && resp.success) {
-      setStatus("Test passed: token acquired.");
-    } else {
-      setStatus(`Test failed: ${(resp && resp.error) || "unknown error"}`, true);
-    }
-    refreshRuntimeStatus();
-  });
-}
-
-function updateWorkerActionButtons() {
-  const on = $("usePersistentWorkerTab").checked;
-  $("workerOpenBtn").disabled = !on;
-  $("workerRecycleBtn").disabled = !on;
-}
-
-function sendWorkerMessage(type, okMsg) {
-  setStatus("Working…", false);
-  chrome.runtime.sendMessage({ type }, (resp) => {
-    if (chrome.runtime.lastError) {
-      setStatus(`${type} failed: ${chrome.runtime.lastError.message}`, true);
-      return;
-    }
-    if (!resp || !resp.success) {
-      const err = (resp && resp.error) || "unknown";
-      if (err === "enable_persistent_worker_tab_first") {
-        setStatus("Turn on “Use persistent worker tab” and save worker tab settings first.", true);
-      } else {
-        setStatus(`${type} failed: ${err}`, true);
-      }
-      return;
-    }
-    setStatus(okMsg || "Done.");
-    refreshRuntimeStatus();
-  });
-}
-
-function wireAuthTabs() {
-  $("tabEndUser").addEventListener("click", () => setActiveMode("endUser"));
-  $("tabCaptchaWorker").addEventListener("click", () => setActiveMode("captchaWorker"));
-  $("tabRefreshWorker").addEventListener("click", () => setActiveMode("refreshWorker"));
-}
-
-function wireMainTabs() {
-  const tabs = document.querySelectorAll(".main-tab");
-  const panels = document.querySelectorAll(".panel");
-
-  tabs.forEach(tab => {
-    tab.addEventListener("click", () => {
-      const target = tab.getAttribute("data-tab");
-
-      // Update tabs
-      tabs.forEach(t => t.classList.remove("active"));
-      tab.classList.add("active");
-
-      // Update panels
-      panels.forEach(p => {
-        p.classList.remove("active");
-        if (p.id === target) {
-          p.classList.add("active");
-        }
-      });
-    });
-  });
-}
-
-document.addEventListener("DOMContentLoaded", () => {
-  wireMainTabs();
-  wireAuthTabs();
-  loadSettings();
-  $("saveBtn").addEventListener("click", saveSettings);
-  $("saveWorkerBtn").addEventListener("click", saveWorkerSettings);
-  $("reconnectBtn").addEventListener("click", reconnectNow);
-  $("testBtn").addEventListener("click", runTokenTest);
-  $("importAccountBtn").addEventListener("click", importCurrentAccount);
-  $("resetBtn").addEventListener("click", runResetExtension);
-  $("usePersistentWorkerTab").addEventListener("change", updateWorkerActionButtons);
-  $("workerOpenBtn").addEventListener("click", () =>
-    sendWorkerMessage("worker_tab_open", "Worker tab opened.")
-  );
-  $("workerCloseBtn").addEventListener("click", () =>
-    sendWorkerMessage("worker_tab_close", "Worker tab closed.")
-  );
-  $("workerRecycleBtn").addEventListener("click", () =>
-    sendWorkerMessage("worker_tab_recycle", "Worker tab recycled.")
-  );
-  $("eventLogFilter").addEventListener("change", (e) => {
-    eventLogFilter = (e.target && e.target.value) || "all";
-    refreshRuntimeStatus();
-  });
-  refreshRuntimeStatus();
-  updateWorkerActionButtons();
-  setInterval(refreshRuntimeStatus, 3000);
-});
+document.addEventListener("DOMContentLoaded", () => void initialize())
