@@ -282,8 +282,10 @@ cleanup. A dedicated job broker now owns pending CAPTCHA/generation futures, res
 ownership checks, disconnect propagation, upstream verdict routing, and one-time
 solver user-agent metadata. Generation request execution is also separated and owns
 request IDs, dispatch, future cleanup, response validation, and large-upload
-negotiation. The existing service exposes compatibility aliases while the concrete
-CAPTCHA and refresh request executors are separated in subsequent slices.
+negotiation. Session-token refresh execution now likewise owns its request IDs,
+dispatch, response parsing, timeout behavior, and future cleanup. The existing service
+exposes compatibility aliases while the concrete CAPTCHA executor is separated in the
+next worker slice.
 
 Exit criteria:
 

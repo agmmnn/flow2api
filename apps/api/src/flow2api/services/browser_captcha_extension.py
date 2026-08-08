@@ -19,6 +19,7 @@ from ..workers.extension.jobs import ExtensionJobBroker
 from ..workers.extension.generation import ExtensionGenerationJobs
 from ..workers.extension.routing import ExtensionWorkerRouting
 from ..workers.extension.registry import ExtensionConnectionRegistry
+from ..workers.extension.refresh import ExtensionRefreshJobs
 from ..workers.extension.uploads import GenerationUploadStore
 
 
@@ -49,6 +50,7 @@ class ExtensionCaptchaService:
         self._dedicated_stats_lock = self.worker_routing.lock
         self.generation_uploads = GenerationUploadStore()
         self.generation_jobs = ExtensionGenerationJobs(self.job_broker, self.generation_uploads)
+        self.refresh_jobs = ExtensionRefreshJobs(self.job_broker)
 
     async def register_generation_upload_slot(
         self, *, req_id: str, max_body_bytes: int, ttl_seconds: int
@@ -1083,27 +1085,11 @@ class ExtensionCaptchaService:
         token_id: int,
         timeout: int,
     ) -> Optional[str]:
-        req_id = f"req_{uuid.uuid4().hex}"
-        future = self.job_broker.register("captcha", req_id, conn.websocket)
         try:
-            await conn.websocket.send_text(
-                json.dumps(
-                    {
-                        "type": "refresh_st",
-                        "req_id": req_id,
-                        "token_id": int(token_id),
-                    }
-                )
-            )
-            result = await asyncio.wait_for(future, timeout=timeout)
-            if result.get("status") == "success":
-                return str(result.get("session_token") or "").strip() or None
-            return None
+            return await self.refresh_jobs.execute(conn, token_id=token_id, timeout=timeout)
         except Exception as exc:
             debug_logger.log_warning(f"[Extension Captcha] refresh_st failed for token_id={token_id}: {exc}")
             return None
-        finally:
-            self.job_broker.remove("captcha", req_id)
 
     async def _classify_extension_st_refresh_no_connection(self, token_id: int) -> str:
         """Reason code when no eligible token-ID refresh worker exists for ST refresh."""
