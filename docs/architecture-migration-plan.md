@@ -287,7 +287,10 @@ dispatch, response parsing, timeout behavior, and future cleanup. The existing s
 exposes compatibility aliases while the CAPTCHA executor now owns dispatch, timeout
 handling, worker health accounting, solver user-agent capture, and upstream verdict
 binding. The extension worker decomposition item is complete; personal/browser worker
-pools are the next slice.
+pools are the next slice. Personal-mode pool affinity, reservations, health ranking,
+round-robin state, and candidate ordering now live in `workers/personal/routing.py`;
+the legacy pool delegates through compatibility properties while session, tab, CAPTCHA,
+and refresh responsibilities are separated incrementally.
 
 Exit criteria:
 

@@ -32,6 +32,7 @@ from curl_cffi.requests import AsyncSession
 
 from ..core.logger import debug_logger
 from ..core.config import config
+from ..workers.personal import PersonalWorkerRouting
 from .browser_cookie_utils import (
     build_browser_cookie_targets,
     build_cookie_signature,
@@ -11999,11 +12000,7 @@ class _PersonalBrowserPoolService:
         self._worker_tab_limits: list[int] = []
         self._reload_lock = asyncio.Lock()
         self._worker_dispatch_lock = asyncio.Lock()
-        self._round_robin_index = 0
-        self._worker_dispatch_reservations: dict[int, int] = {}
-        self._project_worker_affinity: dict[str, int] = {}
-        self._token_worker_affinity: dict[str, int] = {}
-        self._affinity_cache_limit = 256
+        self.worker_routing = PersonalWorkerRouting()
         self._last_successful_worker_index: Optional[int] = None
         self._idle_worker_reaper_task: Optional[asyncio.Task] = None
         self._token_pool_lock = asyncio.Lock()
@@ -12025,6 +12022,46 @@ class _PersonalBrowserPoolService:
             "served_count": 0,
             "dropped_count": 0,
         }
+
+    @property
+    def _round_robin_index(self) -> int:
+        return self.worker_routing.round_robin_index
+
+    @_round_robin_index.setter
+    def _round_robin_index(self, value: int) -> None:
+        self.worker_routing.round_robin_index = value
+
+    @property
+    def _worker_dispatch_reservations(self) -> dict[int, int]:
+        return self.worker_routing.reservations
+
+    @_worker_dispatch_reservations.setter
+    def _worker_dispatch_reservations(self, value: dict[int, int]) -> None:
+        self.worker_routing.reservations = value
+
+    @property
+    def _project_worker_affinity(self) -> dict[str, int]:
+        return self.worker_routing.project_affinity
+
+    @_project_worker_affinity.setter
+    def _project_worker_affinity(self, value: dict[str, int]) -> None:
+        self.worker_routing.project_affinity = value
+
+    @property
+    def _token_worker_affinity(self) -> dict[str, int]:
+        return self.worker_routing.token_affinity
+
+    @_token_worker_affinity.setter
+    def _token_worker_affinity(self, value: dict[str, int]) -> None:
+        self.worker_routing.token_affinity = value
+
+    @property
+    def _affinity_cache_limit(self) -> int:
+        return self.worker_routing.affinity_cache_limit
+
+    @_affinity_cache_limit.setter
+    def _affinity_cache_limit(self, value: int) -> None:
+        self.worker_routing.affinity_cache_limit = value
 
     @staticmethod
     def _format_status_timestamp(timestamp_value: float) -> Optional[str]:
@@ -12329,17 +12366,7 @@ class _PersonalBrowserPoolService:
 
     @staticmethod
     def _parse_worker_index_from_slot_id(slot_id: Optional[str]) -> Optional[int]:
-        normalized_slot_id = str(slot_id or "").strip()
-        if not normalized_slot_id.startswith("b"):
-            return None
-        match = re.match(r"^b(\d+)-", normalized_slot_id)
-        if not match:
-            return None
-        try:
-            resolved_index = int(match.group(1)) - 1
-        except Exception:
-            return None
-        return resolved_index if resolved_index >= 0 else None
+        return PersonalWorkerRouting.parse_worker_index(slot_id)
 
     def _remember_affinity(
         self,
@@ -12348,129 +12375,57 @@ class _PersonalBrowserPoolService:
         slot_id: Optional[str] = None,
         worker_index: Optional[int] = None,
     ) -> None:
-        resolved_worker_index = worker_index
-        if resolved_worker_index is None:
-            resolved_worker_index = self._parse_worker_index_from_slot_id(slot_id)
-        if resolved_worker_index is None or resolved_worker_index < 0:
-            return
-        if resolved_worker_index >= len(self._workers):
-            return
-
-        normalized_project_key = self._normalize_project_key(project_id)
-        if normalized_project_key:
-            self._project_worker_affinity[normalized_project_key] = resolved_worker_index
-            self._trim_affinity_cache(self._project_worker_affinity)
-
-        normalized_token_key = self._normalize_token_key(token_id)
-        if normalized_token_key:
-            self._token_worker_affinity[normalized_token_key] = resolved_worker_index
-            self._trim_affinity_cache(self._token_worker_affinity)
+        self.worker_routing.remember(
+            self._workers,
+            project_key=self._normalize_project_key(project_id),
+            token_key=self._normalize_token_key(token_id),
+            slot_id=slot_id,
+            worker_index=worker_index,
+        )
 
     def _trim_affinity_cache(self, cache: dict[str, int]) -> None:
-        while len(cache) > self._affinity_cache_limit:
-            try:
-                oldest_key = next(iter(cache))
-            except StopIteration:
-                return
-            cache.pop(oldest_key, None)
+        self.worker_routing.trim(cache)
 
     def _cleanup_affinity_maps(self) -> None:
-        valid_indexes = set(range(len(self._workers)))
-        self._project_worker_affinity = {
-            key: value
-            for key, value in self._project_worker_affinity.items()
-            if value in valid_indexes
-        }
-        self._token_worker_affinity = {
-            key: value
-            for key, value in self._token_worker_affinity.items()
-            if value in valid_indexes
-        }
+        self.worker_routing.cleanup(len(self._workers))
 
     def _worker_has_project_mapping(
         self,
         worker: BrowserCaptchaService,
         project_id: Optional[str],
     ) -> bool:
-        normalized_project_key = self._normalize_project_key(project_id)
-        if not normalized_project_key:
-            return False
-        if normalized_project_key in (getattr(worker, "_project_resident_affinity", {}) or {}):
-            return True
-        for resident_info in (getattr(worker, "_resident_tabs", {}) or {}).values():
-            if str(getattr(resident_info, "project_id", "") or "").strip() == normalized_project_key:
-                return True
-        return False
+        return self.worker_routing.worker_has_project_mapping(
+            worker,
+            self._normalize_project_key(project_id),
+        )
 
     def _worker_has_token_mapping(
         self,
         worker: BrowserCaptchaService,
         token_id: Optional[int],
     ) -> bool:
-        normalized_token_key = self._normalize_token_key(token_id)
-        if not normalized_token_key:
-            return False
-        if normalized_token_key in (getattr(worker, "_token_resident_affinity", {}) or {}):
-            return True
-        for resident_info in (getattr(worker, "_resident_tabs", {}) or {}).values():
-            try:
-                if int(getattr(resident_info, "token_id", 0) or 0) == int(normalized_token_key):
-                    return True
-            except Exception:
-                continue
-        return False
+        return self.worker_routing.worker_has_token_mapping(
+            worker,
+            self._normalize_token_key(token_id),
+        )
 
     def _worker_busy_score(self, worker: BrowserCaptchaService) -> int:
-        busy_score = 0
-        if getattr(worker, "_browser_lock", None) and worker._browser_lock.locked():
-            busy_score += 1
-        if getattr(worker, "_legacy_lock", None) and worker._legacy_lock.locked():
-            busy_score += 1
-        if getattr(worker, "_tab_build_lock", None) and worker._tab_build_lock.locked():
-            busy_score += 1
-        for resident_info in (getattr(worker, "_resident_tabs", {}) or {}).values():
-            try:
-                if resident_info.solve_lock.locked():
-                    busy_score += 1
-                if int(getattr(resident_info, "pending_assignment_count", 0) or 0) > 0:
-                    busy_score += 1
-            except Exception:
-                continue
-        return busy_score
+        return self.worker_routing.worker_busy_score(worker)
 
     @staticmethod
     def _worker_has_live_runtime(worker: BrowserCaptchaService) -> bool:
-        browser_instance = getattr(worker, "browser", None)
-        return bool(
-            getattr(worker, "_initialized", False)
-            and browser_instance
-            and not getattr(browser_instance, "stopped", False)
-            and not getattr(browser_instance, "_flow2api_runtime_disconnected", False)
-        )
+        return PersonalWorkerRouting.worker_has_live_runtime(worker)
 
     @staticmethod
     def _worker_has_pending_fresh_restart(worker: BrowserCaptchaService) -> bool:
-        restart_task = getattr(worker, "_fresh_profile_restart_task", None)
-        return bool(
-            getattr(worker, "_fresh_profile_restart_pending", False)
-            or (restart_task is not None and not restart_task.done())
-        )
+        return PersonalWorkerRouting.worker_has_pending_restart(worker)
 
     def _worker_runtime_unavailable_score(self, worker: BrowserCaptchaService) -> int:
-        if self._worker_has_live_runtime(worker):
-            return 0
-        if self._worker_launch_cooldown_remaining_seconds(worker) > 0.0:
-            return 3
-        if getattr(worker, "_initialized", False):
-            return 2
-        return 1
+        return self.worker_routing.worker_runtime_unavailable_score(worker)
 
     @staticmethod
     def _worker_launch_cooldown_remaining_seconds(worker: BrowserCaptchaService) -> float:
-        try:
-            return max(0.0, float(worker._get_browser_launch_cooldown_remaining_seconds() or 0.0))
-        except Exception:
-            return 0.0
+        return PersonalWorkerRouting.worker_launch_cooldown(worker)
 
     def _worker_dispatch_score(
         self,
@@ -12479,57 +12434,24 @@ class _PersonalBrowserPoolService:
         *,
         affinity_preferred: bool = False,
     ) -> tuple[int, int, int, int, int, int, int]:
-        reservations = int(self._worker_dispatch_reservations.get(worker_index, 0) or 0)
-        fresh_restart_penalty = 1 if self._worker_has_pending_fresh_restart(worker) else 0
-        runtime_unavailable = self._worker_runtime_unavailable_score(worker)
-        launch_cooldown_penalty = 1 if self._worker_launch_cooldown_remaining_seconds(worker) > 0.0 else 0
-        busy_score = reservations + self._worker_busy_score(worker)
-        resident_cold = 0 if worker.get_resident_count() > 0 else 1
-        round_robin_offset = (worker_index - self._round_robin_index) % max(len(self._workers), 1)
-        affinity_penalty = 0 if affinity_preferred else 1
-        return (
-            fresh_restart_penalty,
-            busy_score,
-            runtime_unavailable,
-            launch_cooldown_penalty,
-            resident_cold,
-            affinity_penalty,
-            round_robin_offset,
+        return self.worker_routing.dispatch_score(
+            worker_index,
+            worker,
+            worker_count=len(self._workers),
+            affinity_preferred=affinity_preferred,
         )
 
     def _find_worker_index_for_project(self, project_id: Optional[str]) -> Optional[int]:
-        normalized_project_key = self._normalize_project_key(project_id)
-        if not normalized_project_key:
-            return None
-
-        mapped_index = self._project_worker_affinity.get(normalized_project_key)
-        if mapped_index is not None and 0 <= mapped_index < len(self._workers):
-            return mapped_index
-
-        for index, worker in enumerate(self._workers):
-            if self._worker_has_project_mapping(worker, normalized_project_key):
-                self._project_worker_affinity[normalized_project_key] = index
-                self._trim_affinity_cache(self._project_worker_affinity)
-                return index
-        return None
+        return self.worker_routing.find_project_worker(
+            self._workers,
+            self._normalize_project_key(project_id),
+        )
 
     def _find_worker_index_for_token(self, token_id: Optional[int]) -> Optional[int]:
-        normalized_token_key = self._normalize_token_key(token_id)
-        if not normalized_token_key:
-            return None
-
-        mapped_index = self._token_worker_affinity.get(normalized_token_key)
-        if mapped_index is not None and 0 <= mapped_index < len(self._workers):
-            if self._worker_has_token_mapping(self._workers[mapped_index], normalized_token_key):
-                return mapped_index
-            self._token_worker_affinity.pop(normalized_token_key, None)
-
-        for index, worker in enumerate(self._workers):
-            if self._worker_has_token_mapping(worker, normalized_token_key):
-                self._token_worker_affinity[normalized_token_key] = index
-                self._trim_affinity_cache(self._token_worker_affinity)
-                return index
-        return None
+        return self.worker_routing.find_token_worker(
+            self._workers,
+            self._normalize_token_key(token_id),
+        )
 
     def _resolve_worker_candidate_indexes(
         self,
@@ -12539,46 +12461,13 @@ class _PersonalBrowserPoolService:
         slot_id: Optional[str] = None,
         allow_affinity: bool = True,
     ) -> list[int]:
-        worker_count = len(self._workers)
-        if worker_count <= 0:
-            return []
-
-        preferred_indexes: list[int] = []
-        exact_slot_index = self._parse_worker_index_from_slot_id(slot_id)
-        if exact_slot_index is not None and 0 <= exact_slot_index < worker_count:
-            preferred_indexes.append(exact_slot_index)
-
-        soft_affinity_indexes = []
-        if allow_affinity:
-            for candidate in (
-                self._find_worker_index_for_token(token_id),
-                self._find_worker_index_for_project(project_id),
-            ):
-                if candidate is None or not (0 <= candidate < worker_count):
-                    continue
-                if candidate not in preferred_indexes and candidate not in soft_affinity_indexes:
-                    soft_affinity_indexes.append(candidate)
-
-        preferred_indexes.extend(soft_affinity_indexes)
-
-        remaining_indexes = [index for index in range(worker_count) if index not in preferred_indexes]
-        if remaining_indexes:
-            rotation_offset = self._round_robin_index % len(remaining_indexes)
-            rotated_indexes = remaining_indexes[rotation_offset:] + remaining_indexes[:rotation_offset]
-            scored_indexes = sorted(
-                enumerate(rotated_indexes),
-                key=lambda item: (
-                    self._worker_dispatch_score(
-                        item[1],
-                        self._workers[item[1]],
-                        affinity_preferred=item[1] in soft_affinity_indexes,
-                    ),
-                    item[0],
-                ),
-            )
-            preferred_indexes.extend(index for _, index in scored_indexes)
-
-        return preferred_indexes
+        return self.worker_routing.candidate_indexes(
+            self._workers,
+            project_key=self._normalize_project_key(project_id),
+            token_key=self._normalize_token_key(token_id),
+            slot_id=slot_id,
+            allow_affinity=allow_affinity,
+        )
 
     async def _ensure_idle_worker_reaper(self) -> None:
         if self._closing:
