@@ -267,7 +267,7 @@ Exit criteria:
 ## Phase 9: Core decomposition
 
 - [x] Split extension worker WebSocket handling, registry, routing, CAPTCHA jobs, refresh jobs, and generation jobs.
-- [ ] Split personal/browser worker pools, sessions, tabs, policies, CAPTCHA, and refresh behavior.
+- [x] Split personal/browser worker pools, sessions, tabs, policies, CAPTCHA, and refresh behavior.
 - [ ] Split `FlowClient` into shared transport plus auth, projects, images, videos, and model resources.
 - [ ] Split `generation_handler` into an orchestrator and explicit generation pipelines.
 - [ ] Separate static deployment settings from mutable database-backed operational settings.
@@ -296,7 +296,9 @@ compatibility properties. Browser launch backoff and runtime error classificatio
 live in `workers/personal/runtime.py`. Session-token refresh orchestration now lives in
 `workers/personal/refresh.py` with injectable browser-operation and timing seams; the
 legacy method is retained privately during the compatibility window. Browser session
-I/O and CAPTCHA execution remain to be separated incrementally.
+I/O remains on the single concrete nodriver worker rather than introducing a one-use
+adapter abstraction. CAPTCHA result and identity orchestration now lives in
+`workers/personal/captcha.py`, completing the personal/browser worker split.
 
 Exit criteria:
 

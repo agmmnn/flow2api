@@ -34,6 +34,7 @@ from ..core.config import config
 from ..workers.personal import (
     PersonalWorkerRouting,
     PersonalBrowserRuntimePolicy,
+    PersonalCaptchaJobs,
     PersonalSessionRefreshJobs,
     ResidentTabInfo,
     ResidentTabRegistry,
@@ -1420,6 +1421,10 @@ class BrowserCaptchaService:
             log_info=debug_logger.log_info,
             log_warning=debug_logger.log_warning,
             log_error=debug_logger.log_error,
+        )
+        self.captcha_jobs = PersonalCaptchaJobs(
+            self,
+            log_warning=debug_logger.log_warning,
         )
         self._fresh_profile_restart_pending_reason = ""
         self._proxy_url: Optional[str] = None
@@ -10767,7 +10772,7 @@ class BrowserCaptchaService:
         return_slot_id: bool = False,
     ) -> Optional[str] | tuple[Optional[str], Optional[str]]:
         """对外暴露统一取 token 接口，保持单实例与池化 worker 行为一致。"""
-        return await self._get_token_direct(
+        return await self.captcha_jobs.execute(
             project_id,
             action=action,
             token_id=token_id,
@@ -10780,15 +10785,11 @@ class BrowserCaptchaService:
         action: str = "IMAGE_GENERATION",
         token_id: Optional[int] = None,
     ) -> tuple[Optional[str], Optional[str], Optional[int]]:
-        token, slot_id = await self._get_token_direct(
+        return await self.captcha_jobs.execute_with_metadata(
             project_id,
             action=action,
             token_id=token_id,
-            return_slot_id=True,
         )
-        if not token:
-            return None, None, None
-        return token, slot_id, token_id
 
     async def get_token_bundle(
         self,
@@ -10796,55 +10797,10 @@ class BrowserCaptchaService:
         action: str = "IMAGE_GENERATION",
         token_id: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
-        token, slot_id = await self._get_token_direct(
+        return await self.captcha_jobs.execute_bundle(
             project_id,
             action=action,
             token_id=token_id,
-            return_slot_id=True,
-        )
-        if not token:
-            return None
-        resident_info = None
-        if slot_id:
-            async with self._resident_lock:
-                resident_info = self._resident_tabs.get(slot_id)
-        if (
-            resident_info
-            and token_id is not None
-            and resident_info.token_id != int(token_id)
-        ):
-            debug_logger.log_warning(
-                f"[BrowserCaptcha] refusing mismatched slot identity in solve bundle "
-                f"(slot={slot_id}, expected_token_id={token_id}, "
-                f"resident_token_id={resident_info.token_id})"
-            )
-            resident_info = None
-        if resident_info and not resident_info.session_cookies:
-            try:
-                await self._cache_session_cookies_for_computed(resident_info)
-            except Exception as cookie_error:
-                debug_logger.log_warning(
-                    f"[BrowserCaptcha] solve-bundle cookie extraction failed "
-                    f"(slot={slot_id}, project={project_id}, token_id={token_id}): {cookie_error}"
-                )
-        fingerprint = (
-            dict(resident_info.fingerprint)
-            if resident_info and isinstance(resident_info.fingerprint, dict) and resident_info.fingerprint
-            else (self.get_last_fingerprint() if not slot_id else None)
-        )
-        session_cookies = (
-            dict(resident_info.session_cookies)
-            if resident_info and isinstance(resident_info.session_cookies, dict) and resident_info.session_cookies
-            else None
-        )
-        return self._build_solve_bundle(
-            token=token,
-            project_id=project_id,
-            action=action,
-            token_id=token_id,
-            slot_id=slot_id,
-            fingerprint=fingerprint,
-            session_cookies=session_cookies,
         )
 
     async def _create_resident_tab(
