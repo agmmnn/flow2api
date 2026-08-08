@@ -8,7 +8,6 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from flow2api.api import routes
-from flow2api.core import auth
 from flow2api.core.api_key_manager import ApiKeyManager
 from flow2api.core.database import Database
 from flow2api.main import _path_allowed_on_api_only_host
@@ -122,13 +121,14 @@ class _PresenceAuthDatabase:
 
 
 class TestPresenceEndpoint(unittest.TestCase):
-    def tearDown(self):
-        auth.set_api_key_manager(None)
-
     def _client(self, row, legacy_key=""):
         database = _PresenceAuthDatabase(row)
-        auth.set_api_key_manager(ApiKeyManager(database, lambda: legacy_key))
         app = FastAPI()
+        app.state.container = type(
+            "TestContainer",
+            (),
+            {"api_key_manager": ApiKeyManager(database, lambda: legacy_key)},
+        )()
         app.include_router(routes.router)
         return TestClient(app), database
 

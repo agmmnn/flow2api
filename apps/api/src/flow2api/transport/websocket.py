@@ -6,8 +6,7 @@ import hashlib
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from ..api import routes as legacy
-from ..core import auth as auth_core
+from ..bootstrap.dependencies import get_websocket_container
 from ..core.logger import debug_logger
 from ..services.browser_captcha_extension import ExtensionCaptchaService
 
@@ -17,24 +16,25 @@ router = APIRouter()
 
 @router.websocket("/captcha_ws")
 async def captcha_websocket_endpoint(websocket: WebSocket):
+    container = get_websocket_container(websocket)
+    database = container.db
     captcha_worker_key = (
         websocket.query_params.get("captcha_worker_key")
         or websocket.query_params.get("captcha_key")
         or websocket.headers.get("x-flow2-captcha-worker-key")
     )
     if captcha_worker_key:
-        handler_db = legacy.generation_handler.db if legacy.generation_handler is not None else None
-        if handler_db is None or not hasattr(handler_db, "get_captcha_worker_key_by_hash"):
+        if not hasattr(database, "get_captcha_worker_key_by_hash"):
             await websocket.accept()
             await websocket.close(code=1011, reason="Captcha worker auth unavailable")
             return
         captcha_worker_key_hash = hashlib.sha256(captcha_worker_key.encode("utf-8")).hexdigest()
-        captcha_worker = await handler_db.get_captcha_worker_key_by_hash(captcha_worker_key_hash)
+        captcha_worker = await database.get_captcha_worker_key_by_hash(captcha_worker_key_hash)
         if not captcha_worker or not bool(captcha_worker.get("is_active", True)):
             await websocket.accept()
             await websocket.close(code=1008, reason="Invalid captcha worker key")
             return
-        service = await ExtensionCaptchaService.get_instance(db=handler_db)
+        service = await ExtensionCaptchaService.get_instance(db=database)
         await service.connect(websocket, authenticated_captcha_worker=captcha_worker)
         try:
             while True:
@@ -69,17 +69,16 @@ async def captcha_websocket_endpoint(websocket: WebSocket):
             await websocket.accept()
             await websocket.close(code=1008, reason="refresh_token_id must be a positive integer")
             return
-        handler_db = legacy.generation_handler.db if legacy.generation_handler is not None else None
-        if handler_db is None or not hasattr(handler_db, "get_token"):
+        if not hasattr(database, "get_token"):
             await websocket.accept()
             await websocket.close(code=1011, reason="Refresh token lookup unavailable")
             return
-        refresh_token = await handler_db.get_token(refresh_token_id)
+        refresh_token = await database.get_token(refresh_token_id)
         if not refresh_token:
             await websocket.accept()
             await websocket.close(code=1008, reason="refresh_token_id token not found")
             return
-        service = await ExtensionCaptchaService.get_instance(db=handler_db)
+        service = await ExtensionCaptchaService.get_instance(db=database)
         await service.connect(websocket, refresh_token_id=refresh_token_id)
         try:
             while True:
@@ -106,13 +105,8 @@ async def captcha_websocket_endpoint(websocket: WebSocket):
         await websocket.close(code=1008, reason="Missing API key")
         return
 
-    if auth_core.api_key_manager is None:
-        await websocket.accept()
-        await websocket.close(code=1011, reason="API key manager unavailable")
-        return
-
     try:
-        auth_ctx = await auth_core.api_key_manager.authenticate(
+        auth_ctx = await container.api_key_manager.authenticate(
             api_key,
             endpoint="/captcha_ws",
             require_assignment=False,
@@ -131,9 +125,7 @@ async def captcha_websocket_endpoint(websocket: WebSocket):
         await websocket.close(code=1008, reason="Managed API key required")
         return
 
-    service = await ExtensionCaptchaService.get_instance(
-        db=(legacy.generation_handler.db if legacy.generation_handler is not None else None)
-    )
+    service = await ExtensionCaptchaService.get_instance(db=database)
     await service.connect(websocket, authenticated_managed_api_key_id=int(auth_ctx.key_id))
     try:
         while True:

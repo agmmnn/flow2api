@@ -8,7 +8,6 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from flow2api.api import routes
-from flow2api.core import auth
 from flow2api.core.api_key_manager import ApiKeyManager
 from flow2api.core.database import Database
 
@@ -113,13 +112,13 @@ class _CapacityDatabase:
 
 class GeminiGenCapacityEndpointTests(unittest.TestCase):
     def tearDown(self):
-        auth.set_api_key_manager(None)
         routes.set_generation_handler(None)
 
     def _client(self, scopes):
-        auth.set_api_key_manager(ApiKeyManager(_CapacityAuthDatabase(scopes), lambda: ""))
+        api_key_manager = ApiKeyManager(_CapacityAuthDatabase(scopes), lambda: "")
         routes.set_generation_handler(SimpleNamespace(db=_CapacityDatabase()))
         app = FastAPI()
+        app.state.container = SimpleNamespace(api_key_manager=api_key_manager)
         app.include_router(routes.router)
         return TestClient(app)
 

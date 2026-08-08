@@ -1,7 +1,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
@@ -76,13 +76,10 @@ def test_account_import_updates_and_assigns_existing_account():
     )
     key_manager = SimpleNamespace(invalidate=AsyncMock())
 
-    with (
-        patch.object(routes, "generation_handler", SimpleNamespace(token_manager=token_manager)),
-        patch.object(routes.auth_core, "api_key_manager", key_manager),
-    ):
-        result = asyncio.run(
-            routes.extension_import_current_account(import_body(), make_auth())
-        )
+    container = SimpleNamespace(token_manager=token_manager, api_key_manager=key_manager)
+    result = asyncio.run(
+        routes.extension_import_current_account(import_body(), make_auth(), container)
+    )
 
     assert result["success"] is True
     assert result["added"] == 0
@@ -121,17 +118,17 @@ def test_account_import_adds_new_account_for_legacy_key():
         add_token=AsyncMock(return_value=SimpleNamespace(id=9, email="new@example.com")),
     )
 
-    with patch.object(
-        routes,
-        "generation_handler",
-        SimpleNamespace(token_manager=token_manager),
-    ):
-        result = asyncio.run(
-            routes.extension_import_current_account(
-                import_body(),
-                make_auth(legacy=True),
-            )
+    container = SimpleNamespace(
+        token_manager=token_manager,
+        api_key_manager=SimpleNamespace(invalidate=AsyncMock()),
+    )
+    result = asyncio.run(
+        routes.extension_import_current_account(
+            import_body(),
+            make_auth(legacy=True),
+            container,
         )
+    )
 
     assert result["added"] == 1
     assert result["updated"] == 0

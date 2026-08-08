@@ -9,7 +9,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 from ..api import routes as legacy
-from ..core import auth as auth_core
+from ..bootstrap.container import AppContainer
+from ..bootstrap.dependencies import get_container
 from ..core.api_key_manager import AuthContext
 from ..core.auth import verify_api_key_flexible
 from ..core.config import config as app_config
@@ -39,11 +40,11 @@ def _require_token_import_scope(auth_ctx: AuthContext) -> None:
 async def extension_import_current_account(
     body: ExtensionAccountImportRequest,
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+    container: AppContainer = Depends(get_container),
 ):
     """Add or update the Google account signed in to the extension's Chrome profile."""
     _require_token_import_scope(auth_ctx)
-    handler = legacy._ensure_generation_handler()
-    token_manager = handler.token_manager
+    token_manager = container.token_manager
     database = token_manager.db
 
     session_token = body.session_token.strip()
@@ -143,8 +144,7 @@ async def extension_import_current_account(
                     auth_ctx.key_id,
                     account_ids=sorted(assigned_accounts),
                 )
-                if auth_core.api_key_manager is not None:
-                    await auth_core.api_key_manager.invalidate(auth_ctx.key_id)
+                await container.api_key_manager.invalidate(auth_ctx.key_id)
 
         return {
             "success": True,

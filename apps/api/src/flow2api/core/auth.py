@@ -2,29 +2,22 @@
 
 import bcrypt
 from typing import Optional
-from fastapi import Header, HTTPException, Query, Security, Request
+from fastapi import Depends, Header, HTTPException, Query, Security, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from .config import config
 from .api_key_manager import AuthContext
 from ..services.redis_runtime import RedisUnavailableError, is_new_protected_work
+from ..bootstrap.container import AppContainer
+from ..bootstrap.dependencies import get_container
 
 security = HTTPBearer()
 optional_security = HTTPBearer(auto_error=False)
-api_key_manager = None
-
-
 def _redis_unavailable_response(exc: RedisUnavailableError) -> HTTPException:
     return HTTPException(
         status_code=503,
         detail="redis_unavailable",
         headers={"Retry-After": "5"},
     )
-
-
-def set_api_key_manager(manager):
-    global api_key_manager
-    api_key_manager = manager
-
 
 async def _record_api_key_audit(
     *,
@@ -34,9 +27,9 @@ async def _record_api_key_audit(
     status_code: int,
     detail: str,
     request: Request,
+    container: AppContainer,
 ) -> None:
-    if api_key_manager is None:
-        return
+    api_key_manager = container.api_key_manager
     payload = {
         "api_key_id": api_key_id,
         "endpoint": endpoint,
@@ -95,6 +88,7 @@ async def verify_api_key_flexible(
     credentials: Optional[HTTPAuthorizationCredentials] = Security(optional_security),
     x_goog_api_key: Optional[str] = Header(None, alias="x-goog-api-key"),
     key: Optional[str] = Query(None),
+    container: AppContainer = Depends(get_container),
 ) -> AuthContext:
     """Verify API key from Authorization header, x-goog-api-key header, or key query param."""
     api_key = None
@@ -110,19 +104,7 @@ async def verify_api_key_flexible(
         raise HTTPException(status_code=401, detail="Invalid API key")
     endpoint = request.url.path
     require_assignment = endpoint == "/v1/projects" and request.method.upper() == "POST"
-    if api_key_manager is None:
-        if not AuthManager.verify_api_key(api_key):
-            raise HTTPException(status_code=401, detail="Invalid API key")
-        return AuthContext(
-            key_id=None,
-            key_label="legacy-global",
-            is_legacy=True,
-            allowed_accounts=set(),
-            scopes={"*"},
-            adobe_cloning_enabled=True,
-            adobe_metadata_enabled=True,
-            adobe_tracker_enabled=True,
-        )
+    api_key_manager = container.api_key_manager
 
     try:
         runtime = getattr(api_key_manager, "redis_runtime", None)
@@ -144,6 +126,7 @@ async def verify_api_key_flexible(
             status_code=200,
             detail="ok",
             request=request,
+            container=container,
         )
         return context
     except RedisUnavailableError as exc:
@@ -157,6 +140,7 @@ async def verify_api_key_flexible(
                 status_code=403 if require_assignment else 401,
                 detail=str(exc),
                 request=request,
+                container=container,
             )
         except RedisUnavailableError as redis_exc:
             raise _redis_unavailable_response(redis_exc) from redis_exc
@@ -172,6 +156,7 @@ async def verify_api_key_flexible(
                 status_code=429,
                 detail=str(exc),
                 request=request,
+                container=container,
             )
         except RedisUnavailableError as redis_exc:
             raise _redis_unavailable_response(redis_exc) from redis_exc
@@ -182,14 +167,15 @@ async def verify_managed_presence_key(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Security(optional_security),
     x_goog_api_key: Optional[str] = Header(None, alias="x-goog-api-key"),
+    container: AppContainer = Depends(get_container),
 ) -> AuthContext:
     """Validate a managed presence heartbeat without usage, limits, or audit side effects."""
     api_key = credentials.credentials if credentials is not None else x_goog_api_key
-    if not api_key or api_key_manager is None:
+    if not api_key:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     try:
-        context = await api_key_manager.authenticate(
+        context = await container.api_key_manager.authenticate(
             api_key,
             endpoint=request.url.path,
             enforce_rate_limits=False,

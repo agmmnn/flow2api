@@ -38,7 +38,6 @@ from .services.st_refresh_reasons import describe_st_refresh_reason
 from .services.browser_profile_service import BrowserProfileService
 from .services.browser_metrics_cleanup import cleanup_browser_metrics
 from .api import routes, admin
-from .core.auth import set_api_key_manager
 from .core.logger import debug_logger
 from .bootstrap import AppContainer, build_container
 
@@ -1043,7 +1042,6 @@ def _bind_legacy_dependencies(app: FastAPI) -> None:
         container.geminigen_service,
         container.google_drive_backup_service,
     )
-    set_api_key_manager(container.api_key_manager)
 
 # Create FastAPI app
 app = FastAPI(
