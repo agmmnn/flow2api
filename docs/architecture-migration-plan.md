@@ -1,6 +1,6 @@
 # Flow2API Architecture Migration Plan
 
-Status: in progress; Phases 1-6 are complete and Phase 7 is next.
+Status: in progress; Phases 1-6 are complete and Phase 7 is underway.
 
 This plan restructures Flow2API as a modular monolith in a monorepo. It avoids a full rewrite, preserves existing API contracts, and keeps these commands working throughout the migration:
 
@@ -208,12 +208,20 @@ Exit criteria:
 
 ## Phase 7: Explicit application composition
 
-- [ ] Add an `AppContainer` containing application dependencies.
-- [ ] Expose dependencies through small FastAPI dependency functions.
+- [x] Add an `AppContainer` containing application dependencies.
+- [x] Expose dependencies through small FastAPI dependency functions.
 - [ ] Move startup and shutdown orchestration into bootstrap modules.
-- [ ] Manage recurring background work through a task registry.
+- [x] Manage recurring background work through a task registry.
 - [ ] Remove module globals and `set_dependencies()`-style initialization.
-- [ ] Avoid introducing new service-locator singletons.
+- [x] Avoid introducing new service-locator singletons.
+
+The FastAPI application now owns a passive dependency graph through
+`app.state.container`, and lifespan-created recurring jobs are registered and cancelled
+by name. Authentication, WebSocket worker registration, extension account import,
+projects, cache delivery, Runway endpoints, capacity, and model catalogs resolve their
+dependencies from the request-owned container. The remaining compatibility bridge is
+limited to legacy generation helpers and admin handler bodies; those are the next
+targets before Phase 7 is marked complete.
 
 Exit criteria:
 
