@@ -29,8 +29,8 @@
 
 ### Prerequisites
 
-- Docker and Docker Compose (recommended)
-- Or [uv](https://docs.astral.sh/uv/getting-started/installation/) and [Bun](https://bun.sh/) for local use. uv installs the required Python 3.11 runtime when necessary.
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) and [Bun](https://bun.sh/) for the shortest local setup. uv installs Python 3.11 when necessary.
+- Docker and Docker Compose only when you want container deployment.
 
 ### Repository layout
 
@@ -40,7 +40,8 @@
 - `apps/metadata-extension/`: the TypeScript metadata extension
 - `apps/agent-gateway/`: the standalone remote browser agent gateway
 - `infra/docker/` and `infra/compose/`: container images and Compose stacks
-- `packages/`: reserved shared API and extension contracts
+- `packages/api-contract/`: TypeScript contracts generated from the backend OpenAPI snapshot
+- `packages/extension-core/`: stable browser-independent extension transport/storage primitives
 - `.runtime/`: local databases, browser profiles, generated files, and cache data
 
 If you are upgrading a checkout created before this layout, stop Flow2API and
@@ -66,13 +67,13 @@ Flow now requires an additional CAPTCHA. You can solve it through a browser or a
 - Runway web-task integration is available through the admin `Runway` tab, `runway-*` models, and `/v1/runway/*` routes. See [`docs/runway.md`](./docs/runway.md). It includes a manifest-backed model registry, live feature sync, real Runway uploads/datasets, image/video/audio/upscale task builders, OpenAI-compatible dispatch, voices, estimates, cancel, async polling, and cache mirroring.
 - Production performance, Railway Redis, WebSocket events, and seven-day retention are documented in [`docs/performance-redis-rollout.md`](./docs/performance-redis-rollout.md). The PostgreSQL 16 bridge, migration, encrypted Google Drive backup, cutover, and rollback procedure is in [`docs/postgres-migration-runbook.md`](./docs/postgres-migration-runbook.md).
 
-- The bundled [`apps/captcha-extension/`](./apps/captcha-extension/) supports CAPTCHA work, current-account import, scheduled ST/cookie synchronization, and token-bound refresh workers.
+- The bundled [`apps/captcha-extension/`](./apps/captcha-extension/) supports CAPTCHA work, current-account import, scheduled ST/cookie synchronization, and token-bound refresh workers. Build it with `bun run --cwd apps/captcha-extension build`, then load `apps/captcha-extension/dist/` in Chrome.
 
 ### Chrome Extension per-key isolation setup
 
 When using captcha method `extension`, Flow2API keeps one global captcha mode but isolates end-user workers per managed API key.
 
-1. Load [`apps/captcha-extension/`](./apps/captcha-extension/) as an unpacked Chrome extension.
+1. Run `bun install --frozen-lockfile` and `bun run --cwd apps/captcha-extension build`, then load [`apps/captcha-extension/dist/`](./apps/captcha-extension/) as an unpacked Chrome extension.
 2. Create a managed API key in **API key manager**. Add `tokens:import` if this extension may add or refresh the Google account signed in to its Chrome profile.
 3. Select **End User Worker**, enter the WebSocket URL and managed API key, then save the connection.
 4. Click **Save / Import Current Google Account** to create or update the dashboard token by Google email. The imported account is automatically assigned to that managed key, uses `protocol` refresh, and stores the required Google cookies.
@@ -88,7 +89,7 @@ If a managed key has no matching extension worker online, requests wait up to `e
 
 ```bash
 # Clone the project
-git clone https://github.com/TheSmallHanCat/flow2api.git
+git clone https://github.com/agmmnn/flow2api.git
 cd flow2api
 
 # Start the service
@@ -139,7 +140,7 @@ Run [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/c
    Docker resolves `flow2api` to the application container on the shared network. Do not use a host-mapped port such as `38000` as the tunnel origin.
 3. Run `cp .env.example .env` in the repository root and set `TUNNEL_TOKEN=...`. [`infra/compose/docker-compose.yml`](./infra/compose/docker-compose.yml) contains the main **flow2api** service. Merging [`infra/compose/docker-compose.agent.yml`](./infra/compose/docker-compose.agent.yml) adds **agent-gateway**, **redis**, and **cloudflared** on the same tunnel. Configure `agents.*` in Cloudflare to use `http://agent-gateway:9080`. `FLOW2API_API_ONLY_HOST` is defined on the `flow2api` service. On that hostname, `ApiOnlyHostMiddleware` exposes only OpenAI-compatible routes (`/v1/...`), Gemini-style routes (`/v1beta/models/...:generateContent`, `:streamGenerateContent`, `/models/...`), cache files under `/tmp`, `/openapi.json`, and `/health`. It blocks the web UI, `/api` administration routes, and `/assets`. Always use a different hostname such as `admin-flow.*` for the admin UI. Override it with `FLOW2API_API_ONLY_HOST=your-api-subdomain`. Do not run another `cloudflared` connector with the same tunnel token on the host.
 4. Start the merged stack with `docker compose -f infra/compose/docker-compose.yml -f infra/compose/docker-compose.agent.yml up -d`. Add `--build` to build **agent-gateway**. To run only the local application without the tunnel or agent, use `docker compose -f infra/compose/docker-compose.yml up -d`. To build the main image from source, run `docker build -t flow2api:local -f infra/docker/Dockerfile .`, set the `flow2api` image in Compose to `flow2api:local`, and run `up`.
-5. Open the **admin-flow** hostname for administration and use the **flow-api** hostname as the OpenAI-compatible API base URL, for example `https://flow-api.prismacreative.online/v1/...`. See [`docs/agent-gateway.md`](./docs/agent-gateway.md) for the public Agent Gateway.
+5. Open the **admin-flow** hostname for administration and use the **flow-api** hostname as the OpenAI-compatible API base URL, for example `https://flow-api.prismacreative.online/v1/...`. See the [Agent Gateway runbook](./apps/agent-gateway/src/flow2api_gateway/README.md) for the public Agent Gateway.
 6. Set `[cache].base_url` in `config/setting.toml` to the public API URL, for example `base_url = "https://flow-api.prismacreative.online"`. See the comments in `config/setting_example.toml`.
 7. Configure `FLOW2API_API_ONLY_HOST` as an environment variable. The default is shown in the `flow2api` service in `infra/compose/docker-compose.yml`; Docker Compose reads the root `.env` file.
 
@@ -170,6 +171,9 @@ uv run flow2api
 `uv run setup` installs Python 3.11 if needed, creates `.venv`, installs the exact versions from `uv.lock`, installs the locked workspace dependencies with Bun, and builds the admin UI into `apps/api/static/`. Run it after cloning or when frontend dependencies change.
 
 `uv run flow2api` starts the backend without rebuilding the frontend. For development, update Python dependencies with `uv add`/`uv remove`, then commit both `pyproject.toml` and `uv.lock`.
+
+For upgrades, database adoption, compatibility guarantees, verification evidence,
+and rollback boundaries, see [`docs/architecture-migration-release.md`](./docs/architecture-migration-release.md).
 
 ### First visit
 

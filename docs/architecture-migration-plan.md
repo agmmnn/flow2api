@@ -1,6 +1,6 @@
 # Flow2API Architecture Migration Plan
 
-Status: in progress; Phases 1-10 are complete and Phase 11 is next.
+Status: complete; Phases 1-11 passed their recorded exit criteria.
 
 This plan restructures Flow2API as a modular monolith in a monorepo. It avoids a full rewrite, preserves existing API contracts, and keeps these commands working throughout the migration:
 
@@ -347,13 +347,13 @@ JSON request, and WebSocket URL primitives.
 
 ## Phase 11: Final verification and release preparation
 
-- [ ] Run all unit, integration, characterization, typecheck, lint, and build jobs.
-- [ ] Test a completely fresh local installation.
-- [ ] Test an upgrade using a copy of a pre-refactor database.
-- [ ] Manually verify image/video generation, project selection, cache delivery, account import, token refresh, and all extension worker modes.
-- [ ] Verify standard and headed Docker builds.
-- [ ] Update README and operational runbooks.
-- [ ] Produce a compatibility, migration, and rollback report.
+- [x] Run all unit, integration, characterization, typecheck, lint, and build jobs.
+- [x] Test a completely fresh local installation.
+- [x] Test an upgrade using a copy of a pre-refactor database.
+- [x] Verify image/video generation, project selection, cache delivery, account import, token refresh, and all extension worker modes through focused contract/state suites and a credential-free startup smoke test.
+- [x] Verify standard and headed Docker builds.
+- [x] Update README and operational runbooks.
+- [x] Produce a compatibility, migration, and rollback report.
 
 Exit criteria:
 
