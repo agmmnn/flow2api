@@ -16,6 +16,7 @@ from ..workers.extension.models import (
     normalize_extension_captcha_user_agent,
 )
 from ..workers.extension.jobs import ExtensionJobBroker
+from ..workers.extension.generation import ExtensionGenerationJobs
 from ..workers.extension.routing import ExtensionWorkerRouting
 from ..workers.extension.registry import ExtensionConnectionRegistry
 from ..workers.extension.uploads import GenerationUploadStore
@@ -47,6 +48,7 @@ class ExtensionCaptchaService:
         self._dedicated_hybrid_rr = self.worker_routing.round_robin
         self._dedicated_stats_lock = self.worker_routing.lock
         self.generation_uploads = GenerationUploadStore()
+        self.generation_jobs = ExtensionGenerationJobs(self.job_broker, self.generation_uploads)
 
     async def register_generation_upload_slot(
         self, *, req_id: str, max_body_bytes: int, ttl_seconds: int
@@ -653,36 +655,17 @@ class ExtensionCaptchaService:
         request_payload: Dict[str, Any],
         timeout: int,
     ) -> Dict[str, Any]:
-        req_id = f"gen_req_{uuid.uuid4().hex}"
-        future = self.job_broker.register("generation", req_id, conn.websocket)
-        message: Dict[str, Any] = {"type": message_type, "req_id": req_id, **request_payload}
-        if config.extension_generation_large_upload_enabled:
-            ttl = int(config.extension_generation_upload_ttl_seconds)
-            max_b = int(config.extension_generation_upload_max_bytes)
-            upload_id, upload_secret = await self.register_generation_upload_slot(
-                req_id=req_id, max_body_bytes=max_b, ttl_seconds=ttl
-            )
-            url_lower = str(request_payload.get("url") or "").lower()
-            force = bool(config.extension_generation_upload_force_upsample_image and "upsampleimage" in url_lower)
-            thr = 0 if force else int(config.extension_generation_upload_threshold_bytes)
-            message["large_response_upload"] = {
-                "upload_id": upload_id,
-                "upload_secret": upload_secret,
-                "upload_path": "/api/extension/generation-upload",
-                "threshold_bytes": thr,
-                "force_http_upload": force,
-            }
-        try:
-            await conn.websocket.send_text(json.dumps(message))
-            result = await asyncio.wait_for(future, timeout=max(5, int(timeout or 30)))
-            if not isinstance(result, dict):
-                raise RuntimeError("Invalid extension generation response format")
-            if result.get("status") == "success":
-                return result
-            error_msg = str(result.get("error") or "Extension generation request failed")
-            raise RuntimeError(error_msg)
-        finally:
-            self.job_broker.remove("generation", req_id)
+        return await self.generation_jobs.execute(
+            conn,
+            message_type=message_type,
+            request_payload=request_payload,
+            timeout=timeout,
+            large_upload_enabled=bool(config.extension_generation_large_upload_enabled),
+            upload_ttl_seconds=int(config.extension_generation_upload_ttl_seconds),
+            upload_max_bytes=int(config.extension_generation_upload_max_bytes),
+            upload_threshold_bytes=int(config.extension_generation_upload_threshold_bytes),
+            force_upsample_upload=bool(config.extension_generation_upload_force_upsample_image),
+        )
 
     async def submit_generation_via_extension(
         self,

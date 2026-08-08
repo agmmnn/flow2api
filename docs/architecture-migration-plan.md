@@ -280,9 +280,10 @@ tracking, and round-robin cursors. The connection registry now owns active conne
 instance replacement, change notifications, waiter accounting, and managed-key cursor
 cleanup. A dedicated job broker now owns pending CAPTCHA/generation futures, response
 ownership checks, disconnect propagation, upstream verdict routing, and one-time
-solver user-agent metadata. The existing service exposes compatibility aliases while
-the concrete CAPTCHA, refresh, and generation request executors are separated in
-subsequent slices.
+solver user-agent metadata. Generation request execution is also separated and owns
+request IDs, dispatch, future cleanup, response validation, and large-upload
+negotiation. The existing service exposes compatibility aliases while the concrete
+CAPTCHA and refresh request executors are separated in subsequent slices.
 
 Exit criteria:
 
