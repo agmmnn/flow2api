@@ -17,6 +17,15 @@ import urllib.request
 from curl_cffi.requests import AsyncSession
 from ..core.logger import debug_logger
 from ..core.config import config, get_runtime_tmp_dir, get_yescaptcha_min_score
+from ..providers.google_flow import (
+    FlowAuthResource,
+    FlowImagesResource,
+    FlowMediaResource,
+    FlowModelResource,
+    FlowProjectsResource,
+    FlowTransport,
+    FlowVideosResource,
+)
 from .extension_generation_service import ExtensionGenerationService
 from .browser_captcha_extension import NoExtensionGenerationWorkerError
 
@@ -143,6 +152,13 @@ class FlowClient:
         )
         # Last reCAPTCHA action for narrative logs (IMAGE_GENERATION vs VIDEO_GENERATION, etc.)
         self._last_recaptcha_action: Optional[str] = None
+        self.transport = FlowTransport(self)
+        self.auth = FlowAuthResource(self)
+        self.projects = FlowProjectsResource(self)
+        self.media = FlowMediaResource(self)
+        self.images = FlowImagesResource(self)
+        self.videos = FlowVideosResource(self)
+        self.models = FlowModelResource()
 
         # Default "real browser" headers (macOS Chrome Desktop) to reduce upstream 4xx/5xx instability.
         # NOTE: Platform headers are synchronized per request from the selected User-Agent.
@@ -1400,6 +1416,9 @@ class FlowClient:
     # ========== 认证相关 (使用ST) ==========
 
     async def st_to_at(self, st: str) -> dict:
+        return await self.auth.exchange_session_token(st)
+
+    async def _st_to_at_legacy(self, st: str) -> dict:
         """ST转AT
 
         Args:
@@ -1425,6 +1444,9 @@ class FlowClient:
     # ========== 项目管理 (使用ST) ==========
 
     async def create_project(self, st: str, title: str) -> str:
+        return await self.projects.create(st, title)
+
+    async def _create_project_legacy(self, st: str, title: str) -> str:
         """创建项目,返回project_id
 
         Args:
@@ -1482,6 +1504,9 @@ class FlowClient:
         raise RuntimeError("创建项目失败")
 
     async def delete_project(self, st: str, project_id: str):
+        return await self.projects.delete(st, project_id)
+
+    async def _delete_project_legacy(self, st: str, project_id: str):
         """删除项目
 
         Args:
@@ -1505,6 +1530,9 @@ class FlowClient:
         )
 
     async def get_media(self, at: str, media_name: str) -> Dict[str, Any]:
+        return await self.media.get(at, media_name)
+
+    async def _get_media_legacy(self, at: str, media_name: str) -> Dict[str, Any]:
         """Fetch a generated media resource, including base64 video fallback data."""
         normalized_at = str(at or "").strip()
         normalized_media_name = str(media_name or "").strip()
@@ -1525,6 +1553,9 @@ class FlowClient:
     # ========== 余额查询 (使用AT) ==========
 
     async def get_credits(self, at: str) -> dict:
+        return await self.auth.get_credits(at)
+
+    async def _get_credits_legacy(self, at: str) -> dict:
         """查询余额
 
         Args:
@@ -1557,29 +1588,7 @@ class FlowClient:
         Returns:
             MIME 类型字符串，默认 image/jpeg
         """
-        if len(image_bytes) < 12:
-            return "image/jpeg"
-
-        # WebP: RIFF....WEBP
-        if image_bytes[:4] == b'RIFF' and image_bytes[8:12] == b'WEBP':
-            return "image/webp"
-        # PNG: 89 50 4E 47
-        if image_bytes[:4] == b'\x89PNG':
-            return "image/png"
-        # JPEG: FF D8 FF
-        if image_bytes[:3] == b'\xff\xd8\xff':
-            return "image/jpeg"
-        # GIF: GIF87a 或 GIF89a
-        if image_bytes[:6] in (b'GIF87a', b'GIF89a'):
-            return "image/gif"
-        # BMP: BM
-        if image_bytes[:2] == b'BM':
-            return "image/bmp"
-        # JPEG 2000: 00 00 00 0C 6A 50
-        if image_bytes[:6] == b'\x00\x00\x00\x0cjP':
-            return "image/jp2"
-
-        return "image/jpeg"
+        return self.models.detect_image_mime_type(image_bytes)
 
     def _convert_to_jpeg(self, image_bytes: bytes) -> bytes:
         """将图片转换为 JPEG 格式
@@ -1602,7 +1611,10 @@ class FlowClient:
         img.save(output, format='JPEG', quality=95)
         return output.getvalue()
 
-    async def upload_image(
+    async def upload_image(self, *args: Any, **kwargs: Any) -> str:
+        return await self.images.upload(*args, **kwargs)
+
+    async def _upload_image_impl(
         self,
         at: str,
         image_bytes: bytes,
@@ -1745,7 +1757,10 @@ class FlowClient:
 
     # ========== 图片生成 (使用AT) - 同步返回 ==========
 
-    async def generate_image(
+    async def generate_image(self, *args: Any, **kwargs: Any) -> Any:
+        return await self.images.generate(*args, **kwargs)
+
+    async def _generate_image_impl(
         self,
         at: str,
         project_id: str,
@@ -1953,7 +1968,10 @@ class FlowClient:
         perf_trace["final_success_attempt"] = None
         raise last_error
 
-    async def upsample_image(
+    async def upsample_image(self, *args: Any, **kwargs: Any) -> Any:
+        return await self.images.upsample(*args, **kwargs)
+
+    async def _upsample_image_impl(
         self,
         at: str,
         project_id: str,
@@ -2709,7 +2727,10 @@ class FlowClient:
                 })
         return media_refs
 
-    async def generate_video_text(
+    async def generate_video_text(self, *args: Any, **kwargs: Any) -> Any:
+        return await self.videos.call("generate_video_text", *args, **kwargs)
+
+    async def _generate_video_text_impl(
         self,
         at: str,
         project_id: str,
@@ -2878,7 +2899,10 @@ class FlowClient:
         # 所有重试都失败
         raise last_error
 
-    async def generate_video_reference_images(
+    async def generate_video_reference_images(self, *args: Any, **kwargs: Any) -> Any:
+        return await self.videos.call("generate_video_reference_images", *args, **kwargs)
+
+    async def _generate_video_reference_images_impl(
         self,
         at: str,
         project_id: str,
@@ -3047,7 +3071,10 @@ class FlowClient:
         # 所有重试都失败
         raise last_error
 
-    async def generate_video_start_end(
+    async def generate_video_start_end(self, *args: Any, **kwargs: Any) -> Any:
+        return await self.videos.call("generate_video_start_end", *args, **kwargs)
+
+    async def _generate_video_start_end_impl(
         self,
         at: str,
         project_id: str,
@@ -3219,7 +3246,10 @@ class FlowClient:
         # 所有重试都失败
         raise last_error
 
-    async def generate_video_start_image(
+    async def generate_video_start_image(self, *args: Any, **kwargs: Any) -> Any:
+        return await self.videos.call("generate_video_start_image", *args, **kwargs)
+
+    async def _generate_video_start_image_impl(
         self,
         at: str,
         project_id: str,
@@ -3387,7 +3417,10 @@ class FlowClient:
         # 所有重试都失败
         raise last_error
 
-    async def generate_video_extend(
+    async def generate_video_extend(self, *args: Any, **kwargs: Any) -> Any:
+        return await self.videos.call("generate_video_extend", *args, **kwargs)
+
+    async def _generate_video_extend_impl(
         self,
         at: str,
         project_id: str,
@@ -3523,7 +3556,10 @@ class FlowClient:
                 await self._notify_browser_captcha_request_finished(browser_id)
         raise last_error
 
-    async def run_concatenation(
+    async def run_concatenation(self, *args: Any, **kwargs: Any) -> Any:
+        return await self.videos.call("run_concatenation", *args, **kwargs)
+
+    async def _run_concatenation_impl(
         self,
         at: str,
         original_media_id: str,
@@ -3555,7 +3591,10 @@ class FlowClient:
             token_id=None,
         )
 
-    async def poll_concatenation_status(
+    async def poll_concatenation_status(self, *args: Any, **kwargs: Any) -> Any:
+        return await self.videos.call("poll_concatenation_status", *args, **kwargs)
+
+    async def _poll_concatenation_status_impl(
         self,
         at: str,
         operation_name: str,
@@ -3597,7 +3636,10 @@ class FlowClient:
 
     # ========== 视频放大 (Video Upsampler) ==========
 
-    async def upsample_video(
+    async def upsample_video(self, *args: Any, **kwargs: Any) -> Any:
+        return await self.videos.call("upsample_video", *args, **kwargs)
+
+    async def _upsample_video_impl(
         self,
         at: str,
         project_id: str,
@@ -3759,7 +3801,10 @@ class FlowClient:
 
     # ========== 任务轮询 (使用AT) ==========
 
-    async def check_video_status(self, at: str, operations: List[Dict]) -> dict:
+    async def check_video_status(self, *args: Any, **kwargs: Any) -> Any:
+        return await self.videos.call("check_video_status", *args, **kwargs)
+
+    async def _check_video_status_impl(self, at: str, operations: List[Dict]) -> dict:
         """查询视频生成状态
 
         Args:
@@ -3821,7 +3866,10 @@ class FlowClient:
             raise last_error
         raise RuntimeError("视频状态查询失败")
 
-    async def check_video_status_via_extension_poll(self, at: str, operations: List[Dict]) -> dict:
+    async def check_video_status_via_extension_poll(self, *args: Any, **kwargs: Any) -> Any:
+        return await self.videos.call("check_video_status_via_extension_poll", *args, **kwargs)
+
+    async def _check_video_status_via_extension_poll_impl(self, at: str, operations: List[Dict]) -> dict:
         """Fallback video poll path using extension browser context."""
         routing_token_id = self.get_active_generation_token_id()
         if not await self._token_allows_extension_generation(routing_token_id):
@@ -4597,11 +4645,11 @@ class FlowClient:
 
     def _generate_session_id(self) -> str:
         """生成sessionId: ;timestamp"""
-        return f";{int(time.time() * 1000)}"
+        return self.models.generate_session_id()
 
     def _generate_scene_id(self) -> str:
         """生成sceneId: UUID"""
-        return str(uuid.uuid4())
+        return self.models.generate_scene_id()
 
     def _get_remote_browser_service_config(self) -> tuple[str, str, int]:
         base_url = (config.remote_browser_base_url or "").strip().rstrip("/")

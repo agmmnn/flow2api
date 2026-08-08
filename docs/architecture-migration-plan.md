@@ -268,7 +268,7 @@ Exit criteria:
 
 - [x] Split extension worker WebSocket handling, registry, routing, CAPTCHA jobs, refresh jobs, and generation jobs.
 - [x] Split personal/browser worker pools, sessions, tabs, policies, CAPTCHA, and refresh behavior.
-- [ ] Split `FlowClient` into shared transport plus auth, projects, images, videos, and model resources.
+- [x] Split `FlowClient` into shared transport plus auth, projects, images, videos, and model resources.
 - [ ] Split `generation_handler` into an orchestrator and explicit generation pipelines.
 - [ ] Separate static deployment settings from mutable database-backed operational settings.
 - [ ] Introduce abstractions only where multiple implementations or test seams justify them.
@@ -299,6 +299,11 @@ legacy method is retained privately during the compatibility window. Browser ses
 I/O remains on the single concrete nodriver worker rather than introducing a one-use
 adapter abstraction. CAPTCHA result and identity orchestration now lives in
 `workers/personal/captcha.py`, completing the personal/browser worker split.
+
+`providers/google_flow` now exposes a shared transport and explicit auth, projects,
+media, images, videos, and model resources. `FlowClient` composes these resources and
+keeps private implementation seams for the large image/video operations during the
+compatibility window; public capability calls no longer own resource selection.
 
 Exit criteria:
 
