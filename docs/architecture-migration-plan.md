@@ -292,8 +292,9 @@ round-robin state, and candidate ordering now live in `workers/personal/routing.
 resident-tab and token-pool lease state now live in `workers/personal/models.py`. The
 resident-tab registry now owns slot identity, affinity, solve reservations,
 unavailable-state tracking, and recovery task maps. The legacy pool delegates through
-compatibility properties while browser session I/O, CAPTCHA, and refresh responsibilities
-are separated incrementally.
+compatibility properties. Browser launch backoff and runtime error classification now
+live in `workers/personal/runtime.py`, while browser session I/O, CAPTCHA, and refresh
+responsibilities are separated incrementally.
 
 Exit criteria:
 

@@ -33,10 +33,15 @@ from ..core.logger import debug_logger
 from ..core.config import config
 from ..workers.personal import (
     PersonalWorkerRouting,
+    PersonalBrowserRuntimePolicy,
     ResidentTabInfo,
     ResidentTabRegistry,
     TokenPoolLease,
     TokenPoolTimeoutError,
+)
+from ..workers.personal.runtime import (
+    is_runtime_disconnect_error as _is_runtime_disconnect_error,
+    is_runtime_normal_close_error as _is_runtime_normal_close_error,
 )
 from .browser_cookie_utils import (
     build_browser_cookie_targets,
@@ -727,98 +732,6 @@ else:
             print(f"[BrowserCaptcha] ❌ nodriver 导入失败: {e}")
 
 
-_RUNTIME_ERROR_KEYWORDS = (
-    "has been closed",
-    "browser has been closed",
-    "target closed",
-    "has no attribute \"closed\"",
-    "has no attribute 'closed'",
-    "connection closed",
-    "connection lost",
-    "connection refused",
-    "connection reset",
-    "broken pipe",
-    "session closed",
-    "not attached to an active page",
-    "no session with given id",
-    "cannot find context with specified id",
-    "websocket is not open",
-    "websocket unavailable",
-    "'nonetype' object has no attribute 'send'",
-    '"nonetype" object has no attribute "send"',
-    "no close frame received or sent",
-    "cannot call write to closing transport",
-    "cannot write to closing transport",
-    "cannot call send once a close message has been sent",
-    "connectionclosederror",
-    "connectionrefusederror",
-    "disconnected",
-    "errno 111",
-)
-
-_NORMAL_CLOSE_KEYWORDS = (
-    "connectionclosedok",
-    "normal closure",
-    "normal_closure",
-    "sent 1000 (ok)",
-    "received 1000 (ok)",
-    "close(code=1000",
-)
-
-
-def _flatten_exception_text(error: Any) -> str:
-    """拼接异常链文本，便于统一识别 nodriver 运行态断连。"""
-    visited: set[int] = set()
-    pending = [error]
-    parts: list[str] = []
-
-    while pending:
-        current = pending.pop()
-        if current is None:
-            continue
-
-        current_id = id(current)
-        if current_id in visited:
-            continue
-        visited.add(current_id)
-
-        parts.append(type(current).__name__)
-
-        message = str(current or "").strip()
-        if message:
-            parts.append(message)
-
-        args = getattr(current, "args", None)
-        if isinstance(args, tuple):
-            for arg in args:
-                arg_text = str(arg or "").strip()
-                if arg_text:
-                    parts.append(arg_text)
-
-        pending.append(getattr(current, "__cause__", None))
-        pending.append(getattr(current, "__context__", None))
-
-    return " | ".join(parts).lower()
-
-
-def _is_runtime_disconnect_error(error: Any) -> bool:
-    """识别浏览器 / websocket 运行态断连。"""
-    error_text = _flatten_exception_text(error)
-    if not error_text:
-        return False
-    return any(keyword in error_text for keyword in _RUNTIME_ERROR_KEYWORDS) or any(
-        keyword in error_text for keyword in _NORMAL_CLOSE_KEYWORDS
-    )
-
-
-def _is_runtime_normal_close_error(error: Any) -> bool:
-    """识别 websocket 正常关闭（1000）这类预期退场。"""
-    error_text = _flatten_exception_text(error)
-    if not error_text:
-        return False
-    return any(keyword in error_text for keyword in _NORMAL_CLOSE_KEYWORDS)
-
-
 def _finalize_nodriver_send_task(connection, transaction, tx_id: int, task: asyncio.Task):
     """回收 nodriver websocket.send 的后台异常，避免事件循环打印未检索 task 错误。"""
     try:
@@ -1500,9 +1413,7 @@ class BrowserCaptchaService:
         self._successful_solves_since_browser_start = 0
         self._fresh_profile_restart_pending = False
         self._fresh_profile_restart_force_pending = False
-        self._browser_launch_failure_streak = 0
-        self._browser_launch_cooldown_until = 0.0
-        self._browser_launch_last_error = ""
+        self.runtime_policy = PersonalBrowserRuntimePolicy()
         self._fresh_profile_restart_pending_reason = ""
         self._proxy_url: Optional[str] = None
         self._proxy_ext_dir: Optional[str] = None
@@ -1567,6 +1478,30 @@ class BrowserCaptchaService:
     @property
     def _resident_recovery_tasks(self) -> dict[str, asyncio.Task[Any]]:
         return self.resident_registry.recovery_tasks
+
+    @property
+    def _browser_launch_failure_streak(self) -> int:
+        return self.runtime_policy.launch_failure_streak
+
+    @_browser_launch_failure_streak.setter
+    def _browser_launch_failure_streak(self, value: int) -> None:
+        self.runtime_policy.launch_failure_streak = value
+
+    @property
+    def _browser_launch_cooldown_until(self) -> float:
+        return self.runtime_policy.launch_cooldown_until
+
+    @_browser_launch_cooldown_until.setter
+    def _browser_launch_cooldown_until(self, value: float) -> None:
+        self.runtime_policy.launch_cooldown_until = value
+
+    @property
+    def _browser_launch_last_error(self) -> str:
+        return self.runtime_policy.launch_last_error
+
+    @_browser_launch_last_error.setter
+    def _browser_launch_last_error(self, value: str) -> None:
+        self.runtime_policy.launch_last_error = value
 
     def _apply_browser_instance_identity(self, browser_instance_id: int) -> None:
         normalized_instance_id = max(0, int(browser_instance_id or 0))
@@ -2362,104 +2297,35 @@ class BrowserCaptchaService:
         return (time.time() - self._last_runtime_restart_at) <= max(0.0, window_seconds)
 
     def _get_browser_launch_cooldown_remaining_seconds(self) -> float:
-        return max(0.0, float(self._browser_launch_cooldown_until or 0.0) - time.monotonic())
+        return self.runtime_policy.cooldown_remaining()
 
     def _is_browser_launch_cooldown_active(self) -> bool:
         return self._get_browser_launch_cooldown_remaining_seconds() > 0.0
 
     def _reset_browser_launch_failure_state(self) -> None:
-        self._browser_launch_failure_streak = 0
-        self._browser_launch_cooldown_until = 0.0
-        self._browser_launch_last_error = ""
+        self.runtime_policy.reset_launch_failures()
 
     def _mark_browser_launch_failure(self, error: Any) -> None:
-        self._browser_launch_failure_streak = min(
-            8,
-            max(0, int(self._browser_launch_failure_streak or 0)) + 1,
-        )
-        error_text = str(error or "").strip()
-        error_lower = error_text.lower()
-        base_cooldown_seconds = 2.0
-        if isinstance(error, PermissionError) or "winerror 5" in error_lower:
-            base_cooldown_seconds = 5.0
-        elif any(keyword in error_lower for keyword in ("address already in use", "only one usage", "port")):
-            base_cooldown_seconds = 8.0
-        cooldown_seconds = min(
-            45.0,
-            base_cooldown_seconds * (2 ** min(4, self._browser_launch_failure_streak - 1)),
-        )
-        self._browser_launch_cooldown_until = time.monotonic() + cooldown_seconds
-        self._browser_launch_last_error = f"{type(error).__name__}: {error_text or '<empty>'}"
+        self.runtime_policy.record_launch_failure(error)
 
     def _raise_if_browser_launch_cooling_down(self) -> None:
-        remaining_seconds = self._get_browser_launch_cooldown_remaining_seconds()
-        if remaining_seconds <= 0.0:
-            return
-        suffix = f", last_error={self._browser_launch_last_error}" if self._browser_launch_last_error else ""
-        raise RuntimeError(
-            f"浏览器启动冷却中，请 {remaining_seconds:.1f}s 后重试{suffix}"
-        )
+        self.runtime_policy.raise_if_cooling_down()
 
     @staticmethod
     def _should_use_explicit_no_sandbox_retry(error: Any) -> bool:
-        if os.name != "posix":
-            return False
-        error_text = str(error or "").lower()
-        return any(
-            keyword in error_text
-            for keyword in (
-                "no_sandbox",
-                "no usable sandbox",
-                "setuid sandbox",
-                "namespace",
-                "running as root",
-                "you are running as root",
-            )
-        )
+        return PersonalBrowserRuntimePolicy.should_retry_without_sandbox(error)
 
     @staticmethod
     def _is_retryable_browser_launch_error(error: Any) -> bool:
-        error_text = str(error or "").lower()
-        return any(
-            keyword in error_text
-            for keyword in (
-                "failed to connect to browser",
-                "connection refused",
-                "connection reset",
-                "connection closed",
-                "websocket is not open",
-                "chrome not reachable",
-                "browser has been closed",
-                "target closed",
-            )
-        )
+        return PersonalBrowserRuntimePolicy.is_retryable_launch_error(error)
 
     @staticmethod
     def _is_memory_pressure_browser_launch_error(error: Any) -> bool:
-        error_text = _flatten_exception_text(error)
-        return any(
-            keyword in error_text
-            for keyword in (
-                "0xc000012d",
-                "status_commitment_limit",
-                "commitment limit",
-                "paging file",
-                "not enough memory",
-                "insufficient system resources",
-                "not enough storage is available",
-                "out of memory",
-                "cannot allocate memory",
-            )
-        )
+        return PersonalBrowserRuntimePolicy.is_memory_pressure_error(error)
 
     @staticmethod
     def _is_invalid_browser_context_error(error: Any) -> bool:
-        error_text = str(error or "").lower()
-        return (
-            "failed to find browser context" in error_text
-            or "cannot find context with specified id" in error_text
-            or "browser context" in error_text and "-32602" in error_text
-        )
+        return PersonalBrowserRuntimePolicy.is_invalid_context_error(error)
 
     async def shutdown_idle_runtime_if_needed(
         self,
@@ -2577,12 +2443,11 @@ class BrowserCaptchaService:
 
     def _is_browser_runtime_error(self, error: Any) -> bool:
         """识别浏览器运行态已损坏/已关闭的典型异常。"""
-        return _is_runtime_disconnect_error(error) or self._is_no_browser_window_error(error)
+        return self.runtime_policy.is_runtime_error(error)
 
     @staticmethod
     def _is_no_browser_window_error(error: Any) -> bool:
-        error_text = str(error or "").lower()
-        return "no browser is open" in error_text or "failed to open new tab" in error_text
+        return PersonalBrowserRuntimePolicy.is_no_browser_window_error(error)
 
     def _decode_nodriver_object_entries(self, value: Any) -> Optional[Dict[str, Any]]:
         if not isinstance(value, list):
