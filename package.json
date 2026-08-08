@@ -5,7 +5,8 @@
   "workspaces": [
     "apps/admin-web",
     "apps/captcha-extension",
-    "apps/metadata-extension"
+    "apps/metadata-extension",
+    "packages/api-contract"
   ],
   "scripts": {
     "build": "bun run --filter '@flow2api/*' build",

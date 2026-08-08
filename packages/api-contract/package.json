@@ -1,0 +1,22 @@
+{
+  "name": "@flow2api/api-contract",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "types": "src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "generate": "openapi-typescript ../../apps/api/tests/contracts/openapi.json -o src/schema.d.ts",
+    "typecheck": "tsc --noEmit --pretty false",
+    "check": "bun run generate && bun run typecheck",
+    "build": "bun run check"
+  },
+  "devDependencies": {
+    "openapi-typescript": "^7.10.1",
+    "typescript": "~6.0.3"
+  }
+}

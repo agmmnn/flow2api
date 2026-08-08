@@ -2,27 +2,20 @@ import { useMemo, useEffect, useState, useCallback } from "react"
 import { Link, useSearchParams } from "react-router-dom"
 import { Layout } from "../components/Layout"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs"
-import { TokenManagement } from "../components/manage/TokenManagement"
-import { SystemSettings } from "../components/manage/SystemSettings"
-import { RequestLogs } from "../components/manage/RequestLogs"
-import { CacheManagement } from "../components/manage/CacheManagement"
-import { AgentGateway } from "../components/manage/AgentGateway"
-import { AIGateway } from "../components/manage/AIGateway"
-import { ApiKeyManagement } from "../components/manage/ApiKeyManagement"
-import { AdobeSettings } from "../components/manage/AdobeSettings"
-import { RunwaySettings } from "../components/manage/RunwaySettings"
-import { GeminiGenSettings } from "../components/manage/GeminiGenSettings"
+import { TokenManagement } from "../features/admin/TokenManagement"
+import { SystemSettings } from "../features/admin/SystemSettings"
+import { RequestLogs } from "../features/admin/RequestLogs"
+import { CacheManagement } from "../features/admin/CacheManagement"
+import { AgentGateway } from "../features/admin/AgentGateway"
+import { AIGateway } from "../features/admin/AIGateway"
+import { ApiKeyManagement } from "../features/admin/ApiKeyManagement"
+import { AdobeSettings } from "../features/admin/AdobeSettings"
+import { RunwaySettings } from "../features/admin/RunwaySettings"
+import { GeminiGenSettings } from "../features/admin/GeminiGenSettings"
 import { cn } from "@/lib/utils"
 import { useAuth } from "../contexts/AuthContext"
 import { adminJson } from "../lib/adminApi"
-
-const MANAGE_TABS = ["tokens", "apikeys", "settings", "logs", "adobe", "gateway", "runway", "geminigen", "cache", "agent"] as const
-type ManageTab = (typeof MANAGE_TABS)[number]
-
-function parseManageTab(raw: string | null): ManageTab {
-  if (raw && (MANAGE_TABS as readonly string[]).includes(raw)) return raw as ManageTab
-  return "tokens"
-}
+import { MANAGE_TABS, parseManageTab, type ManageTab } from "../features/admin/manageTabs"
 
 export default function Manage() {
   const { token } = useAuth()

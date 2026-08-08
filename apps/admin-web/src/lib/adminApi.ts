@@ -1,3 +1,5 @@
+import type { paths } from "@flow2api/api-contract"
+
 /**
  * Authenticated fetch for admin API routes.
  * Uses the HttpOnly admin cookie for new sessions and Bearer for legacy sessions.
@@ -51,3 +53,13 @@ export async function adminJson<T>(
   }
   return { ok: res.ok, status: res.status, data }
 }
+
+export function adminContractJson<T>(
+  path: AdminContractPath,
+  token: string | null,
+  init?: RequestInit
+) {
+  return adminJson<T>(path, token, init)
+}
+
+export type AdminContractPath = Extract<keyof paths, `/api/${string}`>

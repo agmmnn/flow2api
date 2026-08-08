@@ -1,6 +1,6 @@
 # Flow2API Architecture Migration Plan
 
-Status: in progress; Phases 1-9 are complete and Phase 10 is next.
+Status: in progress; Phases 1-9 are complete and Phase 10 is underway.
 
 This plan restructures Flow2API as a modular monolith in a monorepo. It avoids a full rewrite, preserves existing API contracts, and keeps these commands working throughout the migration:
 
@@ -324,9 +324,9 @@ Exit criteria:
 
 ## Phase 10: Frontend and extension modernization
 
-- [ ] Organize the admin frontend by feature.
-- [ ] Generate TypeScript API contracts from the backend OpenAPI document.
-- [ ] Add frontend query and component tests around high-risk workflows.
+- [x] Organize the admin frontend by feature.
+- [x] Generate TypeScript API contracts from the backend OpenAPI document.
+- [x] Add frontend query and component tests around high-risk workflows.
 - [ ] Convert the CAPTCHA extension from JavaScript to TypeScript incrementally.
 - [ ] Separate extension storage, API, WebSocket, account-sync, and worker-mode state machines.
 - [ ] Share only stable API, WebSocket, and storage primitives through `extension-core`.

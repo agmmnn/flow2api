@@ -1,11 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from "react"
 import { useAuth } from "../../contexts/AuthContext"
 import { adminFetch, adminJson } from "../../lib/adminApi"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/card"
-import { Button } from "../ui/button"
-import { Input } from "../ui/input"
-import { Label } from "../ui/label"
-import { Switch } from "../ui/switch"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../../components/ui/card"
+import { Button } from "../../components/ui/button"
+import { Input } from "../../components/ui/input"
+import { Label } from "../../components/ui/label"
+import { Switch } from "../../components/ui/switch"
 import {
   Select,
   SelectContent,
@@ -15,7 +15,7 @@ import {
   SelectSeparator,
   SelectTrigger,
   SelectValue,
-} from "../ui/select"
+} from "../../components/ui/select"
 import { toast } from "sonner"
 import { Cloud, Download, Loader2, RefreshCw, Trash2, Upload } from "lucide-react"
 
