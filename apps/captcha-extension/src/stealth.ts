@@ -1,3 +1,4 @@
+// @ts-nocheck -- injected page-world compatibility shim.
 (function () {
   'use strict';
 

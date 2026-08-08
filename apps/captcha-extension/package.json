@@ -2,8 +2,21 @@
   "name": "@flow2api/captcha-extension",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
-    "build": "bun run check",
-    "check": "node --check background.js && node --check content.js && node --check options.js && node --check stealth.js"
+    "build": "node build.mjs",
+    "check": "bun run typecheck && bun run test && bun run build",
+    "typecheck": "tsc --noEmit --pretty false",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@flow2api/extension-core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.1.32",
+    "@types/node": "^26.2.0",
+    "esbuild": "^0.27.4",
+    "typescript": "~6.0.3",
+    "vitest": "^4.1.0"
   }
 }

@@ -1,9 +1,31 @@
+// @ts-nocheck -- legacy browser orchestration is typed incrementally through imported boundaries.
+import { webSocketUrlToHttpBase } from "@flow2api/extension-core"
+
+import { importGoogleAccount } from "./state/api"
+import { createAccountSyncState, reduceAccountSync } from "./state/account-sync"
+import {
+    DEFAULT_SETTINGS,
+    DEFAULT_WORKER_PAGE_URL,
+    DEFAULT_WORKER_SETTINGS,
+    WORKER_RECAPTCHA_SETTLE_DEFAULT_MS,
+    clampAccountInterval,
+    clampWorkerRecaptchaSettleMs,
+    loadSettings,
+    normalizeWorkerPageUrl,
+} from "./state/storage"
+import { reduceWebSocketPhase } from "./state/websocket"
+import {
+    buildRegistrationMessage,
+    buildWorkerSocketUrl,
+    inferWorkerMode,
+} from "./state/worker-mode"
+
 let ws = null;
 let reconnectTimeout = null;
 let heartbeatInterval = null;
 let cachedInstanceId = null;
 let sessionRefreshTimeout = null;
-let accountImportInFlight = false;
+let accountSyncState = createAccountSyncState();
 
 const ACCOUNT_IMPORT_ALARM = "flow2api-account-import";
 const GOOGLE_COOKIE_NAMES = [
@@ -26,30 +48,6 @@ const GOOGLE_AUTH_COOKIE_GROUPS = [
     ["__Secure-1PSID", "__Secure-1PAPISID"],
     ["__Secure-3PSID", "__Secure-3PAPISID"],
 ];
-
-const DEFAULT_SETTINGS = {
-    serverUrl: "wss://flow-api.prismacreative.online/captcha_ws",
-    connectionMode: "endUser",
-    apiKey: "",
-    captchaWorkerAuthKey: "",
-    refreshTokenId: "",
-    clientLabel: "",
-    accountAutoImportEnabled: false,
-    accountAutoImportIntervalMinutes: 30,
-    accountRefreshIntervalMinutes: 120,
-};
-
-const DEFAULT_WORKER_PAGE_URL = "https://labs.google/fx/api/auth/providers";
-
-const WORKER_RECAPTCHA_SETTLE_DEFAULT_MS = 3000;
-const WORKER_RECAPTCHA_SETTLE_MAX_MS = 120000;
-
-const DEFAULT_WORKER_SETTINGS = {
-    workerPageUrl: DEFAULT_WORKER_PAGE_URL,
-    usePersistentWorkerTab: true,
-    autoRecycleWorkerTabOnCaptchaFailure: true,
-    workerRecaptchaSettleMs: WORKER_RECAPTCHA_SETTLE_DEFAULT_MS,
-};
 
 const EVENTS_MAX = 100;
 const RECENT_CAPTCHA_JOBS_MAX = 50;
@@ -107,31 +105,6 @@ const runtimeState = {
     allowSessionRefresh: true,
     allowGeneration: false,
 };
-
-function inferConnectionMode(stored) {
-    const explicit = String(stored.connectionMode || "").trim();
-    if (explicit === "captchaWorker" || explicit === "refreshWorker" || explicit === "worker" || explicit === "endUser") {
-        return explicit === "worker" ? "refreshWorker" : explicit;
-    }
-    const cwk = String(stored.captchaWorkerAuthKey || "").trim();
-    const refreshTokenId = String(stored.refreshTokenId || "").trim();
-    const ak = String(stored.apiKey || "").trim();
-    if (cwk && !ak) return "captchaWorker";
-    if (refreshTokenId && !ak) return "refreshWorker";
-    return "endUser";
-}
-
-function normalizeWorkerPageUrl(raw) {
-    const t = String(raw || "").trim();
-    if (!t) return DEFAULT_WORKER_PAGE_URL;
-    try {
-        const u = new URL(t);
-        if (u.protocol !== "https:" && u.protocol !== "http:") return DEFAULT_WORKER_PAGE_URL;
-        return u.toString();
-    } catch {
-        return DEFAULT_WORKER_PAGE_URL;
-    }
-}
 
 function pushEvent(type, message, level = "info") {
     const evt = {
@@ -310,6 +283,11 @@ function loadExtensionJobAndWorkerState() {
                 runtimeState.accountImportLastAt = Number(stored.accountImportLastAt) || 0;
                 runtimeState.accountImportLastStatus = String(stored.accountImportLastStatus || "never");
                 runtimeState.accountImportLastMessage = String(stored.accountImportLastMessage || "");
+                accountSyncState = createAccountSyncState({
+                    lastAt: runtimeState.accountImportLastAt,
+                    lastStatus: runtimeState.accountImportLastStatus,
+                    lastMessage: runtimeState.accountImportLastMessage,
+                });
                 resolve();
             }
         );
@@ -326,31 +304,6 @@ function validateStoredWorkerTab() {
             pushEvent("worker_tab_gone", "Stored worker tab missing; cleared id", "warn");
         }
     });
-}
-
-/** Build http(s) base URL from captcha WebSocket URL for same-host REST uploads. */
-function serverWebSocketToHttpBase(wsUrl) {
-    const raw = String(wsUrl || "").trim();
-    if (!raw) return "";
-    try {
-        const u = new URL(raw);
-        const proto = u.protocol === "wss:" ? "https:" : "http:";
-        let path = u.pathname || "";
-        if (path.endsWith("/captcha_ws")) {
-            path = path.slice(0, -"/captcha_ws".length) || "";
-        }
-        const origin = `${proto}//${u.host}`;
-        if (!path || path === "/") return origin;
-        return origin + (path.endsWith("/") ? path.slice(0, -1) : path);
-    } catch {
-        return "";
-    }
-}
-
-function clampAccountInterval(raw, fallback) {
-    const value = parseInt(String(raw || ""), 10);
-    if (!Number.isFinite(value)) return fallback;
-    return Math.max(5, Math.min(1440, value));
 }
 
 function getCookies(details) {
@@ -397,9 +350,16 @@ async function getGoogleAccountCookies() {
 }
 
 function persistAccountImportOutcome(status, message) {
-    runtimeState.accountImportLastAt = Date.now();
-    runtimeState.accountImportLastStatus = String(status || "error");
-    runtimeState.accountImportLastMessage = String(message || "").slice(0, 500);
+    const eventType = status === "success" ? "success" : "error";
+    accountSyncState = reduceAccountSync(accountSyncState, {
+        type: eventType,
+        at: Date.now(),
+        message: String(message || ""),
+    });
+    runtimeState.accountImportInFlight = accountSyncState.inFlight;
+    runtimeState.accountImportLastAt = accountSyncState.lastAt;
+    runtimeState.accountImportLastStatus = accountSyncState.lastStatus;
+    runtimeState.accountImportLastMessage = accountSyncState.lastMessage;
     chrome.storage.local.set({
         accountImportLastAt: runtimeState.accountImportLastAt,
         accountImportLastStatus: runtimeState.accountImportLastStatus,
@@ -408,11 +368,8 @@ function persistAccountImportOutcome(status, message) {
 }
 
 async function importCurrentGoogleAccount(reason = "manual") {
-    if (accountImportInFlight) {
-        throw new Error("account_import_busy");
-    }
-    accountImportInFlight = true;
-    runtimeState.accountImportInFlight = true;
+    accountSyncState = reduceAccountSync(accountSyncState, { type: "begin" });
+    runtimeState.accountImportInFlight = accountSyncState.inFlight;
     try {
         const settings = await getSettings();
         if (settings.connectionMode !== "endUser") {
@@ -441,24 +398,13 @@ async function importCurrentGoogleAccount(reason = "manual") {
             );
         }
 
-        const baseUrl = serverWebSocketToHttpBase(settings.serverUrl);
-        if (!baseUrl) throw new Error("Invalid WebSocket URL");
-        const response = await fetch(`${baseUrl}/api/extension/import-current-account`, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "Authorization": `Bearer ${settings.apiKey}`,
-            },
-            body: JSON.stringify({
-                session_token: sessionResult.sessionToken,
-                google_cookies: JSON.stringify(cookies),
-                refresh_interval_minutes: settings.accountRefreshIntervalMinutes,
-            }),
+        const payload = await importGoogleAccount(fetch, {
+            serverUrl: settings.serverUrl,
+            apiKey: settings.apiKey,
+            sessionToken: sessionResult.sessionToken,
+            googleCookies: cookies,
+            refreshIntervalMinutes: settings.accountRefreshIntervalMinutes,
         });
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok || payload.success !== true) {
-            throw new Error(payload.detail || payload.message || `Import failed (HTTP ${response.status})`);
-        }
 
         const message = `${reason}: ${payload.email || "unknown account"} (token ${payload.token_id || "?"})`;
         persistAccountImportOutcome("success", message);
@@ -470,8 +416,7 @@ async function importCurrentGoogleAccount(reason = "manual") {
         pushEvent("account_import_error", `Google account sync failed: ${message}`, "error");
         throw error;
     } finally {
-        accountImportInFlight = false;
-        runtimeState.accountImportInFlight = false;
+        runtimeState.accountImportInFlight = accountSyncState.inFlight;
     }
 }
 
@@ -493,27 +438,6 @@ async function configureAccountImportAlarm() {
         "account_import_schedule",
         `Automatic Google account sync scheduled every ${settings.accountAutoImportIntervalMinutes} minutes`
     );
-}
-
-/** Public hosts should use wss://; keep ws:// for localhost-style hosts. */
-function normalizeWebSocketUrl(raw) {
-    const trimmed = String(raw || "").trim();
-    if (!trimmed) return trimmed;
-    try {
-        const u = new URL(trimmed);
-        if (u.protocol !== "ws:") return trimmed;
-        const host = (u.hostname || "").toLowerCase();
-        const isLocal =
-            host === "localhost" ||
-            host === "127.0.0.1" ||
-            host === "[::1]" ||
-            host.endsWith(".local");
-        if (isLocal) return trimmed;
-        u.protocol = "wss:";
-        return u.toString();
-    } catch {
-        return trimmed;
-    }
 }
 
 function generateInstanceId() {
@@ -541,34 +465,7 @@ function getInstanceId() {
 }
 
 function getSettings() {
-    return new Promise((resolve) => {
-        const keys = { ...DEFAULT_SETTINGS, ...DEFAULT_WORKER_SETTINGS };
-        chrome.storage.local.get(keys, (stored) => {
-            const connectionMode = inferConnectionMode(stored);
-            resolve({
-                serverUrl: normalizeWebSocketUrl((stored.serverUrl || DEFAULT_SETTINGS.serverUrl).trim()),
-                connectionMode,
-                apiKey: (stored.apiKey || "").trim(),
-                captchaWorkerAuthKey: (stored.captchaWorkerAuthKey || "").trim(),
-                refreshTokenId: String(stored.refreshTokenId || "").trim(),
-                clientLabel: (stored.clientLabel || "").trim(),
-                workerPageUrl: normalizeWorkerPageUrl(stored.workerPageUrl),
-                usePersistentWorkerTab: !!stored.usePersistentWorkerTab,
-                autoRecycleWorkerTabOnCaptchaFailure:
-                    stored.autoRecycleWorkerTabOnCaptchaFailure !== false,
-                workerRecaptchaSettleMs: clampWorkerRecaptchaSettleMs(stored.workerRecaptchaSettleMs),
-                accountAutoImportEnabled: stored.accountAutoImportEnabled === true,
-                accountAutoImportIntervalMinutes: clampAccountInterval(
-                    stored.accountAutoImportIntervalMinutes,
-                    30
-                ),
-                accountRefreshIntervalMinutes: clampAccountInterval(
-                    stored.accountRefreshIntervalMinutes,
-                    120
-                ),
-            });
-        });
-    });
+    return loadSettings(chrome.storage.local);
 }
 
 function closeSocket() {
@@ -690,7 +587,7 @@ async function performSessionRefresh({ reason = "server_request", reqId = null }
 }
 
 function resetRuntimeStatePartial() {
-    runtimeState.wsStatus = "idle";
+    runtimeState.wsStatus = reduceWebSocketPhase(runtimeState.wsStatus, { type: "reset" });
     runtimeState.connectionMode = "";
     runtimeState.workerSessionId = "";
     runtimeState.managedApiKeyId = "";
@@ -724,6 +621,7 @@ function resetRuntimeStatePartial() {
     runtimeState.accountImportLastAt = 0;
     runtimeState.accountImportLastStatus = "never";
     runtimeState.accountImportLastMessage = "";
+    accountSyncState = createAccountSyncState();
     runtimeState.allowCaptcha = true;
     runtimeState.allowSessionRefresh = true;
     runtimeState.allowGeneration = false;
@@ -793,15 +691,6 @@ function resetExtensionToDefaults(done) {
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function clampWorkerRecaptchaSettleMs(raw) {
-    const n = Number(raw);
-    if (!Number.isFinite(n)) return WORKER_RECAPTCHA_SETTLE_DEFAULT_MS;
-    const i = Math.floor(n);
-    if (i < 0) return 0;
-    if (i > WORKER_RECAPTCHA_SETTLE_MAX_MS) return WORKER_RECAPTCHA_SETTLE_MAX_MS;
-    return i;
 }
 
 /** After worker tab reaches `complete`, wait for enterprise.js / grecaptcha to be usable. */
@@ -1288,7 +1177,7 @@ async function handleGenerationRequest(data, commandType) {
         };
         if (shouldHttp) {
             const settings = await getSettings();
-            const base = serverWebSocketToHttpBase(settings.serverUrl || DEFAULT_SETTINGS.serverUrl);
+            const base = webSocketUrlToHttpBase(settings.serverUrl || DEFAULT_SETTINGS.serverUrl);
             const path = String(lr.upload_path || "/api/extension/generation-upload").trim() || "/api/extension/generation-upload";
             let uploadTarget = "";
             try {
@@ -1374,8 +1263,7 @@ async function connectWS() {
 
     const settings = await getSettings();
     const instanceId = await getInstanceId();
-    const rawMode = settings.connectionMode === "worker" ? "refreshWorker" : settings.connectionMode;
-    const mode = rawMode === "captchaWorker" || rawMode === "refreshWorker" ? rawMode : "endUser";
+    const mode = inferWorkerMode(settings);
     stopWorkerSessionRefreshScheduler();
     runtimeState.connectionMode = mode;
     runtimeState.instanceId = instanceId;
@@ -1383,42 +1271,26 @@ async function connectWS() {
     runtimeState.managedApiKeyId = "";
     runtimeState.captchaWorkerId = "";
     runtimeState.bindingSource = "";
-    runtimeState.wsStatus = "connecting";
+    runtimeState.wsStatus = reduceWebSocketPhase(runtimeState.wsStatus, { type: "connect" });
     runtimeState.lastRegisterStatus = "pending";
     runtimeState.lastRegisterError = "";
     runtimeState.lastError = "";
     pushEvent("connect_start", `Connecting to ${settings.serverUrl || DEFAULT_SETTINGS.serverUrl}`);
-    const url = new URL(settings.serverUrl || DEFAULT_SETTINGS.serverUrl);
-    if (mode === "captchaWorker") {
-        if (settings.captchaWorkerAuthKey) {
-            url.searchParams.set("captcha_worker_key", settings.captchaWorkerAuthKey);
-        }
-    } else if (mode === "refreshWorker") {
-        if (settings.refreshTokenId) {
-            url.searchParams.set("refresh_token_id", settings.refreshTokenId);
-        }
-    } else {
-        if (settings.apiKey) {
-            url.searchParams.set("key", settings.apiKey);
-        }
-        if (settings.clientLabel) {
-            url.searchParams.set("client_label", settings.clientLabel);
-        }
-    }
-    url.searchParams.set("instance_id", instanceId);
+    const url = buildWorkerSocketUrl(
+        settings.serverUrl || DEFAULT_SETTINGS.serverUrl,
+        mode,
+        settings,
+        instanceId
+    );
     const socket = new WebSocket(url.toString());
     ws = socket;
 
     socket.onopen = () => {
         if (socket !== ws) return;
         console.log("[Flow2API] Background connected to WebSocket", url.toString());
-        runtimeState.wsStatus = "open";
+        runtimeState.wsStatus = reduceWebSocketPhase(runtimeState.wsStatus, { type: "open" });
         pushEvent("connect_open", "WebSocket connected");
-        socket.send(JSON.stringify({
-            type: "register",
-            client_label: mode === "endUser" ? settings.clientLabel : "",
-            instance_id: instanceId,
-        }));
+        socket.send(JSON.stringify(buildRegistrationMessage(mode, settings.clientLabel, instanceId)));
         if (heartbeatInterval) clearInterval(heartbeatInterval);
         heartbeatInterval = setInterval(() => {
             if (socket === ws && socket.readyState === WebSocket.OPEN) {
@@ -1455,14 +1327,16 @@ async function connectWS() {
             runtimeState.allowCaptcha = ac !== false && ac !== 0 && ac !== "0";
             runtimeState.allowSessionRefresh = ar !== false && ar !== 0 && ar !== "0";
             runtimeState.allowGeneration = ag === true || ag === 1 || ag === "1";
+            runtimeState.wsStatus = reduceWebSocketPhase(runtimeState.wsStatus, {
+                type: "register",
+                ok: ackStatus !== "error",
+            });
             if (ackStatus === "error") {
-                runtimeState.wsStatus = "open_register_error";
                 runtimeState.lastError = ackError || "register_failed";
                 pushEvent("register_ack", `Register failed: ${ackError || "unknown"}`, "error");
                 console.log("[Flow2API] Register ack error:", ackError || "unknown");
                 stopWorkerSessionRefreshScheduler();
             } else {
-                runtimeState.wsStatus = "open";
                 runtimeState.lastError = "";
                 pushEvent("register_ack", "Register successful");
                 console.log(
@@ -1517,7 +1391,7 @@ async function connectWS() {
     socket.onclose = () => {
         if (socket !== ws) return;
         console.log("[Flow2API] WebSocket Closed. Reconnecting in 2s...");
-        runtimeState.wsStatus = "closed";
+        runtimeState.wsStatus = reduceWebSocketPhase(runtimeState.wsStatus, { type: "close" });
         stopWorkerSessionRefreshScheduler();
         pushEvent("connect_close", "WebSocket closed, reconnect scheduled", "warn");
         ws = null;
@@ -1529,7 +1403,7 @@ async function connectWS() {
     socket.onerror = (e) => {
         if (socket !== ws) return;
         console.log("[Flow2API] WebSocket Error", e);
-        runtimeState.wsStatus = "error";
+        runtimeState.wsStatus = reduceWebSocketPhase(runtimeState.wsStatus, { type: "error" });
         runtimeState.lastError = "websocket_error";
         pushEvent("connect_error", "WebSocket transport error", "error");
     };

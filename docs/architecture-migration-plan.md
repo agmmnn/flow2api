@@ -1,6 +1,6 @@
 # Flow2API Architecture Migration Plan
 
-Status: in progress; Phases 1-9 are complete and Phase 10 is underway.
+Status: in progress; Phases 1-10 are complete and Phase 11 is next.
 
 This plan restructures Flow2API as a modular monolith in a monorepo. It avoids a full rewrite, preserves existing API contracts, and keeps these commands working throughout the migration:
 
@@ -327,15 +327,23 @@ Exit criteria:
 - [x] Organize the admin frontend by feature.
 - [x] Generate TypeScript API contracts from the backend OpenAPI document.
 - [x] Add frontend query and component tests around high-risk workflows.
-- [ ] Convert the CAPTCHA extension from JavaScript to TypeScript incrementally.
-- [ ] Separate extension storage, API, WebSocket, account-sync, and worker-mode state machines.
-- [ ] Share only stable API, WebSocket, and storage primitives through `extension-core`.
+- [x] Convert the CAPTCHA extension from JavaScript to TypeScript incrementally.
+- [x] Separate extension storage, API, WebSocket, account-sync, and worker-mode state machines.
+- [x] Share only stable API, WebSocket, and storage primitives through `extension-core`.
 
 Exit criteria:
 
 - Frontend and extension builds are reproducible through Bun.
 - Worker modes and account import/refresh flows have automated coverage.
 - Backend and frontend contract types are generated from one source.
+
+The CAPTCHA extension now builds its TypeScript sources into an unpacked `dist/`
+directory. Its storage, REST import, WebSocket phase, account-sync, and worker-mode
+boundaries are strict TypeScript with focused tests. The large background and options
+entry points retain temporary `@ts-nocheck` markers so migration can proceed without a
+behavioral rewrite; new extracted boundaries remain fully typechecked. The shared
+`extension-core` package is intentionally limited to Chrome-independent storage,
+JSON request, and WebSocket URL primitives.
 
 ## Phase 11: Final verification and release preparation
 

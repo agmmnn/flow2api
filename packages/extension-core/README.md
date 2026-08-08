@@ -1,5 +1,11 @@
 # Extension core package
 
-This directory is reserved for stable WebSocket, API, and storage primitives
-shared by the browser extensions. Shared code is introduced incrementally in
-Phase 10 of the architecture migration.
+Typed, browser-independent primitives shared by Flow2API extensions:
+
+- callback-based extension storage adapters;
+- JSON HTTP request handling;
+- WebSocket URL normalization and REST-base derivation.
+
+Worker modes, account synchronization, UI state, and provider behavior remain
+inside their owning extension. This package intentionally contains no Chrome
+globals or product-specific state machines.

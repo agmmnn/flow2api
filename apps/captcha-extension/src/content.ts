@@ -1,3 +1,4 @@
+// @ts-nocheck -- isolated page bridge; migration keeps the existing message contract intact.
 console.log("[Flow2API] Captcha Worker injected.");
 
 function getRecaptchaToken(action) {
@@ -60,4 +61,3 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return true; 
     }
 });
-

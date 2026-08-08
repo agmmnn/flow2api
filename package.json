@@ -6,7 +6,8 @@
     "apps/admin-web",
     "apps/captcha-extension",
     "apps/metadata-extension",
-    "packages/api-contract"
+    "packages/api-contract",
+    "packages/extension-core"
   ],
   "scripts": {
     "build": "bun run --filter '@flow2api/*' build",

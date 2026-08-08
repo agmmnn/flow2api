@@ -1,101 +1,20 @@
-const DEFAULT_SETTINGS = {
-  serverUrl: "wss://flow-api.prismacreative.online/captcha_ws",
-  connectionMode: "endUser",
-  apiKey: "",
-  captchaWorkerAuthKey: "",
-  refreshTokenId: "",
-  clientLabel: "",
-  accountAutoImportEnabled: false,
-  accountAutoImportIntervalMinutes: 30,
-  accountRefreshIntervalMinutes: 120
-};
+// @ts-nocheck -- the legacy options DOM is typed incrementally through shared state modules.
+import { normalizeWebSocketUrl } from "@flow2api/extension-core"
 
-const DEFAULT_WORKER_PAGE_URL = "https://labs.google/fx/api/auth/providers";
-const WORKER_RECAPTCHA_SETTLE_DEFAULT_MS = 3000;
-const WORKER_RECAPTCHA_SETTLE_MAX_MS = 120000;
-
-const STORAGE_KEYS = {
-  serverUrl: DEFAULT_SETTINGS.serverUrl,
-  connectionMode: DEFAULT_SETTINGS.connectionMode,
-  apiKey: "",
-  captchaWorkerAuthKey: "",
-  refreshTokenId: "",
-  clientLabel: "",
-  workerPageUrl: DEFAULT_WORKER_PAGE_URL,
-  usePersistentWorkerTab: true,
-  autoRecycleWorkerTabOnCaptchaFailure: true,
-  workerRecaptchaSettleMs: WORKER_RECAPTCHA_SETTLE_DEFAULT_MS,
-  accountAutoImportEnabled: false,
-  accountAutoImportIntervalMinutes: 30,
-  accountRefreshIntervalMinutes: 120
-};
+import {
+  DEFAULT_SETTINGS,
+  DEFAULT_WORKER_PAGE_URL,
+  STORAGE_DEFAULTS as STORAGE_KEYS,
+  clampAccountInterval,
+  clampWorkerRecaptchaSettleMs,
+  normalizeSettings,
+  normalizeWorkerPageUrl,
+} from "./state/storage"
+import { inferWorkerMode } from "./state/worker-mode"
 
 const $ = (id) => document.getElementById(id);
 let reconnectInProgress = false;
 let eventLogFilter = "all";
-
-function clampWorkerRecaptchaSettleMs(raw) {
-  const n = Number(raw);
-  if (!Number.isFinite(n)) return WORKER_RECAPTCHA_SETTLE_DEFAULT_MS;
-  const i = Math.floor(n);
-  if (i < 0) return 0;
-  if (i > WORKER_RECAPTCHA_SETTLE_MAX_MS) return WORKER_RECAPTCHA_SETTLE_MAX_MS;
-  return i;
-}
-
-function clampAccountInterval(raw, fallback) {
-  const value = parseInt(String(raw || ""), 10);
-  if (!Number.isFinite(value)) return fallback;
-  return Math.max(5, Math.min(1440, value));
-}
-
-function normalizeWorkerPageUrl(raw) {
-  const t = (raw || "").trim();
-  if (!t) return DEFAULT_WORKER_PAGE_URL;
-  try {
-    const u = new URL(t);
-    if (u.protocol !== "https:" && u.protocol !== "http:") return DEFAULT_WORKER_PAGE_URL;
-    return u.toString();
-  } catch {
-    return DEFAULT_WORKER_PAGE_URL;
-  }
-}
-
-function normalizeSettings(values) {
-  const rawMode = (values.connectionMode || "").trim();
-  const mode =
-    rawMode === "captchaWorker" || rawMode === "refreshWorker" || rawMode === "worker"
-      ? rawMode === "worker" ? "refreshWorker" : rawMode
-      : "endUser";
-  return {
-    serverUrl: normalizeWebSocketUrl((values.serverUrl || DEFAULT_SETTINGS.serverUrl).trim()),
-    connectionMode: mode,
-    apiKey: (values.apiKey || "").trim(),
-    captchaWorkerAuthKey: (values.captchaWorkerAuthKey || "").trim(),
-    refreshTokenId: String(values.refreshTokenId || "").trim(),
-    clientLabel: (values.clientLabel || "").trim(),
-    workerPageUrl: normalizeWorkerPageUrl(values.workerPageUrl),
-    usePersistentWorkerTab: !!values.usePersistentWorkerTab,
-    autoRecycleWorkerTabOnCaptchaFailure: values.autoRecycleWorkerTabOnCaptchaFailure !== false,
-    workerRecaptchaSettleMs: clampWorkerRecaptchaSettleMs(values.workerRecaptchaSettleMs),
-    accountAutoImportEnabled: values.accountAutoImportEnabled === true,
-    accountAutoImportIntervalMinutes: clampAccountInterval(values.accountAutoImportIntervalMinutes, 30),
-    accountRefreshIntervalMinutes: clampAccountInterval(values.accountRefreshIntervalMinutes, 120)
-  };
-}
-
-function inferConnectionMode(stored) {
-  const explicit = (stored.connectionMode || "").trim();
-  if (explicit === "captchaWorker" || explicit === "refreshWorker" || explicit === "worker" || explicit === "endUser") {
-    return explicit === "worker" ? "refreshWorker" : explicit;
-  }
-  const cwk = (stored.captchaWorkerAuthKey || "").trim();
-  const refreshTokenId = String(stored.refreshTokenId || "").trim();
-  const ak = (stored.apiKey || "").trim();
-  if (cwk && !ak) return "captchaWorker";
-  if (refreshTokenId && !ak) return "refreshWorker";
-  return "endUser";
-}
 
 function setStatus(message, isError = false) {
   const status = $("status");
@@ -120,26 +39,6 @@ function isValidWsUrl(value) {
   }
 }
 
-function normalizeWebSocketUrl(raw) {
-  const trimmed = (raw || "").trim();
-  if (!trimmed) return trimmed;
-  try {
-    const u = new URL(trimmed);
-    if (u.protocol !== "ws:") return trimmed;
-    const host = (u.hostname || "").toLowerCase();
-    const isLocal =
-      host === "localhost" ||
-      host === "127.0.0.1" ||
-      host === "[::1]" ||
-      host.endsWith(".local");
-    if (isLocal) return trimmed;
-    u.protocol = "wss:";
-    return u.toString();
-  } catch {
-    return trimmed;
-  }
-}
-
 function getActiveMode() {
   if ($("tabCaptchaWorker") && $("tabCaptchaWorker").getAttribute("aria-selected") === "true") return "captchaWorker";
   if ($("tabRefreshWorker") && $("tabRefreshWorker").getAttribute("aria-selected") === "true") return "refreshWorker";
@@ -161,13 +60,13 @@ function setActiveMode(mode) {
 
 function loadSettings() {
   chrome.storage.local.get(STORAGE_KEYS, (stored) => {
-    const inferred = inferConnectionMode(stored);
+    const inferred = inferWorkerMode(stored);
     const rawUrl = (stored.serverUrl || DEFAULT_SETTINGS.serverUrl).trim();
     const fixedUrl = normalizeWebSocketUrl(rawUrl);
     if (fixedUrl && fixedUrl !== rawUrl) {
       chrome.storage.local.set({ serverUrl: fixedUrl }, () => {
         chrome.storage.local.get(STORAGE_KEYS, (s2) => {
-          applyLoadedSettings(s2, inferConnectionMode(s2));
+          applyLoadedSettings(s2, inferWorkerMode(s2));
         });
       });
       return;
