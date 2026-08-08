@@ -5,8 +5,11 @@ COPY package.json bun.lock ./
 COPY apps/admin-web/package.json apps/admin-web/package.json
 COPY apps/captcha-extension/package.json apps/captcha-extension/package.json
 COPY apps/metadata-extension/package.json apps/metadata-extension/package.json
+COPY packages/api-contract/package.json packages/api-contract/package.json
+COPY packages/extension-core/package.json packages/extension-core/package.json
 RUN bun install --frozen-lockfile
 COPY apps/admin-web/ apps/admin-web/
+COPY packages/api-contract/ packages/api-contract/
 RUN bun run --cwd apps/admin-web build
 
 # Build backend

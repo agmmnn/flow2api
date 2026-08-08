@@ -83,3 +83,4 @@ async def test_database_startup_records_sqlite_revision(tmp_path) -> None:
 
     assert database.database_revision == discover_sqlite_migrations()[-1].revision
     assert tracker == [(database.database_revision,)]
+    assert (await database.health_snapshot())["database_revision"] == database.database_revision

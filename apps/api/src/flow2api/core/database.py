@@ -343,13 +343,18 @@ class Database:
     async def health_snapshot(self) -> Dict[str, Any]:
         """Return backend-specific health and revision details."""
         started = time.perf_counter()
-        async with self._connect() as db:
-            cursor = await db.execute("PRAGMA user_version")
-            row = await cursor.fetchone()
+        revision = self.database_revision
+        if not revision:
+            async with self._connect() as db:
+                cursor = await db.execute(
+                    "SELECT revision FROM schema_migrations ORDER BY revision DESC LIMIT 1"
+                )
+                row = await cursor.fetchone()
+                revision = str(row[0]) if row else ""
         return {
             "database_backend": "sqlite",
             "database_ready": True,
-            "database_revision": str(row[0] if row else 0),
+            "database_revision": revision,
             "cutover_marker_present": False,
             "restore_marker": None,
             "latency_ms": round((time.perf_counter() - started) * 1000.0, 3),
