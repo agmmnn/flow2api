@@ -61,3 +61,16 @@ jobs:
         run: bun run --cwd apps/metadata-extension test
       - name: Build
         run: bun run --cwd apps/metadata-extension build
+
+  infrastructure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Compose configurations
+        run: |
+          cp .env.headed.example .env
+          docker compose -f infra/compose/docker-compose.yml config --quiet
+          docker compose -f infra/compose/docker-compose.yml -f infra/compose/docker-compose.agent.yml config --quiet
+          docker compose -f infra/compose/docker-compose.headed.yml config --quiet
+          docker compose -f infra/compose/docker-compose.local.yml config --quiet
+          docker compose -f infra/compose/docker-compose.proxy.yml config --quiet
