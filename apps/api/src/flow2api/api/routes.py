@@ -12,7 +12,7 @@ import random
 import re
 import time
 import uuid
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, urlparse
 
 from curl_cffi.requests import AsyncSession
 from pathlib import Path
@@ -42,18 +42,11 @@ from ..core.studio_model_catalog import (
 from ..core.models import (
     ChatCompletionRequest,
     ChatMessage,
-    FlowProjectCreateRequest,
-    GenerateCloningPromptsRequest,
-    GenerateCloningVideoPromptRequest,
-    GenerateMetadataRequest,
     GeminiContent,
     GeminiGenerateContentRequest,
-    Project,
     RunwayTask,
     GeminiGenTask,
     Task,
-    TaskTrackerContributorFetchRequest,
-    TaskTrackerKeywordSearchRequest,
 )
 from ..core.config import config as app_config
 from ..services.browser_captcha_extension import ExtensionCaptchaService
@@ -140,14 +133,6 @@ class RunwayMediaInput(BaseModel):
     name: Optional[str] = None
     content_type: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
-
-
-class ExtensionAccountImportRequest(BaseModel):
-    """Credentials captured from the currently signed-in Chrome profile."""
-
-    session_token: str = Field(min_length=1, max_length=16_384)
-    google_cookies: str = Field(min_length=2, max_length=262_144)
-    refresh_interval_minutes: int = Field(default=120, ge=5, le=1_440)
 
 
 class RunwayTaskCreateRequest(BaseModel):
@@ -276,13 +261,6 @@ def _require_geminigen_scope(auth_ctx: AuthContext) -> None:
     if auth_ctx.key_id is None:
         raise HTTPException(status_code=403, detail="Managed API key required for GeminiGen")
     _require_managed_scope(auth_ctx, "geminigen:generate")
-
-
-def _require_token_import_scope(auth_ctx: AuthContext) -> None:
-    """Restrict browser credential imports to explicitly trusted API keys."""
-    if auth_ctx.is_legacy or "*" in auth_ctx.scopes or "tokens:import" in auth_ctx.scopes:
-        return
-    raise HTTPException(status_code=403, detail="Missing scope: tokens:import")
 
 
 async def _logged_managed_adobe_call(
@@ -512,35 +490,6 @@ def _extract_cache_filename(url: str) -> Optional[str]:
             return None
         return Path(filename).name
     return None
-
-
-def _cache_file_row_to_list_item(row: Dict[str, Any]) -> Dict[str, Any]:
-    """Shape a cache_files row for GET /api/cache/file list APIs."""
-    fn_safe = Path(str(row.get("filename") or "")).name
-    flow = _strip_optional_project_id(row.get("flow_project_id"))
-    download_path = f"/api/cache/blob/{fn_safe}"
-    if flow:
-        download_path = f"{download_path}?project_id={quote(flow, safe='')}"
-    if row.get("delivery_mode") == "cdn" and generation_handler is not None:
-        file_cache = getattr(generation_handler, "file_cache", None)
-        direct = file_cache.backend.public_url(fn_safe) if file_cache and getattr(file_cache, "backend", None) else None
-        if direct:
-            download_path = direct
-    created = row.get("created_at")
-    updated = row.get("updated_at")
-    return {
-        "filename": fn_safe,
-        "flow_project_id": flow,
-        "media_type": row.get("media_type"),
-        "source_url": row.get("source_url"),
-        "token_id": row.get("token_id"),
-        "storage_provider": row.get("storage_provider") or "local",
-        "delivery_mode": row.get("delivery_mode") or "proxy",
-        "size_bytes": row.get("size_bytes"),
-        "created_at": created.isoformat() if hasattr(created, "isoformat") else (str(created) if created is not None else None),
-        "updated_at": updated.isoformat() if hasattr(updated, "isoformat") else (str(updated) if updated is not None else None),
-        "download_path": download_path,
-    }
 
 
 async def retrieve_image_data(
@@ -2115,606 +2064,52 @@ async def _select_random_active_project_for_api_key(
     return ({selected_token_id}, None)
 
 
-def _require_managed_projects_read(auth_ctx: AuthContext) -> None:
-    """Managed keys: list/get projects if legacy or scopes include read/write wildcard."""
-    if auth_ctx.is_legacy:
-        return
-    if "*" in auth_ctx.scopes or "projects:read" in auth_ctx.scopes or "projects:write" in auth_ctx.scopes:
-        return
-    raise HTTPException(
-        status_code=403,
-        detail="Missing scope: allow '*', 'projects:read', or 'projects:write'",
-    )
+from ..transport.projects import (
+    create_flow_project,
+    get_flow_project,
+    list_flow_projects,
+    router as projects_router,
+)
 
 
-def _project_row_to_api_dict(p: Project) -> Dict[str, Any]:
-    """Serialize a Project model for JSON APIs."""
-    d = p.model_dump()
-    created = d.get("created_at")
-    if created is not None and hasattr(created, "isoformat"):
-        d["created_at"] = created.isoformat()
-    return {
-        "project_id": d.get("project_id"),
-        "project_name": d.get("project_name"),
-        "token_id": d.get("token_id"),
-        "is_active": bool(d.get("is_active", True)),
-        "created_at": d.get("created_at"),
-    }
+router.include_router(projects_router)
 
 
-def _require_managed_projects_write(auth_ctx: AuthContext) -> None:
-    """Managed keys need wildcard or projects:write to create Flow projects."""
-    if auth_ctx.is_legacy:
-        return
-    if "*" in auth_ctx.scopes or "projects:write" in auth_ctx.scopes:
-        return
-    raise HTTPException(
-        status_code=403,
-        detail="Missing scope: allow '*' or add 'projects:write' for this key",
-    )
+from ..transport.extensions import (
+    ExtensionAccountImportRequest,
+    _require_token_import_scope,
+    extension_generation_upload,
+    extension_import_current_account,
+    extension_metadata_session,
+    router as extensions_router,
+)
 
 
-@router.get("/v1/projects")
-async def list_flow_projects(
-    account_id: Optional[int] = Query(None),
-    limit: int = Query(10, ge=1, le=100),
-    offset: int = Query(0, ge=0),
-    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
-):
-    """List VideoFX projects visible to this managed API key (optional filter by account / token id)."""
-    if auth_ctx.key_id is None:
-        raise HTTPException(status_code=403, detail="Managed API key required")
-    _require_managed_projects_read(auth_ctx)
-    handler = _ensure_generation_handler()
-    kid = auth_ctx.key_id
-    limit_clean = max(1, min(int(limit), 100))
-    offset_clean = max(0, int(offset))
-    if account_id is not None:
-        aid = int(account_id)
-        if aid not in auth_ctx.allowed_accounts:
-            raise HTTPException(status_code=400, detail="account_id is not assigned to this API key")
-        total = await handler.db.count_projects_for_api_key_account(kid, aid)
-        projects = await handler.db.list_projects_for_api_key_account(
-            kid, aid, limit=limit_clean, offset=offset_clean
-        )
-    else:
-        total = await handler.db.count_projects_by_api_key(kid)
-        projects = await handler.db.list_projects_by_api_key(
-            kid, limit=limit_clean, offset=offset_clean
-        )
-    data = [_project_row_to_api_dict(p) for p in projects]
-    return {
-        "object": "list",
-        "data": data,
-        "total": total,
-        "limit": limit_clean,
-        "offset": offset_clean,
-    }
+router.include_router(extensions_router)
 
 
-@router.get("/v1/projects/{project_id}")
-async def get_flow_project(
-    project_id: str,
-    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
-):
-    """Return one VideoFX project row if it belongs to this managed API key."""
-    if auth_ctx.key_id is None:
-        raise HTTPException(status_code=403, detail="Managed API key required")
-    _require_managed_projects_read(auth_ctx)
-    handler = _ensure_generation_handler()
-    pid = project_id.strip()
-    if not pid:
-        raise HTTPException(status_code=400, detail="project_id is required")
-    proj = await handler.db.get_project_by_id(pid, auth_ctx.key_id)
-    if not proj or int(proj.token_id) not in auth_ctx.allowed_accounts:
-        raise HTTPException(status_code=404, detail="Project not found")
-    return {"object": "flow_project", **_project_row_to_api_dict(proj)}
+from ..transport.cache import (
+    get_cached_blob,
+    list_cache_files_for_key,
+    list_cache_files_for_key_project,
+    router as cache_router,
+)
 
 
-@router.post("/v1/projects")
-async def create_flow_project(
-    body: FlowProjectCreateRequest,
-    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
-):
-    """Create VideoFX project(s) for managed key assigned account(s)."""
-    raise HTTPException(status_code=410, detail="Project management APIs have been removed")
-    if auth_ctx.key_id is None:
-        raise HTTPException(status_code=403, detail="Managed API key required")
-    _require_managed_projects_write(auth_ctx)
-    if not auth_ctx.allowed_accounts:
-        raise HTTPException(
-            status_code=400,
-            detail="No accounts assigned to this API key",
-        )
-    if body.account_id is not None:
-        account_id = int(body.account_id)
-        if account_id not in auth_ctx.allowed_accounts:
-            raise HTTPException(status_code=400, detail="account_id is not assigned to this API key")
-        target_accounts = [account_id]
-    else:
-        target_accounts = sorted(auth_ctx.allowed_accounts)
-
-    handler = _ensure_generation_handler()
-    raw_title = (body.title or "").strip()
-    if raw_title:
-        title = raw_title
-    else:
-        label = " ".join((auth_ctx.key_label or "managed").split()) or "managed"
-        now = datetime.now()
-        month = now.strftime("%b").upper()
-        date_time = f"{month} {now.strftime('%d %Y %I:%M %p')}".replace("AM", "am").replace("PM", "pm")
-        title = f"{label} {date_time}"
-    created_projects = []
-    should_set_as_current = True if body.account_id is None else bool(body.set_as_current)
-    # API-key account assignments can become stale if a token is deleted later.
-    # Filter to currently existing tokens so one stale id does not fail the whole request.
-    existing_target_accounts: List[int] = []
-    missing_target_accounts: List[int] = []
-    for account_id in target_accounts:
-        token_obj = await handler.db.get_token(int(account_id))
-        if token_obj:
-            existing_target_accounts.append(int(account_id))
-        else:
-            missing_target_accounts.append(int(account_id))
-
-    if body.account_id is not None and missing_target_accounts:
-        raise HTTPException(status_code=400, detail="account_id token not found")
-    if not existing_target_accounts:
-        raise HTTPException(
-            status_code=400,
-            detail="No valid assigned tokens found for this API key",
-        )
-    if missing_target_accounts:
-        debug_logger.log_warning(
-            f"[PROJECT] 跳过不存在的已分配账号: {missing_target_accounts}"
-        )
-
-    failed_accounts: List[Dict[str, Any]] = []
-    for account_id in existing_target_accounts:
-        try:
-            project = await handler.token_manager.create_project_for_token(
-                account_id,
-                title=title,
-                set_as_current=should_set_as_current,
-                api_key_id=auth_ctx.key_id,
-            )
-            created_projects.append(project)
-        except ValueError as e:
-            if body.account_id is not None:
-                raise HTTPException(status_code=400, detail=str(e))
-            failed_accounts.append({"account_id": account_id, "error": str(e)})
-            debug_logger.log_warning(
-                f"[PROJECT] 批量创建跳过账号 {account_id}: {str(e)}"
-            )
-        except Exception as e:
-            if body.account_id is not None:
-                raise HTTPException(status_code=500, detail=f"Create project failed: {str(e)}")
-            failed_accounts.append({"account_id": account_id, "error": str(e)})
-            debug_logger.log_warning(
-                f"[PROJECT] 批量创建跳过账号 {account_id}: {str(e)}"
-            )
-
-    if not created_projects:
-        if failed_accounts:
-            first_error = failed_accounts[0].get("error") or "unknown error"
-            raise HTTPException(
-                status_code=500,
-                detail=f"Create project failed: {first_error}",
-            )
-        raise HTTPException(status_code=500, detail="Create project failed: no projects created")
-
-    if body.account_id is not None:
-        project = created_projects[0]
-        return {
-            "object": "flow_project",
-            "project_id": project.project_id,
-            "project_name": project.project_name,
-            "token_id": project.token_id,
-            "set_as_current": should_set_as_current,
-        }
-
-    return {
-        "object": "list",
-        "data": [
-            {
-                "object": "flow_project",
-                "project_id": project.project_id,
-                "project_name": project.project_name,
-                "token_id": project.token_id,
-                "set_as_current": should_set_as_current,
-            }
-            for project in created_projects
-        ],
-        "total": len(created_projects),
-        "failed_accounts": failed_accounts,
-    }
+router.include_router(cache_router)
 
 
-@router.post("/api/extension/import-current-account")
-async def extension_import_current_account(
-    body: ExtensionAccountImportRequest,
-    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
-):
-    """Add or update the Google account signed in to the extension's Chrome profile."""
-    _require_token_import_scope(auth_ctx)
-    handler = _ensure_generation_handler()
-    token_manager = handler.token_manager
-    database = token_manager.db
-
-    session_token = body.session_token.strip()
-    try:
-        raw_cookies = json.loads(body.google_cookies)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail="google_cookies must be valid JSON") from exc
-    if not isinstance(raw_cookies, list) or not raw_cookies:
-        raise HTTPException(status_code=400, detail="google_cookies must be a non-empty list")
-
-    normalized_cookies = []
-    for raw_cookie in raw_cookies:
-        if not isinstance(raw_cookie, dict):
-            continue
-        name = str(raw_cookie.get("name") or "").strip()
-        value = str(raw_cookie.get("value") or "").strip()
-        if not name or not value:
-            continue
-        normalized_cookies.append(
-            {
-                "name": name,
-                "value": value,
-                "domain": str(raw_cookie.get("domain") or ""),
-                "path": str(raw_cookie.get("path") or "/"),
-                "expirationDate": raw_cookie.get("expirationDate"),
-            }
-        )
-    if not normalized_cookies:
-        raise HTTPException(status_code=400, detail="google_cookies contains no usable cookies")
-    google_cookies = json.dumps(normalized_cookies, ensure_ascii=False, separators=(",", ":"))
-
-    try:
-        result = await token_manager.flow_client.st_to_at(session_token)
-        access_token = str(result.get("access_token") or "").strip()
-        user_info = result.get("user") or {}
-        email = str(user_info.get("email") or "").strip()
-        expires = result.get("expires")
-        if not access_token or not email:
-            raise HTTPException(status_code=400, detail="Could not resolve the Google account from the session token")
-
-        at_expires = None
-        if expires:
-            try:
-                at_expires = datetime.fromisoformat(str(expires).replace("Z", "+00:00"))
-            except (TypeError, ValueError):
-                at_expires = None
-        if at_expires is not None:
-            aware_expires = at_expires if at_expires.tzinfo else at_expires.replace(tzinfo=timezone.utc)
-            if aware_expires <= datetime.now(timezone.utc):
-                raise HTTPException(
-                    status_code=400,
-                    detail="The Google Labs session is expired; reopen Flow and import again",
-                )
-
-        existing = await database.get_token_by_email(email)
-        common_fields = {
-            "protocol_mode": "protocol",
-            "google_cookies": google_cookies,
-            "auto_refresh_enabled": True,
-            "refresh_interval_minutes": body.refresh_interval_minutes,
-        }
-        if existing is not None:
-            await token_manager.update_token(
-                token_id=existing.id,
-                st=session_token,
-                at=access_token,
-                at_expires=at_expires,
-                **common_fields,
-            )
-            token_id = int(existing.id)
-            added = 0
-            updated = 1
-        else:
-            created = await token_manager.add_token(
-                st=session_token,
-                remark="Imported by Chrome extension",
-                image_enabled=True,
-                video_enabled=True,
-                image_concurrency=-1,
-                video_concurrency=-1,
-                **common_fields,
-            )
-            token_id = int(created.id)
-            added = 1
-            updated = 0
-
-        await database.update_token(
-            token_id,
-            last_st_refresh_result="Chrome extension synchronized the current Google account",
-        )
-
-        if auth_ctx.key_id is not None:
-            assigned_accounts = set(await database.get_api_key_account_ids(auth_ctx.key_id))
-            if token_id not in assigned_accounts:
-                assigned_accounts.add(token_id)
-                await database.update_api_key(
-                    auth_ctx.key_id,
-                    account_ids=sorted(assigned_accounts),
-                )
-                if auth_core.api_key_manager is not None:
-                    await auth_core.api_key_manager.invalidate(auth_ctx.key_id)
-
-        return {
-            "success": True,
-            "added": added,
-            "updated": updated,
-            "email": email,
-            "token_id": token_id,
-            "expires": expires,
-        }
-    except HTTPException:
-        raise
-    except Exception as exc:
-        debug_logger.log_error(f"[EXTENSION_IMPORT] Current Google account import failed: {exc}")
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+from ..transport.adobe import (
+    fetch_task_tracker_contributor_assets,
+    fetch_task_tracker_keyword_search,
+    generate_cloning_prompts,
+    generate_cloning_video_prompt,
+    generate_metadata,
+    router as adobe_router,
+)
 
 
-@router.post("/api/extension/generation-upload")
-async def extension_generation_upload(
-    request: Request,
-    upload_id: str = Query(..., description="Slot id from submit_generation message"),
-    upload_secret: str = Query(..., description="One-time secret for this upload"),
-):
-    """Receive large extension generation HTTP response bodies (side-channel for captcha_ws)."""
-    body = await request.body()
-    if len(body) > int(app_config.extension_generation_upload_max_bytes):
-        raise HTTPException(status_code=413, detail="body_too_large")
-    svc = await ExtensionCaptchaService.get_instance()
-    ok, err = await svc.ingest_generation_upload_body(upload_id, upload_secret, body)
-    if not ok:
-        raise HTTPException(status_code=400, detail=err)
-    return Response(status_code=204)
-
-
-@router.get("/api/extension/metadata-session")
-async def extension_metadata_session(
-    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
-):
-    """Validate that a managed key may activate the Flow2 Metadata extension."""
-    if auth_ctx.is_legacy or auth_ctx.key_id is None:
-        raise HTTPException(status_code=403, detail="Managed API key required")
-    _require_managed_scope(auth_ctx, "adobe:metadata")
-    return {
-        "active": True,
-        "service": "flow2-metadata",
-        "keyLabel": auth_ctx.key_label,
-        "capabilities": ["adobe:metadata"],
-    }
-
-
-@router.get("/api/cache/file")
-async def list_cache_files_for_key(
-    limit: int = Query(100, ge=1, le=500),
-    offset: int = Query(0, ge=0),
-    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
-):
-    """List cache file metadata rows owned by this managed API key."""
-    if auth_ctx.key_id is None:
-        raise HTTPException(status_code=403, detail="Managed API key required")
-    handler = _ensure_generation_handler()
-    kid = auth_ctx.key_id
-    lim = int(limit)
-    off = int(offset)
-    total = await handler.db.count_cache_files_for_api_key(kid)
-    rows = await handler.db.list_cache_files_for_api_key(kid, limit=lim, offset=off)
-    data = [_cache_file_row_to_list_item(r) for r in rows]
-    return {
-        "object": "list",
-        "data": data,
-        "pagination": {
-            "total": total,
-            "limit": lim,
-            "offset": off,
-            "has_more": off + len(data) < total,
-        },
-    }
-
-
-@router.get("/api/cache/file/{project_id}")
-async def list_cache_files_for_key_project(
-    project_id: str,
-    limit: int = Query(100, ge=1, le=500),
-    offset: int = Query(0, ge=0),
-    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
-):
-    """List cache file metadata for one Flow project UUID under this managed API key."""
-    if auth_ctx.key_id is None:
-        raise HTTPException(status_code=403, detail="Managed API key required")
-    pid = project_id.strip()
-    if not pid:
-        raise HTTPException(status_code=400, detail="project_id is required")
-    handler = _ensure_generation_handler()
-    proj = await handler.db.get_project_by_id(pid, auth_ctx.key_id)
-    if not proj:
-        raise HTTPException(status_code=400, detail="project_id not found for this API key")
-    tid = int(proj.token_id)
-    if tid not in auth_ctx.allowed_accounts:
-        raise HTTPException(status_code=400, detail="project_id is not assigned to this API key")
-    kid = auth_ctx.key_id
-    lim = int(limit)
-    off = int(offset)
-    total = await handler.db.count_cache_files_for_api_key_project(kid, pid)
-    rows = await handler.db.list_cache_files_for_api_key_project(
-        kid, pid, limit=lim, offset=off
-    )
-    data = [_cache_file_row_to_list_item(r) for r in rows]
-    return {
-        "object": "list",
-        "data": data,
-        "pagination": {
-            "total": total,
-            "limit": lim,
-            "offset": off,
-            "has_more": off + len(data) < total,
-        },
-    }
-
-
-@router.get("/api/cache/blob/{filename}")
-async def get_cached_blob(
-    filename: str,
-    request: Request,
-    project_id: Optional[str] = Query(None),
-    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
-):
-    """Stream a cache file owned by this managed API key (use list endpoints to discover filenames)."""
-    handler = _ensure_generation_handler()
-    if auth_ctx.key_id is None:
-        raise HTTPException(status_code=403, detail="Managed API key required")
-    safe_name = Path(filename).name
-    metadata = await handler.db.get_cache_file_for_api_key(safe_name, auth_ctx.key_id)
-    if not metadata:
-        raise HTTPException(status_code=403, detail="Cache file not owned by this API key")
-    meta_flow = _strip_optional_project_id(metadata.get("flow_project_id"))
-    if meta_flow:
-        q = _strip_optional_project_id(project_id)
-        if not q or q != meta_flow:
-            raise HTTPException(
-                status_code=403,
-                detail="project_id query parameter required and must match the cache entry",
-            )
-        proj = await handler.db.get_project_by_id(q, auth_ctx.key_id)
-        if not proj:
-            raise HTTPException(status_code=400, detail="project_id not found for this API key")
-        tid = int(proj.token_id)
-        if tid not in auth_ctx.allowed_accounts:
-            raise HTTPException(status_code=400, detail="project_id is not assigned to this API key")
-    try:
-        cached = await handler.file_cache.open_cached(
-            safe_name,
-            request.headers.get("range") if request else None,
-        )
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Cache file not found")
-    except ValueError as exc:
-        raise HTTPException(status_code=416, detail=str(exc))
-    except Exception as exc:
-        if "404" in str(exc) or "Not Found" in str(exc):
-            raise HTTPException(status_code=404, detail="Cache file not found")
-        raise
-    headers = {
-        "Accept-Ranges": "bytes",
-        "Content-Length": str(cached.content_length),
-        "Content-Disposition": f'inline; filename="{safe_name}"',
-    }
-    if cached.content_range:
-        headers["Content-Range"] = cached.content_range
-    if cached.etag:
-        headers["ETag"] = cached.etag
-    if cached.last_modified:
-        headers["Last-Modified"] = cached.last_modified.strftime("%a, %d %b %Y %H:%M:%S GMT")
-    return StreamingResponse(
-        cached.body,
-        status_code=cached.status_code,
-        media_type=cached.content_type,
-        headers=headers,
-    )
-
-
-@router.post("/api/generate-cloning-prompts")
-async def generate_cloning_prompts(
-    request: GenerateCloningPromptsRequest,
-    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
-):
-    """Generate cloning image prompts for one or more images."""
-    if auth_ctx.key_id is None:
-        raise HTTPException(status_code=403, detail="Managed API key required")
-    _require_managed_scope(auth_ctx, "adobe:cloning")
-
-    request_payload = request.model_dump()
-
-    async def _run():
-        image_items = []
-        for item in request.images:
-            image_items.append(
-                {
-                    "id": item.id,
-                    "title": item.title,
-                    "image_url": item.image_url,
-                    "image_base64": item.image_base64,
-                    "mimeType": item.mimeType,
-                }
-            )
-        return await cloning_metadata_service.generate_cloning_prompts(
-            images=image_items,
-            provider=request.provider,
-            model=request.model,
-            fallback_models=request.fallbackModels,
-        )
-
-    return await _logged_managed_adobe_call(
-        auth_ctx, LOG_OP_ADOBE_CLONING_PROMPTS, request_payload, _run
-    )
-
-
-@router.post("/api/generate-cloning-video-prompt")
-async def generate_cloning_video_prompt(
-    request: GenerateCloningVideoPromptRequest,
-    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
-):
-    """Generate a video cloning prompt JSON string from image clone JSON."""
-    if auth_ctx.key_id is None:
-        raise HTTPException(status_code=403, detail="Managed API key required")
-    _require_managed_scope(auth_ctx, "adobe:cloning")
-
-    extras = request.model_extra or {}
-    request_payload = {**request.model_dump(), **(extras or {})}
-
-    async def _run():
-        return await cloning_metadata_service.generate_cloning_video_prompt(
-            payload={
-                "imageClonePrompt": request.imageClonePrompt,
-                "cameraMotion": request.cameraMotion,
-                "duration": request.duration,
-                "negativePrompt": request.negativePrompt or "",
-                "title": request.title or "",
-                "image_base64": request.image_base64,
-                "mimeType": request.mimeType,
-            },
-            provider=extras.get("provider"),
-            model=extras.get("model"),
-            fallback_models=extras.get("fallbackModels"),
-        )
-
-    return await _logged_managed_adobe_call(
-        auth_ctx, LOG_OP_ADOBE_CLONING_VIDEO, request_payload, _run
-    )
-
-
-@router.post("/api/generate-metadata")
-async def generate_metadata(
-    request: GenerateMetadataRequest,
-    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
-):
-    """Generate stock metadata using request-provided metadata settings."""
-    if auth_ctx.key_id is None:
-        raise HTTPException(status_code=403, detail="Managed API key required")
-    _require_managed_scope(auth_ctx, "adobe:metadata")
-
-    inner = {
-        "image_url": request.image_url,
-        "image_base64": request.image_base64,
-        "metadataSettings": request.metadataSettings.model_dump(),
-        "dnaNoBgWorkflowActive": request.dnaNoBgWorkflowActive,
-        "backend": request.backend,
-        "model": request.model,
-        "fallbackModels": request.fallbackModels or [],
-    }
-    request_payload = request.model_dump()
-
-    async def _run():
-        return await cloning_metadata_service.generate_metadata(inner)
-
-    return await _logged_managed_adobe_call(
-        auth_ctx, LOG_OP_ADOBE_METADATA, request_payload, _run
-    )
+router.include_router(adobe_router)
 
 
 @router.get("/v1/models")
@@ -3646,68 +3041,3 @@ async def get_allowed_tokens(
         "api_key_label": auth_ctx.key_label,
         "allowed_tokens": tokens_info
     }
-
-
-@router.post("/api/tracker/contributor")
-async def fetch_task_tracker_contributor_assets(
-    request: TaskTrackerContributorFetchRequest,
-    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
-):
-    """Fetch TAS contributor-search results via direct HTTPS to tastracker.com (curl-cffi)."""
-    if auth_ctx.key_id is None:
-        raise HTTPException(status_code=403, detail="Managed API key required")
-    _require_managed_scope(auth_ctx, "adobe:tracker")
-
-    request_payload = request.model_dump()
-
-    async def _run():
-        try:
-            return await task_tracker_service.fetch_contributor_assets(
-                search_id=request.search_id,
-                order=request.order or "creation",
-                content_type=request.content_type or "all",
-                pages=request.pages,
-                title_filter=request.title_filter or "",
-                generative_ai=request.generative_ai or "all",
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-        except Exception as exc:
-            debug_logger.log_error(f"Tracker contributor fetch failed: {exc}")
-            raise HTTPException(status_code=500, detail=f"Internal Error: {str(exc)}")
-
-    return await _logged_managed_adobe_call(
-        auth_ctx, LOG_OP_ADOBE_TRACKER_CONTRIBUTOR, request_payload, _run
-    )
-
-
-@router.post("/api/tracker/keyword")
-async def fetch_task_tracker_keyword_search(
-    request: TaskTrackerKeywordSearchRequest,
-    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
-):
-    """Proxy TAS keyword search (GET /api/search); returns upstream JSON (e.g. images array)."""
-    if auth_ctx.key_id is None:
-        raise HTTPException(status_code=403, detail="Managed API key required")
-    _require_managed_scope(auth_ctx, "adobe:tracker")
-
-    request_payload = request.model_dump()
-
-    async def _run():
-        try:
-            return await task_tracker_service.fetch_keyword_search(
-                q=request.q,
-                order=request.order or "relevance",
-                content_type=request.content_type or "all",
-                pages=request.pages,
-                generative_ai=request.generative_ai or "all",
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-        except Exception as exc:
-            debug_logger.log_error(f"Tracker keyword search failed: {exc}")
-            raise HTTPException(status_code=500, detail=f"Internal Error: {str(exc)}")
-
-    return await _logged_managed_adobe_call(
-        auth_ctx, LOG_OP_ADOBE_TRACKER_KEYWORD, request_payload, _run
-    )
