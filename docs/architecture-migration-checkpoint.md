@@ -1,0 +1,78 @@
+# Architecture Migration Safety Checkpoint
+
+Checkpoint date: 2026-08-08
+
+This document records the recovery point created before the Flow2API architecture migration. It does not authorize the Git history rewrite; that operation remains behind a separate explicit-confirmation gate.
+
+## Repository recovery point
+
+- Repository: `agmmnn/flow2api`
+- Branch: `main`
+- Commit: `5b140e1d99b5dbed9f23efd642841be71ee54712`
+- Commit subject: `docs: add architecture migration plan`
+- Remote state at checkpoint: local `main` matched `origin/main`
+- Tags: none
+- Open pull requests: none
+- GitHub collaborators with push access: only `agmmnn`
+- GitHub repository type: fork of `cipher-x-sudo/flow2api`
+
+The following old local branches were fully contained by `main` and had no unique commits:
+
+- `codex/base-ui-migration`
+- `codex/project-pinning`
+
+## Remotes at checkpoint
+
+| Remote | URL | Purpose |
+| --- | --- | --- |
+| `origin` | `https://github.com/agmmnn/flow2api.git` | The only rewrite/push target |
+| `upstream` | `https://github.com/cipher-x-sudo/flow2api.git` | Read-only reference |
+| `original` | `https://github.com/TheSmallHanCat/flow2api.git` | Read-only reference |
+
+No rewritten refs may be pushed to `upstream` or `original`.
+Their local push URLs were set to `DISABLED` after the checkpoint inventory; fetch access remains unchanged.
+
+## Git storage before cleanup
+
+- Packed Git objects: approximately 395.25 MiB
+- Loose Git objects: approximately 1.52 MiB
+- Tracked `niches/` files: 34
+- Tracked `niches/` content size: 284,390,524 bytes
+- Commit that introduced the directory: `8de6c2dc6f722d66a010f403283350d775db5355`
+- Commit subject: `Add Runway integration support`
+
+## External asset backup
+
+- Archive: `/Users/agm/Documents/Github/flow2api-niches-backup-2026-08-08.tar.gz`
+- Archive size: approximately 270 MiB compressed
+- SHA-256: `2d66581cc55103e3984c626c5a7cb022d324183529a2bdb458b8fe45aa1f8a2d`
+- Verification: archive extraction succeeded and all 34 tracked files matched their source SHA-256 checksums
+- Additional archived local file: `niches/.DS_Store` (not tracked by Git)
+
+Verify the archive before recovery:
+
+```bash
+shasum -a 256 /Users/agm/Documents/Github/flow2api-niches-backup-2026-08-08.tar.gz
+tar -tzf /Users/agm/Documents/Github/flow2api-niches-backup-2026-08-08.tar.gz
+```
+
+Restore the content into a chosen directory:
+
+```bash
+tar -xzf /Users/agm/Documents/Github/flow2api-niches-backup-2026-08-08.tar.gz -C /path/to/restore
+```
+
+## History-rewrite gate
+
+Before rewriting history:
+
+- [x] Architecture plan committed and pushed.
+- [x] `main` recovery commit recorded.
+- [x] Open pull requests checked.
+- [x] Push collaborators checked.
+- [x] `niches/` history and size inventoried.
+- [x] External archive created.
+- [x] External archive extracted and verified.
+- [ ] User explicitly approves rewriting and force-pushing the fork's `main` history.
+
+The rewrite must be executed from a fresh, origin-only clone. The current multi-remote checkout must not be used as the rewrite workspace.

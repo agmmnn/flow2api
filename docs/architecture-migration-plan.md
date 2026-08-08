@@ -111,12 +111,12 @@ HTTP ownership belongs only to `transport/`. Rich domain interfaces are reserved
 
 ## Phase 1: Safety checkpoint
 
-- [ ] Record the current commit, branches, tags, and remotes.
-- [ ] Confirm `main` is clean and pushed.
-- [ ] Check for active pull requests or collaborators relying on current commit hashes.
-- [ ] Inventory the tracked `niches/` assets.
-- [ ] Preserve those assets in an explicitly approved external location.
-- [ ] Document recovery steps and the pre-rewrite commit ID.
+- [x] Record the current commit, branches, tags, and remotes.
+- [x] Confirm `main` is clean and pushed.
+- [x] Check for active pull requests or collaborators relying on current commit hashes.
+- [x] Inventory the tracked `niches/` assets.
+- [x] Preserve those assets in an external verified archive.
+- [x] Document recovery steps and the pre-rewrite commit ID.
 
 Exit criteria:
 
