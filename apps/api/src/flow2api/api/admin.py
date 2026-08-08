@@ -45,7 +45,7 @@ from ..services.geminigen_service import (
     GEMINIGEN_IMAGE_GEN_MAX_DAILY,
     GeminiGenService,
 )
-from ..services.generation_handler import MODEL_CONFIG
+from ..services.generation_handler import MODEL_CONFIG, GenerationHandler
 from ..services.browser_profile_service import BrowserProfileService
 from ..services.browser_metrics_cleanup import get_last_browser_metrics_cleanup_stats
 from ..services.google_drive_backup import GoogleDriveBackupError, GoogleDriveBackupService
@@ -67,6 +67,7 @@ api_key_manager: Optional[ApiKeyManager] = None
 runway_service: Optional[RunwayService] = None
 geminigen_service: Optional[GeminiGenService] = None
 google_drive_backup_service: Optional[GoogleDriveBackupService] = None
+generation_handler: Optional[GenerationHandler] = None
 captcha_runtime_prepare_tasks: Dict[str, asyncio.Task] = {}
 
 # Admin session TTLs (seconds)
@@ -785,9 +786,10 @@ def set_dependencies(
     rs: Optional[RunwayService] = None,
     gs: Optional[GeminiGenService] = None,
     gdbs: Optional[GoogleDriveBackupService] = None,
+    gh: Optional[GenerationHandler] = None,
 ):
     """Set service instances"""
-    global token_manager, proxy_manager, db, concurrency_manager, api_key_manager, runway_service, geminigen_service, google_drive_backup_service
+    global token_manager, proxy_manager, db, concurrency_manager, api_key_manager, runway_service, geminigen_service, google_drive_backup_service, generation_handler
     token_manager = tm
     proxy_manager = pm
     db = database
@@ -796,6 +798,7 @@ def set_dependencies(
     runway_service = rs
     geminigen_service = gs
     google_drive_backup_service = gdbs
+    generation_handler = gh
 
 
 # ========== Request Models ==========
@@ -4277,9 +4280,7 @@ async def delete_managed_api_key(
     cache_rows = await db.list_cache_files_for_api_key_cleanup(key_id)
     cache_objects_deleted = 0
     if cache_rows:
-        from . import routes
-
-        file_cache = getattr(getattr(routes, "generation_handler", None), "file_cache", None)
+        file_cache = getattr(generation_handler, "file_cache", None)
         if file_cache is None or getattr(file_cache, "backend", None) is None:
             raise HTTPException(status_code=503, detail="Cache storage is unavailable; managed API key was not deleted")
         try:
@@ -4635,8 +4636,8 @@ async def update_protocol_token_refresh_config(
 
 async def _sync_runtime_cache_config():
     from . import routes
-    if routes.generation_handler and routes.generation_handler.file_cache:
-        file_cache = routes.generation_handler.file_cache
+    if generation_handler and generation_handler.file_cache:
+        file_cache = generation_handler.file_cache
         file_cache.set_timeout(config.cache_timeout)
         await file_cache.configure_backend(
             config.cache_provider,
@@ -4653,7 +4654,7 @@ async def get_cache_config(token: str = Depends(verify_admin_token)):
     cache_config = await db.get_cache_config()
     cache_base_url = config.cache_base_url
     from . import routes
-    file_cache = routes.generation_handler.file_cache if routes.generation_handler else None
+    file_cache = generation_handler.file_cache if generation_handler else None
     do_env = file_cache.digitalocean_environment(cache_config.cache_delivery_mode) if file_cache else {}
 
     # Calculate effective base URL
@@ -4699,9 +4700,9 @@ async def get_cache_config(token: str = Depends(verify_admin_token)):
 async def get_cache_stats(token: str = Depends(verify_admin_token)):
     """Disk usage for the file cache directory."""
     from . import routes
-    if not routes.generation_handler or not routes.generation_handler.file_cache:
+    if not generation_handler or not generation_handler.file_cache:
         raise HTTPException(status_code=503, detail="File cache not initialized")
-    stats = await routes.generation_handler.file_cache.get_stats()
+    stats = await generation_handler.file_cache.get_stats()
     return {"success": True, **stats}
 
 
@@ -4709,9 +4710,9 @@ async def get_cache_stats(token: str = Depends(verify_admin_token)):
 async def list_cache_files(token: str = Depends(verify_admin_token)):
     """List cached files for admin gallery (names, sizes, image/video/other)."""
     from . import routes
-    if not routes.generation_handler or not routes.generation_handler.file_cache:
+    if not generation_handler or not generation_handler.file_cache:
         raise HTTPException(status_code=503, detail="File cache not initialized")
-    files = await routes.generation_handler.file_cache.list_files()
+    files = await generation_handler.file_cache.list_files()
     return {"success": True, "files": files}
 
 
@@ -4724,11 +4725,11 @@ async def get_cache_file_admin_preview(
     """Stream a cache file for the admin UI (Bearer auth). Plain <img src> cannot use managed-key /api/cache/blob/… URLs."""
     from . import routes
 
-    if not routes.generation_handler or not routes.generation_handler.file_cache:
+    if not generation_handler or not generation_handler.file_cache:
         raise HTTPException(status_code=503, detail="File cache not initialized")
     safe_name = Path(filename).name
     try:
-        cached = await routes.generation_handler.file_cache.open_cached(
+        cached = await generation_handler.file_cache.open_cached(
             safe_name, request.headers.get("range")
         )
     except FileNotFoundError:
@@ -4756,10 +4757,10 @@ async def get_cache_file_admin_preview(
 async def clear_cache_files(token: str = Depends(verify_admin_token)):
     """Delete all files in the cache directory (admin only)."""
     from . import routes
-    if not routes.generation_handler or not routes.generation_handler.file_cache:
+    if not generation_handler or not generation_handler.file_cache:
         raise HTTPException(status_code=503, detail="File cache not initialized")
     try:
-        file_cache = routes.generation_handler.file_cache
+        file_cache = generation_handler.file_cache
         removed_count, removed_bytes = await file_cache.backend.clear()
         if file_cache.db is not None and hasattr(file_cache.db, "delete_all_cache_file_metadata"):
             await file_cache.db.delete_all_cache_file_metadata()
@@ -4827,7 +4828,7 @@ async def update_cache_config_full(
             )
 
     from . import routes
-    file_cache = routes.generation_handler.file_cache if routes.generation_handler else None
+    file_cache = generation_handler.file_cache if generation_handler else None
     current = await db.get_cache_config()
     target_provider = provider or current.cache_provider
     target_mode = delivery_mode or current.cache_delivery_mode
@@ -4860,12 +4861,12 @@ async def update_cache_config_full(
 @router.post("/api/cache/provider/test")
 async def test_cache_provider(request: dict, token: str = Depends(verify_admin_token)):
     from . import routes
-    if not routes.generation_handler or not routes.generation_handler.file_cache:
+    if not generation_handler or not generation_handler.file_cache:
         raise HTTPException(status_code=503, detail="File cache not initialized")
     provider = str(request.get("provider") or "digitalocean").strip().lower()
     delivery_mode = str(request.get("delivery_mode") or "proxy").strip().lower()
     try:
-        status = await routes.generation_handler.file_cache.validate_backend(provider, delivery_mode)
+        status = await generation_handler.file_cache.validate_backend(provider, delivery_mode)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Provider validation failed: {exc}")
     return {"success": True, "status": status}

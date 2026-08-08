@@ -97,10 +97,6 @@ GEMINI_STATUS_MAP = {
     504: "DEADLINE_EXCEEDED",
 }
 
-# Dependency injection will be set up in main.py
-generation_handler: GenerationHandler = None
-runway_service: RunwayService = None
-geminigen_service: GeminiGenService = None
 _llm_chain = LlmProviderChain()
 cloning_metadata_service = CloningMetadataService(_llm_chain)
 task_tracker_service = TaskTrackerService()
@@ -125,18 +121,6 @@ def _strip_optional_project_id(value: Optional[str]) -> Optional[str]:
     return s or None
 
 
-def set_generation_handler(handler: GenerationHandler):
-    """Set generation handler instance."""
-    global generation_handler
-    generation_handler = handler
-
-
-def set_runway_service(service: RunwayService):
-    """Set Runway service instance."""
-    global runway_service
-    runway_service = service
-
-
 from ..transport.auth import (
     get_allowed_tokens,
     report_client_presence,
@@ -145,30 +129,6 @@ from ..transport.auth import (
 
 
 router.include_router(auth_router)
-
-
-def set_geminigen_service(service: GeminiGenService):
-    """Set GeminiGen service instance."""
-    global geminigen_service
-    geminigen_service = service
-
-
-def _ensure_generation_handler() -> GenerationHandler:
-    if generation_handler is None:
-        raise HTTPException(status_code=500, detail="Generation handler not initialized")
-    return generation_handler
-
-
-def _ensure_runway_service() -> RunwayService:
-    if runway_service is None:
-        raise HTTPException(status_code=500, detail="Runway service not initialized")
-    return runway_service
-
-
-def _ensure_geminigen_service() -> GeminiGenService:
-    if geminigen_service is None:
-        raise HTTPException(status_code=500, detail="GeminiGen service not initialized")
-    return geminigen_service
 
 
 LOG_OP_ADOBE_CLONING_PROMPTS = "adobe:cloning_prompts"
@@ -207,10 +167,10 @@ async def _logged_managed_adobe_call(
     operation: str,
     request_payload: Any,
     coro_factory,
+    database: Any,
 ):
     """Run async callable and persist one request_logs row (managed keys only)."""
-    handler = _ensure_generation_handler()
-    ldb = handler.db
+    ldb = database
     started = time.perf_counter()
     status_code = 200
     response_payload: Any = None
@@ -420,15 +380,16 @@ def _extract_cache_filename(url: str) -> Optional[str]:
 
 async def retrieve_image_data(
     url: str,
+    handler: GenerationHandler,
     api_key_id: Optional[int] = None,
     allowed_token_ids: Optional[Set[int]] = None,
 ) -> Optional[bytes]:
     """Read image bytes from protected cache endpoint or remote URL."""
-    file_cache = getattr(generation_handler, "file_cache", None)
+    file_cache = getattr(handler, "file_cache", None)
     try:
         cache_filename = _extract_cache_filename(url)
         if cache_filename and file_cache and api_key_id is not None:
-            db = getattr(generation_handler, "db", None)
+            db = getattr(handler, "db", None)
             if db is None:
                 return None
             metadata = await db.get_cache_file_for_api_key(cache_filename, api_key_id)
@@ -489,6 +450,7 @@ async def retrieve_image_data(
 
 async def _load_image_bytes_from_uri(
     uri: str,
+    handler: GenerationHandler,
     api_key_id: Optional[int] = None,
     allowed_token_ids: Optional[Set[int]] = None,
 ) -> bytes:
@@ -506,7 +468,7 @@ async def _load_image_bytes_from_uri(
         or "/api/cache/file/" in uri
     ):
         image_bytes = await retrieve_image_data(
-            uri, api_key_id=api_key_id, allowed_token_ids=allowed_token_ids
+            uri, handler, api_key_id=api_key_id, allowed_token_ids=allowed_token_ids
         )
         if image_bytes:
             return image_bytes
@@ -568,6 +530,7 @@ def _sanitize_media_prompt(prompt: str) -> str:
 
 async def _extract_prompt_and_images_from_openai_messages(
     messages: List[ChatMessage],
+    handler: GenerationHandler,
     api_key_id: Optional[int] = None,
     allowed_token_ids: Optional[Set[int]] = None,
 ) -> tuple[str, List[bytes], Optional[str]]:
@@ -594,6 +557,7 @@ async def _extract_prompt_and_images_from_openai_messages(
                 images.append(
                     await _load_image_bytes_from_uri(
                         image_url,
+                        handler,
                         api_key_id=api_key_id,
                         allowed_token_ids=allowed_token_ids,
                     )
@@ -607,6 +571,7 @@ async def _append_openai_reference_images(
     model: str,
     messages: List[ChatMessage],
     images: List[bytes],
+    handler: GenerationHandler,
     api_key_id: Optional[int] = None,
     allowed_token_ids: Optional[Set[int]] = None,
 ) -> List[bytes]:
@@ -632,6 +597,7 @@ async def _append_openai_reference_images(
                 try:
                     downloaded_bytes = await retrieve_image_data(
                         image_url,
+                        handler,
                         api_key_id=api_key_id,
                         allowed_token_ids=allowed_token_ids,
                     )
@@ -653,6 +619,7 @@ async def _append_openai_reference_images(
 
 async def _extract_prompt_and_images_from_gemini_contents(
     contents: List[GeminiContent],
+    handler: GenerationHandler,
     api_key_id: Optional[int] = None,
     allowed_token_ids: Optional[Set[int]] = None,
 ) -> tuple[str, List[bytes]]:
@@ -690,6 +657,7 @@ async def _extract_prompt_and_images_from_gemini_contents(
             images.append(
                 await _load_image_bytes_from_uri(
                     part.fileData.fileUri,
+                    handler,
                     api_key_id=api_key_id,
                     allowed_token_ids=allowed_token_ids,
                 )
@@ -732,12 +700,14 @@ def _get_request_base_url(request: Request) -> Optional[str]:
 
 async def _normalize_openai_request(
     request: ChatCompletionRequest,
+    handler: GenerationHandler,
     api_key_id: Optional[int] = None,
     allowed_token_ids: Optional[Set[int]] = None,
 ) -> NormalizedGenerationRequest:
     if request.messages:
         prompt, images, video_media_id = await _extract_prompt_and_images_from_openai_messages(
             request.messages,
+            handler,
             api_key_id=api_key_id,
             allowed_token_ids=allowed_token_ids,
         )
@@ -745,6 +715,7 @@ async def _normalize_openai_request(
             images.append(
                 await _load_image_bytes_from_uri(
                     request.image,
+                    handler,
                     api_key_id=api_key_id,
                     allowed_token_ids=allowed_token_ids,
                 )
@@ -755,6 +726,7 @@ async def _normalize_openai_request(
             model,
             request.messages,
             images,
+            handler,
             api_key_id=api_key_id,
             allowed_token_ids=allowed_token_ids,
         )
@@ -778,6 +750,7 @@ async def _normalize_openai_request(
         normalized = await _normalize_gemini_request(
             request.model,
             gemini_request,
+            handler,
             api_key_id=api_key_id,
             allowed_token_ids=allowed_token_ids,
         )
@@ -792,11 +765,13 @@ async def _normalize_openai_request(
 async def _normalize_gemini_request(
     model: str,
     request: GeminiGenerateContentRequest,
+    handler: GenerationHandler,
     api_key_id: Optional[int] = None,
     allowed_token_ids: Optional[Set[int]] = None,
 ) -> NormalizedGenerationRequest:
     prompt, images = await _extract_prompt_and_images_from_gemini_contents(
         request.contents,
+        handler,
         api_key_id=api_key_id,
         allowed_token_ids=allowed_token_ids,
     )
@@ -828,13 +803,13 @@ async def _normalize_gemini_request(
 
 async def _collect_non_stream_result(
     normalized: NormalizedGenerationRequest,
+    handler: GenerationHandler,
     base_url_override: Optional[str] = None,
     allowed_token_ids: Optional[set[int]] = None,
     selection_context: Optional[Dict[str, Any]] = None,
     api_key_id: Optional[int] = None,
     poll_task_id: Optional[str] = None,
 ) -> str:
-    handler = _ensure_generation_handler()
     result = None
     async for chunk in handler.handle_generation(
         model=normalized.model,
@@ -1060,8 +1035,8 @@ async def _start_runway_from_openai_request(
     request: ChatCompletionRequest,
     normalized: NormalizedGenerationRequest,
     api_key_id: Optional[int],
+    service: RunwayService,
 ) -> RunwayTask:
-    service = _ensure_runway_service()
     params = _runway_request_params_from_openai(request, normalized)
     return await service.start_task(
         public_model_id=normalized.model,
@@ -1088,8 +1063,8 @@ async def _start_geminigen_from_request(
     request: Any,
     normalized: NormalizedGenerationRequest,
     api_key_id: Optional[int],
+    service: GeminiGenService,
 ) -> GeminiGenTask:
-    service = _ensure_geminigen_service()
     return await service.start_task(
         public_model_id=normalized.model,
         prompt=normalized.prompt,
@@ -1103,8 +1078,8 @@ async def _enqueue_geminigen_from_request(
     request: Any,
     normalized: NormalizedGenerationRequest,
     api_key_id: Optional[int],
+    service: GeminiGenService,
 ) -> GeminiGenTask:
-    service = _ensure_geminigen_service()
     return await service.enqueue_task(
         public_model_id=normalized.model,
         prompt=normalized.prompt,
@@ -1120,9 +1095,9 @@ async def _geminigen_openai_non_stream(
     *,
     api_key_id: Optional[int],
     base_url: Optional[str],
+    service: GeminiGenService,
 ) -> Dict[str, Any]:
-    service = _ensure_geminigen_service()
-    task = await _start_geminigen_from_request(request, normalized, api_key_id)
+    task = await _start_geminigen_from_request(request, normalized, api_key_id, service)
     final = await service.wait_for_task(task.job_id, api_key_id=api_key_id, base_url=base_url)
     return service.task_to_openai_payload(final)
 
@@ -1133,10 +1108,10 @@ async def _iterate_geminigen_openai_stream(
     *,
     api_key_id: Optional[int],
     base_url: Optional[str],
+    service: GeminiGenService,
 ):
-    service = _ensure_geminigen_service()
     yield _geminigen_openai_chunk("GeminiGen task submitted.\n", role="assistant")
-    task = await _start_geminigen_from_request(request, normalized, api_key_id)
+    task = await _start_geminigen_from_request(request, normalized, api_key_id, service)
     last_progress = -1
     while True:
         current = await service.poll_task(task.job_id, api_key_id=api_key_id, base_url=base_url)
@@ -1163,9 +1138,9 @@ async def _runway_openai_non_stream(
     *,
     api_key_id: Optional[int],
     base_url: Optional[str],
+    service: RunwayService,
 ) -> Dict[str, Any]:
-    service = _ensure_runway_service()
-    task = await _start_runway_from_openai_request(request, normalized, api_key_id)
+    task = await _start_runway_from_openai_request(request, normalized, api_key_id, service)
     final = await service.wait_for_task(task.job_id, api_key_id=api_key_id, base_url=base_url)
     return service.task_to_openai_payload(final)
 
@@ -1176,10 +1151,10 @@ async def _iterate_runway_openai_stream(
     *,
     api_key_id: Optional[int],
     base_url: Optional[str],
+    service: RunwayService,
 ):
-    service = _ensure_runway_service()
     yield _runway_openai_chunk("Runway task submitted.\n", role="assistant")
-    task = await _start_runway_from_openai_request(request, normalized, api_key_id)
+    task = await _start_runway_from_openai_request(request, normalized, api_key_id, service)
     last_progress = -1
     while True:
         current = await service.poll_task(task.job_id, api_key_id=api_key_id, base_url=base_url)
@@ -1448,8 +1423,8 @@ async def _run_async_generation_task(
     allowed_token_ids: Optional[set[int]],
     selection_context: Optional[Dict[str, Any]],
     api_key_id: Optional[int],
+    handler: GenerationHandler,
 ) -> None:
-    handler = _ensure_generation_handler()
     debug_logger.log_info(
         "[ASYNC JOB] start generation task: "
         f"task_id={task_id}, model={normalized.model}, "
@@ -1460,6 +1435,7 @@ async def _run_async_generation_task(
     try:
         raw_result = await _collect_non_stream_result(
             normalized,
+            handler,
             base_url_override,
             allowed_token_ids,
             selection_context,
@@ -1578,6 +1554,7 @@ def _inject_projectid_into_openai_sse_chunk(
 
 async def _build_image_parts_from_uri(
     uri: str,
+    handler: GenerationHandler,
     api_key_id: Optional[int] = None,
     allowed_token_ids: Optional[Set[int]] = None,
 ) -> List[Dict[str, Any]]:
@@ -1588,7 +1565,7 @@ async def _build_image_parts_from_uri(
             return [{"inlineData": {"mimeType": mime_type, "data": match.group("data")}}]
 
     image_bytes = await retrieve_image_data(
-        uri, api_key_id=api_key_id, allowed_token_ids=allowed_token_ids
+        uri, handler, api_key_id=api_key_id, allowed_token_ids=allowed_token_ids
     )
     if image_bytes:
         mime_type = _detect_image_mime_type(
@@ -1628,6 +1605,7 @@ def _build_video_parts_from_uri(uri: str) -> List[Dict[str, Any]]:
 
 async def _build_gemini_parts_from_output(
     output: str,
+    handler: GenerationHandler,
     api_key_id: Optional[int] = None,
     allowed_token_ids: Optional[Set[int]] = None,
 ) -> List[Dict[str, Any]]:
@@ -1640,7 +1618,7 @@ async def _build_gemini_parts_from_output(
         for uri in image_matches:
             parts.extend(
                 await _build_image_parts_from_uri(
-                    uri, api_key_id=api_key_id, allowed_token_ids=allowed_token_ids
+                    uri, handler, api_key_id=api_key_id, allowed_token_ids=allowed_token_ids
                 )
             )
         return parts
@@ -1662,6 +1640,7 @@ async def _build_gemini_parts_from_output(
 async def _build_gemini_success_payload(
     payload: Dict[str, Any],
     response_model: str,
+    handler: GenerationHandler,
     api_key_id: Optional[int] = None,
     allowed_token_ids: Optional[Set[int]] = None,
     project_id: Optional[str] = None,
@@ -1674,6 +1653,7 @@ async def _build_gemini_success_payload(
                     "role": "model",
                     "parts": await _build_gemini_parts_from_output(
                         output,
+                        handler,
                         api_key_id=api_key_id,
                         allowed_token_ids=allowed_token_ids,
                     ),
@@ -1701,6 +1681,7 @@ def _normalize_finish_reason(reason: Optional[str]) -> Optional[str]:
 async def _convert_openai_stream_chunk_to_gemini_event(
     payload: Dict[str, Any],
     response_model: str,
+    handler: GenerationHandler,
     api_key_id: Optional[int] = None,
     allowed_token_ids: Optional[Set[int]] = None,
     project_id: Optional[str] = None,
@@ -1720,6 +1701,7 @@ async def _convert_openai_stream_chunk_to_gemini_event(
             "role": "model",
             "parts": await _build_gemini_parts_from_output(
                 text,
+                handler,
                 api_key_id=api_key_id,
                 allowed_token_ids=allowed_token_ids,
             ),
@@ -1740,13 +1722,13 @@ async def _convert_openai_stream_chunk_to_gemini_event(
 
 async def _iterate_openai_stream(
     normalized: NormalizedGenerationRequest,
+    handler: GenerationHandler,
     base_url_override: Optional[str] = None,
     allowed_token_ids: Optional[set[int]] = None,
     selection_context: Optional[Dict[str, Any]] = None,
     api_key_id: Optional[int] = None,
     project_id: Optional[str] = None,
 ):
-    handler = _ensure_generation_handler()
     async for chunk in handler.handle_generation(
         model=normalized.model,
         prompt=normalized.prompt,
@@ -1773,13 +1755,13 @@ async def _iterate_openai_stream(
 async def _iterate_gemini_stream(
     normalized: NormalizedGenerationRequest,
     response_model: str,
+    handler: GenerationHandler,
     base_url_override: Optional[str] = None,
     allowed_token_ids: Optional[set[int]] = None,
     selection_context: Optional[Dict[str, Any]] = None,
     api_key_id: Optional[int] = None,
     project_id: Optional[str] = None,
 ):
-    handler = _ensure_generation_handler()
     async for chunk in handler.handle_generation(
         model=normalized.model,
         prompt=normalized.prompt,
@@ -1806,6 +1788,7 @@ async def _iterate_gemini_stream(
             event = await _convert_openai_stream_chunk_to_gemini_event(
                 payload,
                 response_model,
+                handler,
                 api_key_id=api_key_id,
                 allowed_token_ids=allowed_token_ids,
                 project_id=project_id,
@@ -1824,6 +1807,7 @@ async def _iterate_gemini_stream(
         event = await _convert_openai_stream_chunk_to_gemini_event(
             payload,
             response_model,
+            handler,
             api_key_id=api_key_id,
             allowed_token_ids=allowed_token_ids,
             project_id=project_id,
@@ -1867,12 +1851,12 @@ def _build_selection_context(
 async def _resolve_project_pin(
     project_id: Optional[str],
     auth_ctx: AuthContext,
+    handler: GenerationHandler,
 ) -> Tuple[Optional[Set[int]], Optional[str]]:
     """If project_id is set, validate DB row and return ({token_id}, canonical_id); else (None, None)."""
     pid = _strip_optional_project_id(project_id)
     if not pid:
         return (None, None)
-    handler = _ensure_generation_handler()
     if auth_ctx.key_id is not None:
         proj = await handler.db.get_project_by_id(pid, auth_ctx.key_id)
         if not proj:
@@ -1901,24 +1885,25 @@ async def _select_generation_target(
     auth_ctx: AuthContext,
     model: str,
     project_id: Optional[str],
+    handler: GenerationHandler,
 ) -> Tuple[Set[int], Optional[str]]:
     """Use an authorized project pin when provided, otherwise retain automatic routing."""
-    pinned_token_ids, pinned_project_id = await _resolve_project_pin(project_id, auth_ctx)
+    pinned_token_ids, pinned_project_id = await _resolve_project_pin(project_id, auth_ctx, handler)
     if pinned_project_id:
         return (pinned_token_ids or set(), pinned_project_id)
-    return await _select_random_active_project_for_api_key(auth_ctx, model)
+    return await _select_random_active_project_for_api_key(auth_ctx, model, handler)
 
 
 async def _select_random_active_project_for_api_key(
     auth_ctx: AuthContext,
     model: str,
+    handler: GenerationHandler,
 ) -> Tuple[Set[int], Optional[str]]:
     if auth_ctx.key_id is None:
         raise HTTPException(status_code=403, detail="Managed API key required for generation")
     if not auth_ctx.allowed_accounts:
         raise HTTPException(status_code=400, detail="No accounts assigned to this API key")
 
-    handler = _ensure_generation_handler()
 
     model_config = MODEL_CONFIG.get(model) or {}
     generation_type = model_config.get("type")

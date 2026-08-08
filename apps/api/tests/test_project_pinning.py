@@ -1,7 +1,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -28,10 +28,9 @@ def test_project_pin_resolves_to_owning_assigned_account():
     )
     handler = SimpleNamespace(db=db)
 
-    with patch.object(routes, "generation_handler", handler):
-        token_ids, project_id = asyncio.run(
-            routes._resolve_project_pin(" project-one ", make_auth())
-        )
+    token_ids, project_id = asyncio.run(
+        routes._resolve_project_pin(" project-one ", make_auth(), handler)
+    )
 
     assert token_ids == {7}
     assert project_id == "project-one"
@@ -46,9 +45,8 @@ def test_project_pin_rejects_project_from_unassigned_account():
     )
     handler = SimpleNamespace(db=db)
 
-    with patch.object(routes, "generation_handler", handler):
-        with pytest.raises(HTTPException) as exc_info:
-            asyncio.run(routes._resolve_project_pin("project-two", make_auth()))
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(routes._resolve_project_pin("project-two", make_auth(), handler))
 
     assert exc_info.value.status_code == 400
     assert "not assigned" in str(exc_info.value.detail)
@@ -68,7 +66,9 @@ def test_generation_target_uses_pin_without_automatic_selection():
         ) as select_automatic,
     ):
         result = asyncio.run(
-            routes._select_generation_target(make_auth(), "gemini-3.0-pro-image-landscape", "project-one")
+            routes._select_generation_target(
+                make_auth(), "gemini-3.0-pro-image-landscape", "project-one", object()
+            )
         )
 
     assert result == ({7}, "project-one")
@@ -90,12 +90,14 @@ def test_generation_target_keeps_automatic_fallback():
         ) as select_automatic,
     ):
         result = asyncio.run(
-            routes._select_generation_target(make_auth(), "gemini-3.0-pro-image-landscape", None)
+            routes._select_generation_target(
+                make_auth(), "gemini-3.0-pro-image-landscape", None, object()
+            )
         )
 
     assert result == ({9}, None)
     select_automatic.assert_awaited_once_with(
-        make_auth(), "gemini-3.0-pro-image-landscape"
+        make_auth(), "gemini-3.0-pro-image-landscape", ANY
     )
 
 

@@ -36,6 +36,7 @@ async def generate_content(
         normalized = await legacy._normalize_gemini_request(
             model,
             request,
+            container.generation_handler,
             api_key_id=auth_ctx.key_id,
             allowed_token_ids=base_allowed,
         )
@@ -58,6 +59,7 @@ async def generate_content(
                 normalized,
                 api_key_id=auth_ctx.key_id,
                 base_url=request_base_url,
+                service=container.geminigen_service,
             )
             if "error" in payload:
                 return legacy._build_gemini_error_response_from_handler(payload)
@@ -65,6 +67,7 @@ async def generate_content(
                 content=await legacy._build_gemini_success_payload(
                     payload,
                     normalized.model,
+                    container.generation_handler,
                     api_key_id=auth_ctx.key_id,
                     allowed_token_ids=set(),
                     project_id=None,
@@ -75,6 +78,7 @@ async def generate_content(
             auth_ctx,
             normalized.model,
             normalized.project_id,
+            container.generation_handler,
         )
         normalized = replace(normalized, project_id=selected_project_id)
         selection_context = legacy._build_selection_context(
@@ -87,6 +91,7 @@ async def generate_content(
             legacy._parse_handler_result(
                 await legacy._collect_non_stream_result(
                     normalized,
+                    container.generation_handler,
                     request_base_url,
                     allowed_token_ids,
                     selection_context,
@@ -101,6 +106,7 @@ async def generate_content(
             content=await legacy._build_gemini_success_payload(
                 payload,
                 normalized.model,
+                container.generation_handler,
                 api_key_id=auth_ctx.key_id,
                 allowed_token_ids=allowed_token_ids,
                 project_id=selected_project_id,
@@ -137,6 +143,7 @@ async def stream_generate_content(
         normalized = await legacy._normalize_gemini_request(
             model,
             request,
+            container.generation_handler,
             api_key_id=auth_ctx.key_id,
             allowed_token_ids=base_allowed,
         )
@@ -160,6 +167,7 @@ async def stream_generate_content(
                     normalized,
                     api_key_id=auth_ctx.key_id,
                     base_url=request_base_url,
+                    service=container.geminigen_service,
                 ),
                 media_type="text/event-stream",
                 headers={
@@ -173,6 +181,7 @@ async def stream_generate_content(
             auth_ctx,
             normalized.model,
             normalized.project_id,
+            container.generation_handler,
         )
         normalized = replace(normalized, project_id=selected_project_id)
         selection_context = legacy._build_selection_context(
@@ -185,6 +194,7 @@ async def stream_generate_content(
             legacy._iterate_gemini_stream(
                 normalized,
                 normalized.model,
+                container.generation_handler,
                 request_base_url,
                 allowed_token_ids,
                 selection_context,

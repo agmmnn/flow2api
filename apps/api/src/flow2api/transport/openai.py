@@ -32,6 +32,7 @@ async def create_chat_completion(
         base_allowed = legacy._resolve_allowed_token_ids(auth_ctx)
         normalized = await legacy._normalize_openai_request(
             request,
+            container.generation_handler,
             api_key_id=auth_ctx.key_id,
             allowed_token_ids=base_allowed,
         )
@@ -53,6 +54,7 @@ async def create_chat_completion(
                         normalized,
                         api_key_id=auth_ctx.key_id,
                         base_url=request_base_url,
+                        service=container.runway_service,
                     ),
                     media_type="text/event-stream",
                     headers={
@@ -67,6 +69,7 @@ async def create_chat_completion(
                     normalized,
                     api_key_id=auth_ctx.key_id,
                     base_url=request_base_url,
+                    service=container.runway_service,
                 )
             )
 
@@ -87,6 +90,7 @@ async def create_chat_completion(
                         normalized,
                         api_key_id=auth_ctx.key_id,
                         base_url=request_base_url,
+                        service=container.geminigen_service,
                     ),
                     media_type="text/event-stream",
                     headers={
@@ -101,6 +105,7 @@ async def create_chat_completion(
                     normalized,
                     api_key_id=auth_ctx.key_id,
                     base_url=request_base_url,
+                    service=container.geminigen_service,
                 )
             )
 
@@ -108,6 +113,7 @@ async def create_chat_completion(
             auth_ctx,
             normalized.model,
             normalized.project_id,
+            container.generation_handler,
         )
         normalized = replace(normalized, project_id=selected_project_id)
         selection_context = legacy._build_selection_context(
@@ -120,6 +126,7 @@ async def create_chat_completion(
             return StreamingResponse(
                 legacy._iterate_openai_stream(
                     normalized,
+                    container.generation_handler,
                     request_base_url,
                     allowed_token_ids,
                     selection_context,
@@ -138,6 +145,7 @@ async def create_chat_completion(
             legacy._parse_handler_result(
                 await legacy._collect_non_stream_result(
                     normalized,
+                    container.generation_handler,
                     request_base_url,
                     allowed_token_ids,
                     selection_context,
@@ -169,6 +177,7 @@ async def create_chat_completion_async(
         base_allowed = legacy._resolve_allowed_token_ids(auth_ctx)
         normalized = await legacy._normalize_openai_request(
             request,
+            container.generation_handler,
             api_key_id=auth_ctx.key_id,
             allowed_token_ids=base_allowed,
         )
@@ -187,6 +196,7 @@ async def create_chat_completion_async(
                 request,
                 normalized,
                 api_key_id=auth_ctx.key_id,
+                service=container.runway_service,
             )
             return JSONResponse(
                 status_code=202,
@@ -212,8 +222,9 @@ async def create_chat_completion_async(
                 request,
                 normalized,
                 api_key_id=auth_ctx.key_id,
+                service=container.geminigen_service,
             )
-            geminigen_service = legacy._ensure_geminigen_service()
+            geminigen_service = container.geminigen_service
             background_tasks.add_task(
                 geminigen_service.start_and_complete_queued_task_in_background,
                 task.job_id,
@@ -231,6 +242,7 @@ async def create_chat_completion_async(
             auth_ctx,
             normalized.model,
             normalized.project_id,
+            container.generation_handler,
         )
         normalized = replace(normalized, project_id=selected_project_id)
         selection_context = legacy._build_selection_context(
@@ -239,7 +251,7 @@ async def create_chat_completion_async(
             selected_project_id,
         )
 
-        handler = legacy._ensure_generation_handler()
+        handler = container.generation_handler
         selected_token_id = min(allowed_token_ids) if allowed_token_ids else 0
         new_task_id = legacy._new_async_job_id()
         await handler.db.create_task(
@@ -267,6 +279,7 @@ async def create_chat_completion_async(
             allowed_token_ids=allowed_token_ids,
             selection_context=selection_context,
             api_key_id=auth_ctx.key_id,
+            handler=handler,
         )
         return JSONResponse(
             status_code=202,
@@ -287,47 +300,50 @@ async def get_job_status(
     job_id: str,
     raw_request: Request,
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+    container: AppContainer = Depends(get_container),
 ):
     """Read persisted async generation status without duplicating provider polling."""
-    if job_id.startswith("geminigen-") and legacy.geminigen_service is not None:
-        geminigen_task = await legacy.geminigen_service.db.get_geminigen_task(job_id)
+    geminigen_service = container.geminigen_service
+    runway_service = container.runway_service
+    if job_id.startswith("geminigen-"):
+        geminigen_task = await geminigen_service.db.get_geminigen_task(job_id)
         if geminigen_task:
             if auth_ctx.key_id is None or geminigen_task.api_key_id != auth_ctx.key_id:
                 raise HTTPException(status_code=403, detail="Not authorized to view this job")
-            return legacy.geminigen_service.task_to_public_dict(geminigen_task)
+            return geminigen_service.task_to_public_dict(geminigen_task)
 
-    if job_id.startswith("runway-") and legacy.runway_service is not None:
-        runway_task = await legacy.runway_service.db.get_runway_task(job_id)
+    if job_id.startswith("runway-"):
+        runway_task = await runway_service.db.get_runway_task(job_id)
         if runway_task:
             if auth_ctx.key_id is None or runway_task.api_key_id != auth_ctx.key_id:
                 raise HTTPException(status_code=403, detail="Not authorized to view this job")
-            runway_task = await legacy.runway_service.poll_task(
+            runway_task = await runway_service.poll_task(
                 job_id,
                 api_key_id=auth_ctx.key_id,
                 base_url=legacy._get_request_base_url(raw_request),
             )
-            return legacy.runway_service.task_to_public_dict(runway_task)
+            return runway_service.task_to_public_dict(runway_task)
 
-    handler = legacy._ensure_generation_handler()
+    handler = container.generation_handler
     task = await handler.db.get_task(job_id)
     if not task:
-        if legacy.runway_service is not None:
-            runway_task = await legacy.runway_service.db.get_runway_task(job_id)
+        if runway_service is not None:
+            runway_task = await runway_service.db.get_runway_task(job_id)
             if runway_task:
                 if auth_ctx.key_id is None or runway_task.api_key_id != auth_ctx.key_id:
                     raise HTTPException(status_code=403, detail="Not authorized to view this job")
-                runway_task = await legacy.runway_service.poll_task(
+                runway_task = await runway_service.poll_task(
                     job_id,
                     api_key_id=auth_ctx.key_id,
                     base_url=legacy._get_request_base_url(raw_request),
                 )
-                return legacy.runway_service.task_to_public_dict(runway_task)
-        if legacy.geminigen_service is not None:
-            geminigen_task = await legacy.geminigen_service.db.get_geminigen_task(job_id)
+                return runway_service.task_to_public_dict(runway_task)
+        if geminigen_service is not None:
+            geminigen_task = await geminigen_service.db.get_geminigen_task(job_id)
             if geminigen_task:
                 if auth_ctx.key_id is None or geminigen_task.api_key_id != auth_ctx.key_id:
                     raise HTTPException(status_code=403, detail="Not authorized to view this job")
-                return legacy.geminigen_service.task_to_public_dict(geminigen_task)
+                return geminigen_service.task_to_public_dict(geminigen_task)
         raise HTTPException(status_code=404, detail="Job not found")
 
     if auth_ctx.key_id is None or task.api_key_id != auth_ctx.key_id:

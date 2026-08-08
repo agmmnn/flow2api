@@ -5,6 +5,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..api import routes as legacy
+from ..bootstrap.container import AppContainer
+from ..bootstrap.dependencies import get_container
 from ..core.api_key_manager import AuthContext
 from ..core.auth import verify_api_key_flexible
 from ..core.logger import debug_logger
@@ -24,6 +26,7 @@ router = APIRouter()
 async def generate_cloning_prompts(
     request: GenerateCloningPromptsRequest,
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+    container: AppContainer = Depends(get_container),
 ):
     """Generate cloning image prompts for one or more images."""
     if auth_ctx.key_id is None:
@@ -56,6 +59,7 @@ async def generate_cloning_prompts(
         legacy.LOG_OP_ADOBE_CLONING_PROMPTS,
         request_payload,
         _run,
+        container.db,
     )
 
 
@@ -63,6 +67,7 @@ async def generate_cloning_prompts(
 async def generate_cloning_video_prompt(
     request: GenerateCloningVideoPromptRequest,
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+    container: AppContainer = Depends(get_container),
 ):
     """Generate a video cloning prompt JSON string from image clone JSON."""
     if auth_ctx.key_id is None:
@@ -93,6 +98,7 @@ async def generate_cloning_video_prompt(
         legacy.LOG_OP_ADOBE_CLONING_VIDEO,
         request_payload,
         _run,
+        container.db,
     )
 
 
@@ -100,6 +106,7 @@ async def generate_cloning_video_prompt(
 async def generate_metadata(
     request: GenerateMetadataRequest,
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+    container: AppContainer = Depends(get_container),
 ):
     """Generate stock metadata using request-provided metadata settings."""
     if auth_ctx.key_id is None:
@@ -125,6 +132,7 @@ async def generate_metadata(
         legacy.LOG_OP_ADOBE_METADATA,
         request_payload,
         _run,
+        container.db,
     )
 
 
@@ -132,6 +140,7 @@ async def generate_metadata(
 async def fetch_task_tracker_contributor_assets(
     request: TaskTrackerContributorFetchRequest,
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+    container: AppContainer = Depends(get_container),
 ):
     """Fetch TAS contributor-search results via direct HTTPS to tastracker.com (curl-cffi)."""
     if auth_ctx.key_id is None:
@@ -161,6 +170,7 @@ async def fetch_task_tracker_contributor_assets(
         legacy.LOG_OP_ADOBE_TRACKER_CONTRIBUTOR,
         request_payload,
         _run,
+        container.db,
     )
 
 
@@ -168,6 +178,7 @@ async def fetch_task_tracker_contributor_assets(
 async def fetch_task_tracker_keyword_search(
     request: TaskTrackerKeywordSearchRequest,
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+    container: AppContainer = Depends(get_container),
 ):
     """Proxy TAS keyword search (GET /api/search); returns upstream JSON (e.g. images array)."""
     if auth_ctx.key_id is None:
@@ -196,4 +207,5 @@ async def fetch_task_tracker_keyword_search(
         legacy.LOG_OP_ADOBE_TRACKER_KEYWORD,
         request_payload,
         _run,
+        container.db,
     )

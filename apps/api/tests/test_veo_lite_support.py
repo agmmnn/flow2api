@@ -9,7 +9,7 @@ import unittest
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 from fastapi import HTTPException
 from PIL import Image
@@ -183,9 +183,10 @@ class AsyncImageJobFinalizationTests(unittest.IsolatedAsyncioTestCase):
             },
         }
 
-        with (
-            patch.object(routes, "_ensure_generation_handler", return_value=handler),
-            patch.object(routes, "_collect_non_stream_result", AsyncMock(return_value=json.dumps(payload))),
+        with patch.object(
+            routes,
+            "_collect_non_stream_result",
+            AsyncMock(return_value=json.dumps(payload)),
         ):
             await routes._run_async_generation_task(
                 task_id="job-1",
@@ -194,6 +195,7 @@ class AsyncImageJobFinalizationTests(unittest.IsolatedAsyncioTestCase):
                 allowed_token_ids=None,
                 selection_context=None,
                 api_key_id=1,
+                handler=handler,
             )
 
         self.assertEqual(updates["task_id"], "job-1")
@@ -637,6 +639,7 @@ class ReferenceImageRouteNormalizationTests(unittest.IsolatedAsyncioTestCase):
         ) as retrieve:
             normalized = await routes._normalize_openai_request(
                 request,
+                SimpleNamespace(file_cache=None),
                 api_key_id=17,
                 allowed_token_ids={3, 5},
             )
@@ -645,6 +648,7 @@ class ReferenceImageRouteNormalizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(normalized.images, [portrait_image])
         retrieve.assert_awaited_once_with(
             "https://example.com/history.png",
+            ANY,
             api_key_id=17,
             allowed_token_ids={3, 5},
         )
@@ -673,7 +677,7 @@ class ReferenceImageRouteNormalizationTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-        async def retrieve_by_url(uri, **_kwargs):
+        async def retrieve_by_url(uri, _handler, **_kwargs):
             if uri.endswith("current.png"):
                 return landscape_image
             return portrait_history
@@ -683,7 +687,9 @@ class ReferenceImageRouteNormalizationTests(unittest.IsolatedAsyncioTestCase):
             "retrieve_image_data",
             new=AsyncMock(side_effect=retrieve_by_url),
         ):
-            normalized = await routes._normalize_openai_request(request)
+            normalized = await routes._normalize_openai_request(
+                request, SimpleNamespace(file_cache=None)
+            )
 
         self.assertEqual(normalized.images, [portrait_history, landscape_image])
         self.assertEqual(normalized.model, "gemini-3.0-pro-image-portrait")
@@ -710,6 +716,7 @@ class ReferenceImageRouteNormalizationTests(unittest.IsolatedAsyncioTestCase):
         normalized = await routes._normalize_gemini_request(
             "gemini-3.0-pro-image",
             request,
+            SimpleNamespace(file_cache=None),
         )
 
         self.assertEqual(normalized.model, "gemini-3.0-pro-image-portrait")
@@ -742,6 +749,7 @@ class ReferenceImageRouteNormalizationTests(unittest.IsolatedAsyncioTestCase):
             normalized = await routes._normalize_gemini_request(
                 "gemini-3.0-pro-image",
                 request,
+                SimpleNamespace(file_cache=None),
                 api_key_id=19,
                 allowed_token_ids={7},
             )
@@ -749,6 +757,7 @@ class ReferenceImageRouteNormalizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(normalized.model, "gemini-3.0-pro-image-portrait")
         retrieve.assert_awaited_once_with(
             "https://example.com/reference.jpg",
+            ANY,
             api_key_id=19,
             allowed_token_ids={7},
         )
@@ -2394,16 +2403,16 @@ class Native4KGenerationEligibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(alias_resolved, NATIVE_IMAGE_4K)
 
         handler = make_tier_handler([make_tier_token(1, PAYGATE_TIER_ONE)])
-        with patch.object(routes, "generation_handler", handler):
-            for model in (NATIVE_IMAGE_4K, NATIVE_VIDEO_4K, alias_resolved):
-                with self.subTest(model=model):
-                    with self.assertRaises(HTTPException) as raised:
-                        await routes._select_random_active_project_for_api_key(
-                            make_tier_auth_context(1),
-                            model,
-                        )
-                    self.assertEqual(raised.exception.status_code, 403)
-                    self.assertIn("active Ultra account assigned", raised.exception.detail)
+        for model in (NATIVE_IMAGE_4K, NATIVE_VIDEO_4K, alias_resolved):
+            with self.subTest(model=model):
+                with self.assertRaises(HTTPException) as raised:
+                    await routes._select_random_active_project_for_api_key(
+                        make_tier_auth_context(1),
+                        model,
+                        handler,
+                    )
+                self.assertEqual(raised.exception.status_code, 403)
+                self.assertIn("active Ultra account assigned", raised.exception.detail)
 
     async def test_4k_selection_uses_only_assigned_ultra(self):
         handler = make_tier_handler(
@@ -2412,25 +2421,25 @@ class Native4KGenerationEligibilityTests(unittest.IsolatedAsyncioTestCase):
                 make_tier_token(2, PAYGATE_TIER_TWO),
             ]
         )
-        with patch.object(routes, "generation_handler", handler):
-            selected, project_id = await routes._select_random_active_project_for_api_key(
-                make_tier_auth_context(1, 2),
-                NATIVE_IMAGE_4K,
-            )
+        selected, project_id = await routes._select_random_active_project_for_api_key(
+            make_tier_auth_context(1, 2),
+            NATIVE_IMAGE_4K,
+            handler,
+        )
 
         self.assertEqual(selected, {2})
         self.assertIsNone(project_id)
 
     async def test_pro_assignment_can_generate_2k_and_1080p(self):
         handler = make_tier_handler([make_tier_token(1, PAYGATE_TIER_ONE)])
-        with patch.object(routes, "generation_handler", handler):
-            for model in (NATIVE_IMAGE_2K, NATIVE_VIDEO_1080P):
-                with self.subTest(model=model):
-                    selected, _ = await routes._select_random_active_project_for_api_key(
-                        make_tier_auth_context(1),
-                        model,
-                    )
-                    self.assertEqual(selected, {1})
+        for model in (NATIVE_IMAGE_2K, NATIVE_VIDEO_1080P):
+            with self.subTest(model=model):
+                selected, _ = await routes._select_random_active_project_for_api_key(
+                    make_tier_auth_context(1),
+                    model,
+                    handler,
+                )
+                self.assertEqual(selected, {1})
 
 
 class _NativeLogLoadBalancer:

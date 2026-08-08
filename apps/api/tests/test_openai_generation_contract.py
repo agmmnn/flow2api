@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -94,8 +95,8 @@ def test_chat_completion_non_stream_contract() -> None:
         project_id=PROJECT_ID,
     )
 
+    container = SimpleNamespace(generation_handler=handler)
     with (
-        patch.object(routes, "generation_handler", handler),
         patch.object(
             routes,
             "_normalize_openai_request",
@@ -107,7 +108,9 @@ def test_chat_completion_non_stream_contract() -> None:
             AsyncMock(return_value=({7}, PROJECT_ID)),
         ),
     ):
-        response = asyncio.run(routes.create_chat_completion(request, make_raw_request(), make_auth()))
+        response = asyncio.run(
+            routes.create_chat_completion(request, make_raw_request(), make_auth(), container)
+        )
 
     assert isinstance(response, JSONResponse)
     assert response.status_code == 200
@@ -156,12 +159,14 @@ def test_chat_completion_stream_contract() -> None:
     )
 
     async def run() -> tuple[StreamingResponse, str]:
-        response = await routes.create_chat_completion(request, make_raw_request(), make_auth())
+        response = await routes.create_chat_completion(
+            request, make_raw_request(), make_auth(), container
+        )
         assert isinstance(response, StreamingResponse)
         return response, await collect_stream(response)
 
+    container = SimpleNamespace(generation_handler=handler)
     with (
-        patch.object(routes, "generation_handler", handler),
         patch.object(
             routes,
             "_normalize_openai_request",

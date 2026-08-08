@@ -1029,9 +1029,6 @@ def _bind_legacy_dependencies(app: FastAPI) -> None:
     """Bridge old route modules while their handlers move to request dependencies."""
 
     container: AppContainer = app.state.container
-    routes.set_generation_handler(container.generation_handler)
-    routes.set_runway_service(container.runway_service)
-    routes.set_geminigen_service(container.geminigen_service)
     admin.set_dependencies(
         container.token_manager,
         container.proxy_manager,
@@ -1041,6 +1038,7 @@ def _bind_legacy_dependencies(app: FastAPI) -> None:
         container.runway_service,
         container.geminigen_service,
         container.google_drive_backup_service,
+        container.generation_handler,
     )
 
 # Create FastAPI app

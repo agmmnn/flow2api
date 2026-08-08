@@ -111,12 +111,8 @@ class _CapacityDatabase:
 
 
 class GeminiGenCapacityEndpointTests(unittest.TestCase):
-    def tearDown(self):
-        routes.set_generation_handler(None)
-
     def _client(self, scopes):
         api_key_manager = ApiKeyManager(_CapacityAuthDatabase(scopes), lambda: "")
-        routes.set_generation_handler(SimpleNamespace(db=_CapacityDatabase()))
         app = FastAPI()
         app.state.container = SimpleNamespace(
             api_key_manager=api_key_manager,

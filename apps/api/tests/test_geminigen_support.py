@@ -2311,12 +2311,11 @@ def test_geminigen_passive_status_reads_do_not_poll_or_write(monkeypatch):
         poll_task=poll_task,
         task_to_public_dict=GeminiGenService.task_to_public_dict,
     )
-    monkeypatch.setattr(routes, "geminigen_service", service)
-
-    def unexpected_generic_lookup():
-        raise AssertionError("GeminiGen-prefixed jobs must bypass the generic task table")
-
-    monkeypatch.setattr(routes, "_ensure_generation_handler", unexpected_generic_lookup)
+    container = SimpleNamespace(
+        geminigen_service=service,
+        runway_service=SimpleNamespace(),
+        generation_handler=SimpleNamespace(),
+    )
     auth = AuthContext(
         key_id=42,
         key_label="test",
@@ -2327,7 +2326,7 @@ def test_geminigen_passive_status_reads_do_not_poll_or_write(monkeypatch):
 
     async def read_twenty():
         return await asyncio.gather(
-            *(routes.get_job_status("geminigen-passive", None, auth) for _ in range(20))
+            *(routes.get_job_status("geminigen-passive", None, auth, container) for _ in range(20))
         )
 
     results = asyncio.run(read_twenty())
@@ -2664,12 +2663,14 @@ def test_geminigen_stream_exits_on_cancelled(monkeypatch):
     async def start_task(*args, **kwargs):
         return cancelled
 
-    monkeypatch.setattr(routes, "_ensure_geminigen_service", lambda: FakeService())
     monkeypatch.setattr(routes, "_start_geminigen_from_request", start_task)
+    service = FakeService()
 
     async def collect():
         chunks = []
-        async for chunk in routes._iterate_geminigen_openai_stream(None, None, api_key_id=None, base_url=None):
+        async for chunk in routes._iterate_geminigen_openai_stream(
+            None, None, api_key_id=None, base_url=None, service=service
+        ):
             chunks.append(chunk)
         return chunks
 
