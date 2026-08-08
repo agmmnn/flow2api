@@ -2271,6 +2271,22 @@ class _TierGeminiGenDb:
         return [SimpleNamespace(is_active=True, bearer_token="test-token")]
 
 
+class _DisabledProviderDb:
+    async def get_geminigen_config(self):
+        return SimpleNamespace(enabled=False, video_enabled=False)
+
+    async def get_runway_config(self):
+        return SimpleNamespace(enabled=False)
+
+
+def make_catalog_container(handler, geminigen_db=None):
+    return SimpleNamespace(
+        db=handler.db,
+        geminigen_service=SimpleNamespace(db=geminigen_db or _DisabledProviderDb()),
+        runway_service=SimpleNamespace(db=_DisabledProviderDb()),
+    )
+
+
 class Native4KCatalogUnitTests(unittest.TestCase):
     def test_4k_identifier_and_alias_filtering(self):
         self.assertTrue(is_native_4k_model(NATIVE_IMAGE_4K))
@@ -2288,17 +2304,17 @@ class Native4KCatalogUnitTests(unittest.TestCase):
 class Native4KCatalogAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_pro_only_catalog_hides_4k_but_keeps_2k_1080p_and_ultra_names(self):
         handler = make_tier_handler([make_tier_token(1, PAYGATE_TIER_ONE)])
-        with (
-            patch.object(routes, "generation_handler", handler),
-            patch.object(routes, "geminigen_service", None),
-        ):
-            openai_catalog = await routes._get_openai_model_catalog()
-            gemini_catalog = await routes._get_gemini_model_catalog()
-            alias_payload = await routes.list_model_aliases(make_tier_auth_context(1))
-            missing_model = await routes.get_gemini_model(
-                NATIVE_IMAGE_4K,
-                make_tier_auth_context(1),
-            )
+        container = make_catalog_container(handler)
+        openai_catalog = await routes._get_openai_model_catalog(handler.db)
+        gemini_catalog = await routes._get_gemini_model_catalog(
+            handler.db, container.geminigen_service
+        )
+        alias_payload = await routes.list_model_aliases(make_tier_auth_context(1), container)
+        missing_model = await routes.get_gemini_model(
+            NATIVE_IMAGE_4K,
+            make_tier_auth_context(1),
+            container,
+        )
 
         openai_ids = {item["id"] for item in openai_catalog}
         alias_ids = {item["id"] for item in alias_payload["data"]}
@@ -2319,17 +2335,17 @@ class Native4KCatalogAsyncTests(unittest.IsolatedAsyncioTestCase):
                 make_tier_token(2, PAYGATE_TIER_TWO),
             ]
         )
-        with (
-            patch.object(routes, "generation_handler", handler),
-            patch.object(routes, "geminigen_service", None),
-        ):
-            openai_catalog = await routes._get_openai_model_catalog()
-            gemini_catalog = await routes._get_gemini_model_catalog()
-            alias_payload = await routes.list_model_aliases(make_tier_auth_context(1))
-            model_payload = await routes.get_gemini_model(
-                NATIVE_IMAGE_4K,
-                make_tier_auth_context(1),
-            )
+        container = make_catalog_container(handler)
+        openai_catalog = await routes._get_openai_model_catalog(handler.db)
+        gemini_catalog = await routes._get_gemini_model_catalog(
+            handler.db, container.geminigen_service
+        )
+        alias_payload = await routes.list_model_aliases(make_tier_auth_context(1), container)
+        model_payload = await routes.get_gemini_model(
+            NATIVE_IMAGE_4K,
+            make_tier_auth_context(1),
+            container,
+        )
 
         openai_ids = {item["id"] for item in openai_catalog}
         alias_ids = {item["id"] for item in alias_payload["data"]}
@@ -2347,20 +2363,15 @@ class Native4KCatalogAsyncTests(unittest.IsolatedAsyncioTestCase):
                 make_tier_token(2, PAYGATE_TIER_TWO, is_active=False),
             ]
         )
-        with patch.object(routes, "generation_handler", handler):
-            catalog = await routes._get_openai_model_catalog()
+        catalog = await routes._get_openai_model_catalog(handler.db)
 
         self.assertFalse(any(is_native_4k_model(item["id"]) for item in catalog))
 
     async def test_native_filter_does_not_hide_geminigen_4k(self):
         handler = make_tier_handler([make_tier_token(1, PAYGATE_TIER_ONE)])
         geminigen_service = SimpleNamespace(db=_TierGeminiGenDb())
-        with (
-            patch.object(routes, "generation_handler", handler),
-            patch.object(routes, "geminigen_service", geminigen_service),
-            patch.object(routes, "runway_service", None),
-        ):
-            payload = await routes.list_models(make_tier_auth_context(1))
+        container = make_catalog_container(handler, geminigen_service.db)
+        payload = await routes.list_models(make_tier_auth_context(1), container)
 
         ids = {item["id"] for item in payload["data"]}
         self.assertNotIn(NATIVE_IMAGE_4K, ids)

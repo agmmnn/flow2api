@@ -16,7 +16,10 @@ router = APIRouter()
 
 
 @router.get("/v1/models")
-async def list_models(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
+async def list_models(
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+    container: AppContainer = Depends(get_container),
+):
     """List available models."""
     models = [
         {
@@ -26,7 +29,7 @@ async def list_models(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
             "description": model["description"],
             **({"studio": model["studio"]} if model.get("studio") else {}),
         }
-        for model in await legacy._get_openai_model_catalog()
+        for model in await legacy._get_openai_model_catalog(container.db)
     ]
     models.extend(
         {
@@ -36,7 +39,7 @@ async def list_models(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
             "description": model["description"],
             **({"studio": model["studio"]} if model.get("studio") else {}),
         }
-        for model in await legacy._get_runway_openai_model_catalog()
+        for model in await legacy._get_runway_openai_model_catalog(container.runway_service)
     )
     models.extend(
         {
@@ -46,7 +49,7 @@ async def list_models(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
             "description": model["description"],
             **({"studio": model["studio"]} if model.get("studio") else {}),
         }
-        for model in await legacy._get_geminigen_openai_model_catalog()
+        for model in await legacy._get_geminigen_openai_model_catalog(container.geminigen_service)
     )
 
     return {"object": "list", "data": models}
@@ -72,9 +75,12 @@ async def get_generation_capacity(
 
 
 @router.get("/v1/models/aliases")
-async def list_model_aliases(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
+async def list_model_aliases(
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+    container: AppContainer = Depends(get_container),
+):
     """List simplified model aliases for generationConfig-based resolution."""
-    active_tokens = await legacy._get_active_native_tokens()
+    active_tokens = await legacy._get_active_native_tokens(container.db)
     aliases = (
         legacy.get_base_model_aliases(include_4k=legacy._has_active_native_ultra_account(active_tokens))
         if active_tokens
@@ -96,9 +102,12 @@ async def list_model_aliases(auth_ctx: AuthContext = Depends(verify_api_key_flex
 
 @router.get("/v1beta/models")
 @router.get("/models")
-async def list_gemini_models(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
+async def list_gemini_models(
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+    container: AppContainer = Depends(get_container),
+):
     """List available models using Gemini-compatible response shape."""
-    catalog = await legacy._get_gemini_model_catalog()
+    catalog = await legacy._get_gemini_model_catalog(container.db, container.geminigen_service)
     return {
         "models": [
             legacy._build_gemini_model_resource(model_id, description) for model_id, description in catalog.items()
@@ -111,9 +120,10 @@ async def list_gemini_models(auth_ctx: AuthContext = Depends(verify_api_key_flex
 async def get_gemini_model(
     model: str,
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+    container: AppContainer = Depends(get_container),
 ):
     """Return a single model using Gemini-compatible response shape."""
-    catalog = await legacy._get_gemini_model_catalog()
+    catalog = await legacy._get_gemini_model_catalog(container.db, container.geminigen_service)
     description = catalog.get(model)
     if not description:
         return JSONResponse(

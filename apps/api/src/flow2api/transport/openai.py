@@ -8,6 +8,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..api import routes as legacy
+from ..bootstrap.container import AppContainer
+from ..bootstrap.dependencies import get_container
 from ..core.api_key_manager import AuthContext
 from ..core.auth import verify_api_key_flexible
 from ..core.models import ChatCompletionRequest, Task
@@ -21,6 +23,7 @@ async def create_chat_completion(
     request: ChatCompletionRequest,
     raw_request: Request,
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+    container: AppContainer = Depends(get_container),
 ):
     """OpenAI-compatible unified generation endpoint."""
     try:
@@ -74,7 +77,9 @@ async def create_chat_completion(
                     detail="project_id is only supported for native Flow models",
                 )
             legacy._require_geminigen_scope(auth_ctx)
-            await legacy._require_geminigen_model_enabled(normalized.model)
+            await legacy._require_geminigen_model_enabled(
+                normalized.model, container.geminigen_service
+            )
             if request.stream:
                 return StreamingResponse(
                     legacy._iterate_geminigen_openai_stream(
@@ -155,6 +160,7 @@ async def create_chat_completion_async(
     raw_request: Request,
     background_tasks: BackgroundTasks,
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+    container: AppContainer = Depends(get_container),
 ):
     """OpenAI-compatible async generation endpoint with polling support."""
     try:
@@ -199,7 +205,9 @@ async def create_chat_completion_async(
                     detail="project_id is only supported for native Flow models",
                 )
             legacy._require_geminigen_scope(auth_ctx)
-            await legacy._require_geminigen_model_enabled(normalized.model)
+            await legacy._require_geminigen_model_enabled(
+                normalized.model, container.geminigen_service
+            )
             task = await legacy._enqueue_geminigen_from_request(
                 request,
                 normalized,

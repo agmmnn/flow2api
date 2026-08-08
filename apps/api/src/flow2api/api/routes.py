@@ -262,13 +262,8 @@ def _build_model_description(model_config: Dict[str, Any]) -> str:
     return description
 
 
-async def _get_active_native_tokens() -> List[Any]:
-    if generation_handler is None:
-        return []
-    db = getattr(generation_handler, "db", None)
-    if db is None:
-        return []
-    return list(await db.get_active_tokens())
+async def _get_active_native_tokens(database: Any) -> List[Any]:
+    return list(await database.get_active_tokens())
 
 
 def _has_active_native_ultra_account(tokens: List[Any]) -> bool:
@@ -280,29 +275,25 @@ def _has_active_native_ultra_account(tokens: List[Any]) -> bool:
     )
 
 
-async def _has_runway_accounts() -> bool:
-    if runway_service is None:
-        return False
-    accounts = await runway_service.db.list_runway_accounts()
+async def _has_runway_accounts(service: RunwayService) -> bool:
+    accounts = await service.db.list_runway_accounts()
     return any(
         bool(account.is_active) and bool((account.raw_credential or "").strip())
         for account in accounts
     )
 
 
-async def _has_geminigen_accounts() -> bool:
-    if geminigen_service is None:
-        return False
-    accounts = await geminigen_service.db.list_geminigen_accounts()
+async def _has_geminigen_accounts(service: GeminiGenService) -> bool:
+    accounts = await service.db.list_geminigen_accounts()
     return any(
         bool(account.is_active) and bool((account.bearer_token or "").strip())
         for account in accounts
     )
 
 
-async def _get_openai_model_catalog() -> List[Dict[str, str]]:
+async def _get_openai_model_catalog(database: Any) -> List[Dict[str, str]]:
     """Collect OpenAI-compatible model list entries."""
-    active_tokens = await _get_active_native_tokens()
+    active_tokens = await _get_active_native_tokens(database)
     if not active_tokens:
         return []
     include_4k = _has_active_native_ultra_account(active_tokens)
@@ -317,15 +308,13 @@ async def _get_openai_model_catalog() -> List[Dict[str, str]]:
     ]
 
 
-async def _get_runway_openai_model_catalog() -> List[Dict[str, str]]:
-    if runway_service is None:
-        return []
-    cfg = await runway_service.db.get_runway_config()
+async def _get_runway_openai_model_catalog(service: RunwayService) -> List[Dict[str, str]]:
+    cfg = await service.db.get_runway_config()
     if not cfg.enabled:
         return []
-    if not await _has_runway_accounts():
+    if not await _has_runway_accounts(service):
         return []
-    models = await runway_service.db.list_runway_models(enabled_only=True)
+    models = await service.db.list_runway_models(enabled_only=True)
     return [
         {
             "id": model.public_model_id,
@@ -337,13 +326,11 @@ async def _get_runway_openai_model_catalog() -> List[Dict[str, str]]:
     ]
 
 
-async def _get_geminigen_openai_model_catalog() -> List[Dict[str, str]]:
-    if geminigen_service is None:
-        return []
-    cfg = await geminigen_service.db.get_geminigen_config()
+async def _get_geminigen_openai_model_catalog(service: GeminiGenService) -> List[Dict[str, str]]:
+    cfg = await service.db.get_geminigen_config()
     if not cfg.enabled:
         return []
-    if not await _has_geminigen_accounts():
+    if not await _has_geminigen_accounts(service):
         return []
     return [
         {
@@ -356,11 +343,11 @@ async def _get_geminigen_openai_model_catalog() -> List[Dict[str, str]]:
     ]
 
 
-async def _get_gemini_model_catalog() -> Dict[str, str]:
+async def _get_gemini_model_catalog(database: Any, service: GeminiGenService) -> Dict[str, str]:
     """Collect Gemini-compatible model metadata for /models endpoints."""
     catalog: Dict[str, str] = {}
 
-    active_tokens = await _get_active_native_tokens()
+    active_tokens = await _get_active_native_tokens(database)
     if active_tokens:
         include_4k = _has_active_native_ultra_account(active_tokens)
         aliases = get_base_model_aliases(include_4k=include_4k)
@@ -372,7 +359,7 @@ async def _get_gemini_model_catalog() -> Dict[str, str]:
                 continue
             catalog.setdefault(model_id, _build_model_description(model_config))
 
-    for model in await _get_geminigen_openai_model_catalog():
+    for model in await _get_geminigen_openai_model_catalog(service):
         catalog.setdefault(model["id"], model["description"])
 
     return catalog
@@ -878,11 +865,10 @@ def _is_geminigen_model(model: str) -> bool:
     return GeminiGenService.is_geminigen_model(model)
 
 
-async def _require_geminigen_model_enabled(model: str) -> None:
+async def _require_geminigen_model_enabled(model: str, service: GeminiGenService) -> None:
     manifest = geminigen_manifest_entry(model or "")
     if not manifest or manifest.get("kind") != "video":
         return
-    service = _ensure_geminigen_service()
     cfg = await service.db.get_geminigen_config()
     if not bool(getattr(cfg, "video_enabled", True)):
         raise HTTPException(status_code=404, detail="GeminiGen video mode is disabled")

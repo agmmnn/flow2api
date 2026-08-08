@@ -9,6 +9,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..api import routes as legacy
+from ..bootstrap.container import AppContainer
+from ..bootstrap.dependencies import get_container
 from ..core.api_key_manager import AuthContext
 from ..core.auth import verify_api_key_flexible
 from ..core.models import GeminiGenerateContentRequest
@@ -24,6 +26,7 @@ async def generate_content(
     request: GeminiGenerateContentRequest,
     raw_request: Request,
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+    container: AppContainer = Depends(get_container),
 ):
     """Gemini official generateContent endpoint."""
     try:
@@ -47,7 +50,9 @@ async def generate_content(
                     detail="project_id is only supported for native Flow models",
                 )
             legacy._require_geminigen_scope(auth_ctx)
-            await legacy._require_geminigen_model_enabled(normalized.model)
+            await legacy._require_geminigen_model_enabled(
+                normalized.model, container.geminigen_service
+            )
             payload = await legacy._geminigen_openai_non_stream(
                 request,
                 normalized,
@@ -122,6 +127,7 @@ async def stream_generate_content(
     raw_request: Request,
     alt: Optional[str] = Query(None),
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+    container: AppContainer = Depends(get_container),
 ):
     """Gemini official streamGenerateContent endpoint."""
     try:
@@ -145,7 +151,9 @@ async def stream_generate_content(
                     detail="project_id is only supported for native Flow models",
                 )
             legacy._require_geminigen_scope(auth_ctx)
-            await legacy._require_geminigen_model_enabled(normalized.model)
+            await legacy._require_geminigen_model_enabled(
+                normalized.model, container.geminigen_service
+            )
             return StreamingResponse(
                 legacy._iterate_geminigen_openai_stream(
                     request,

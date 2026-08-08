@@ -1746,23 +1746,21 @@ def test_geminigen_video_disabled_filters_catalog_and_rejects_video_model():
         tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         tmp.close()
         db = Database(tmp.name)
-        old_service = routes.geminigen_service
         try:
             await db.init_db()
             await db.update_geminigen_config(enabled=True, video_enabled=False)
             await db.create_geminigen_account(label="account", raw_cookie="", bearer_token="token")
-            routes.geminigen_service = SimpleNamespace(db=db)
+            service = SimpleNamespace(db=db)
 
-            catalog = await routes._get_geminigen_openai_model_catalog()
+            catalog = await routes._get_geminigen_openai_model_catalog(service)
             video_id = next(item["id"] for item in GEMINIGEN_MODEL_MANIFEST if item["kind"] == "video")
             error_status = None
             try:
-                await routes._require_geminigen_model_enabled(video_id)
+                await routes._require_geminigen_model_enabled(video_id, service)
             except HTTPException as exc:
                 error_status = exc.status_code
             return catalog, error_status
         finally:
-            routes.geminigen_service = old_service
             os.unlink(tmp.name)
 
     catalog, error_status = asyncio.run(run())
