@@ -293,8 +293,10 @@ resident-tab and token-pool lease state now live in `workers/personal/models.py`
 resident-tab registry now owns slot identity, affinity, solve reservations,
 unavailable-state tracking, and recovery task maps. The legacy pool delegates through
 compatibility properties. Browser launch backoff and runtime error classification now
-live in `workers/personal/runtime.py`, while browser session I/O, CAPTCHA, and refresh
-responsibilities are separated incrementally.
+live in `workers/personal/runtime.py`. Session-token refresh orchestration now lives in
+`workers/personal/refresh.py` with injectable browser-operation and timing seams; the
+legacy method is retained privately during the compatibility window. Browser session
+I/O and CAPTCHA execution remain to be separated incrementally.
 
 Exit criteria:
 

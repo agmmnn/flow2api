@@ -34,6 +34,7 @@ from ..core.config import config
 from ..workers.personal import (
     PersonalWorkerRouting,
     PersonalBrowserRuntimePolicy,
+    PersonalSessionRefreshJobs,
     ResidentTabInfo,
     ResidentTabRegistry,
     TokenPoolLease,
@@ -1414,6 +1415,12 @@ class BrowserCaptchaService:
         self._fresh_profile_restart_pending = False
         self._fresh_profile_restart_force_pending = False
         self.runtime_policy = PersonalBrowserRuntimePolicy()
+        self.session_refresh_jobs = PersonalSessionRefreshJobs(
+            self,
+            log_info=debug_logger.log_info,
+            log_warning=debug_logger.log_warning,
+            log_error=debug_logger.log_error,
+        )
         self._fresh_profile_restart_pending_reason = ""
         self._proxy_url: Optional[str] = None
         self._proxy_ext_dir: Optional[str] = None
@@ -11266,6 +11273,9 @@ class BrowserCaptchaService:
     # ========== Session Token 刷新 ==========
 
     async def refresh_session_token(self, project_id: str, token_id: Optional[int] = None) -> Optional[str]:
+        return await self.session_refresh_jobs.execute(project_id, token_id)
+
+    async def _refresh_session_token_legacy(self, project_id: str, token_id: Optional[int] = None) -> Optional[str]:
         """从常驻标签页获取最新的 Session Token
         
         复用共享打码标签页，通过刷新页面并从 cookies 中提取
