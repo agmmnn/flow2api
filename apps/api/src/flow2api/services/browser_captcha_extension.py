@@ -15,6 +15,7 @@ from ..workers.extension.models import (
     NoExtensionGenerationWorkerError,
     normalize_extension_captcha_user_agent,
 )
+from ..workers.extension.jobs import ExtensionJobBroker
 from ..workers.extension.routing import ExtensionWorkerRouting
 from ..workers.extension.registry import ExtensionConnectionRegistry
 from ..workers.extension.uploads import GenerationUploadStore
@@ -28,17 +29,15 @@ class ExtensionCaptchaService:
         self.db = db
         self.connection_registry = ExtensionConnectionRegistry()
         self.active_connections = self.connection_registry.connections
-        self.pending_requests: dict[str, tuple[asyncio.Future, WebSocket]] = {}
-        # generation_req_id -> websocket owner (submit_generation / poll_generation)
-        self.pending_generation_requests: dict[str, tuple[asyncio.Future, WebSocket]] = {}
-        # req_id -> websocket to notify after Flow upstream accepts/rejects the token
-        self._upstream_verdict_targets: dict[str, WebSocket] = {}
-        # req_id -> validated UA returned by the WebSocket that solved that request.
-        # The raw value is consumed immediately by FlowClient and is never persisted.
-        self._token_user_agents: dict[str, str] = {}
+        self.job_broker = ExtensionJobBroker()
+        # Compatibility aliases while request call sites move behind the broker.
+        self.pending_requests = self.job_broker.pending_captcha
+        self.pending_generation_requests = self.job_broker.pending_generation
+        self._upstream_verdict_targets = self.job_broker.upstream_verdict_targets
+        self._token_user_agents = self.job_broker.token_user_agents
         self._connection_changed = self.connection_registry.changed
         self._queue_waiters = self.connection_registry.waiters
-        self._state_lock = self.connection_registry.state_lock
+        self._state_lock = self.job_broker.lock
         # Round-robin cursor per managed API key (see _queue_key). Lock-free counter:
         # concurrent picks may occasionally duplicate; modulo on read keeps indices valid.
         self._rr_cursor = self.connection_registry.managed_round_robin
@@ -239,20 +238,7 @@ class ExtensionCaptchaService:
     def disconnect(self, websocket: WebSocket):
         conn = self.connection_registry.remove(websocket)
         if conn is not None:
-            stale_reqs = [rid for rid, ws in list(self._upstream_verdict_targets.items()) if ws is websocket]
-            for rid in stale_reqs:
-                self._upstream_verdict_targets.pop(rid, None)
-                self._token_user_agents.pop(rid, None)
-            stale_gen_reqs = [
-                rid for rid, (_fut, ws) in list(self.pending_generation_requests.items()) if ws is websocket
-            ]
-            for rid in stale_gen_reqs:
-                future, _ = self.pending_generation_requests.pop(rid, (None, None))
-                if future is not None and not future.done():
-                    try:
-                        future.set_exception(RuntimeError("Extension worker disconnected"))
-                    except Exception:
-                        pass
+            self.job_broker.disconnect(websocket)
             debug_logger.log_info(
                 f"[Extension Captcha] Client disconnected. Total: {len(self.active_connections)}, "
                 f"worker_session_id={conn.worker_session_id}, label={conn.client_label or '-'}"
@@ -619,24 +605,26 @@ class ExtensionCaptchaService:
                 return
 
             req_id = payload.get("req_id")
-            if req_id and req_id in self.pending_requests:
-                future, owner_websocket = self.pending_requests[req_id]
-                if websocket is not owner_websocket:
+            if req_id:
+                captcha_match, future = self.job_broker.match_response("captcha", req_id, websocket)
+                if captcha_match == "wrong_owner":
                     debug_logger.log_warning(
                         f"[Extension Captcha] Ignoring captcha response from non-owner connection: {req_id}"
                     )
                     return
-                if not future.done():
-                    future.set_result(payload)
-                return
-            if req_id and req_id in self.pending_generation_requests:
-                future, owner_websocket = self.pending_generation_requests[req_id]
-                if websocket is not owner_websocket:
+                if captcha_match == "matched" and future is not None:
+                    if not future.done():
+                        future.set_result(payload)
+                    return
+                generation_match, future = self.job_broker.match_response("generation", req_id, websocket)
+                if generation_match == "wrong_owner":
                     debug_logger.log_warning(
                         f"[Extension Captcha] Ignoring generation response from non-owner connection: {req_id}"
                     )
                     return
-                if not future.done():
+                if generation_match == "matched" and future is not None:
+                    if future.done():
+                        return
                     if str(payload.get("status") or "") == "success" and payload.get("large_response_upload_id"):
                         upload_id = str(payload.get("large_response_upload_id") or "").strip()
                         merged = await self.resolve_generation_upload_for_ws(
@@ -653,7 +641,7 @@ class ExtensionCaptchaService:
                             f"[EXT-GEN] req_id={req_id} forwarded_without_upload upstream_status={str(payload.get('response_status') or 0)}"
                         )
                         future.set_result(payload)
-                return
+                    return
         except Exception as e:
             debug_logger.log_error(f"[Extension Captcha] Error handling message: {e}")
 
@@ -666,8 +654,7 @@ class ExtensionCaptchaService:
         timeout: int,
     ) -> Dict[str, Any]:
         req_id = f"gen_req_{uuid.uuid4().hex}"
-        future = asyncio.get_running_loop().create_future()
-        self.pending_generation_requests[req_id] = (future, conn.websocket)
+        future = self.job_broker.register("generation", req_id, conn.websocket)
         message: Dict[str, Any] = {"type": message_type, "req_id": req_id, **request_payload}
         if config.extension_generation_large_upload_enabled:
             ttl = int(config.extension_generation_upload_ttl_seconds)
@@ -695,7 +682,7 @@ class ExtensionCaptchaService:
             error_msg = str(result.get("error") or "Extension generation request failed")
             raise RuntimeError(error_msg)
         finally:
-            self.pending_generation_requests.pop(req_id, None)
+            self.job_broker.remove("generation", req_id)
 
     async def submit_generation_via_extension(
         self,
@@ -830,8 +817,7 @@ class ExtensionCaptchaService:
             async with self._dedicated_stats_lock:
                 self._dedicated_stats(conn.worker_session_id).inflight_count += 1
         req_id = f"req_{uuid.uuid4().hex}"
-        future = asyncio.get_running_loop().create_future()
-        self.pending_requests[req_id] = (future, conn.websocket)
+        future = self.job_broker.register("captcha", req_id, conn.websocket)
         request_data = {
             "type": "get_token",
             "req_id": req_id,
@@ -870,14 +856,13 @@ class ExtensionCaptchaService:
                     if user_agent is None:
                         user_agent = normalize_extension_captcha_user_agent(result.get("userAgent"))
                     if user_agent:
-                        self._token_user_agents[req_id] = user_agent
+                        self.job_broker.capture_user_agent(req_id, user_agent)
                     if track_dedicated:
                         async with self._dedicated_stats_lock:
                             self._dedicated_record_success_locked(
                                 self._dedicated_stats(conn.worker_session_id), latency_ms
                             )
-                    async with self._state_lock:
-                        self._upstream_verdict_targets[req_id] = conn.websocket
+                    await self.job_broker.bind_upstream_verdict(req_id, conn.websocket)
                     return tok.strip(), req_id
                 if track_dedicated:
                     async with self._dedicated_stats_lock:
@@ -914,14 +899,14 @@ class ExtensionCaptchaService:
                 async with self._dedicated_stats_lock:
                     st = self._dedicated_stats(conn.worker_session_id)
                     st.inflight_count = max(0, st.inflight_count - 1)
-            self.pending_requests.pop(req_id, None)
+            self.job_broker.remove("captcha", req_id)
 
     def consume_token_user_agent(self, req_id: Optional[str]) -> Optional[str]:
         """Consume validated solver metadata without changing get_token()'s tuple contract."""
         rid = str(req_id or "").strip()
         if not rid:
             return None
-        return self._token_user_agents.pop(rid, None)
+        return self.job_broker.consume_user_agent(rid)
 
     async def notify_upstream_verdict(
         self,
@@ -935,9 +920,7 @@ class ExtensionCaptchaService:
         rid = (req_id or "").strip()
         if not rid:
             return
-        async with self._state_lock:
-            websocket = self._upstream_verdict_targets.pop(rid, None)
-            self._token_user_agents.pop(rid, None)
+        websocket = await self.job_broker.take_upstream_verdict(rid)
         if websocket is None:
             return
         payload = {
@@ -957,9 +940,7 @@ class ExtensionCaptchaService:
         rid = (req_id or "").strip()
         if not rid:
             return
-        async with self._state_lock:
-            self._upstream_verdict_targets.pop(rid, None)
-            self._token_user_agents.pop(rid, None)
+        await self.job_broker.abandon_upstream_verdict(rid)
 
     async def get_token(
         self,
@@ -1120,8 +1101,7 @@ class ExtensionCaptchaService:
         timeout: int,
     ) -> Optional[str]:
         req_id = f"req_{uuid.uuid4().hex}"
-        future = asyncio.get_running_loop().create_future()
-        self.pending_requests[req_id] = (future, conn.websocket)
+        future = self.job_broker.register("captcha", req_id, conn.websocket)
         try:
             await conn.websocket.send_text(
                 json.dumps(
@@ -1140,7 +1120,7 @@ class ExtensionCaptchaService:
             debug_logger.log_warning(f"[Extension Captcha] refresh_st failed for token_id={token_id}: {exc}")
             return None
         finally:
-            self.pending_requests.pop(req_id, None)
+            self.job_broker.remove("captcha", req_id)
 
     async def _classify_extension_st_refresh_no_connection(self, token_id: int) -> str:
         """Reason code when no eligible token-ID refresh worker exists for ST refresh."""

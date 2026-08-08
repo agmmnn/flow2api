@@ -278,8 +278,11 @@ large-generation-response upload side channel, and health-aware worker routing h
 moved to `workers/extension`. Routing now owns worker scoring, cooldowns, latency
 tracking, and round-robin cursors. The connection registry now owns active connections,
 instance replacement, change notifications, waiter accounting, and managed-key cursor
-cleanup. The existing service exposes compatibility delegates while CAPTCHA, refresh,
-and generation job state machines are separated in subsequent slices.
+cleanup. A dedicated job broker now owns pending CAPTCHA/generation futures, response
+ownership checks, disconnect propagation, upstream verdict routing, and one-time
+solver user-agent metadata. The existing service exposes compatibility aliases while
+the concrete CAPTCHA, refresh, and generation request executors are separated in
+subsequent slices.
 
 Exit criteria:
 
