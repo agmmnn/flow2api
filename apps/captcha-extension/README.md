@@ -26,7 +26,9 @@ extracted state modules, the worker/account tests, and the production bundle.
 Click the extension icon for everyday controls: connection status, account
 sync, CAPTCHA testing, reconnect, automation switches, worker-tab control, and
 recent activity. Use the gear button only for credentials, worker role, sync
-intervals, and advanced CAPTCHA tuning.
+intervals, and advanced CAPTCHA tuning. Choose **Open diagnostics** for the
+complete runtime overview, CAPTCHA and generation job history, session-token
+captures, and the full activity log.
 
 ## Modes
 

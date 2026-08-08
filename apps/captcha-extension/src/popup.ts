@@ -253,9 +253,13 @@ function openSettings(): void {
   chrome.runtime.openOptionsPage()
 }
 
+function openDiagnostics(): void {
+  void chrome.tabs.create({ url: chrome.runtime.getURL("diagnostics.html") })
+}
+
 async function initialize(): Promise<void> {
   element<HTMLButtonElement>("settingsButton").addEventListener("click", openSettings)
-  element<HTMLButtonElement>("advancedSettingsButton").addEventListener("click", openSettings)
+  element<HTMLButtonElement>("diagnosticsButton").addEventListener("click", openDiagnostics)
   element<HTMLButtonElement>("primaryAction").addEventListener("click", () => void primaryAction())
   element<HTMLButtonElement>("testButton").addEventListener("click", () =>
     void runAction(

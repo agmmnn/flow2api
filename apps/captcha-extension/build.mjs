@@ -14,6 +14,7 @@ await build({
   entryPoints: {
     background: resolve(root, "src/background.ts"),
     content: resolve(root, "src/content.ts"),
+    diagnostics: resolve(root, "src/diagnostics.ts"),
     options: resolve(root, "src/options.ts"),
     popup: resolve(root, "src/popup.ts"),
     stealth: resolve(root, "src/stealth.ts"),
