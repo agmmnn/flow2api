@@ -150,7 +150,7 @@ export function AgentGateway() {
   "device_token": "<GATEWAY_AGENT_DEVICE_TOKEN>",
   "token_ids": [1]
 }`
-  }, [gatewayMode])
+  }, [gatewayMode, gatewayVerifyMode])
 
   const modeBadgeText = useMemo(() => {
     if (gatewayMode === "unknown") return "Detected mode: unknown"

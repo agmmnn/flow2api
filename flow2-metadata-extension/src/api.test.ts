@@ -76,7 +76,10 @@ describe("Flow2 API client", () => {
 
   it("downloads public Adobe CDN images without credentials", async () => {
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(new Response(new Blob([new Uint8Array([255, 216, 255])], { type: "image/jpeg" }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(new Uint8Array([255, 216, 255]), {
+        status: 200,
+        headers: { "Content-Type": "image/jpeg" },
+      }))
       .mockResolvedValueOnce(new Response(JSON.stringify({
         optionA: { title: "Public asset", keywords: "asset, stock" },
       }), { status: 200, headers: { "Content-Type": "application/json" } }));

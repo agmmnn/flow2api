@@ -28,6 +28,8 @@ from pathlib import Path
 from typing import Optional, Dict, Any, Iterable
 from urllib.parse import urljoin, urlparse, urlunparse
 
+from curl_cffi.requests import AsyncSession
+
 from ..core.logger import debug_logger
 from ..core.config import config
 from .browser_cookie_utils import (

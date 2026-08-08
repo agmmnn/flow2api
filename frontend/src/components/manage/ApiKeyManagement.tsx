@@ -74,6 +74,7 @@ type GenerationStats = {
 
 const AUDIT_PAGE_SIZE = 25
 const KEY_PROJECT_PAGE_SIZE = 10
+const SHOW_VIDEOFX_PROJECTS = false
 
 const AVAILABLE_SCOPES: ScopeOption[] = [
   { id: "models:read", label: "Read models", description: "Allows `/v1/models`, `/v1/models/aliases`, and Gemini model listing endpoints." },
@@ -1288,7 +1289,7 @@ export function ApiKeyManagement() {
               ))}
             </div>
 
-            {false ? (
+            {SHOW_VIDEOFX_PROJECTS ? (
               <div className="space-y-4 rounded-lg border bg-muted/20 p-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2">

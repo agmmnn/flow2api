@@ -3181,7 +3181,10 @@ class GenerationHandler:
                     if self._is_extension_generation_enabled() and self._is_backend_poll_blocked_error(e):
                         try:
                             debug_logger.log_warning("[EXT-GEN] backend poll blocked, trying extension poll fallback")
-                            operation_status = await self.flow_client.check_video_status_via_extension_poll(at, operations)
+                            operation_status = await self.flow_client.check_video_status_via_extension_poll(
+                                token.at,
+                                operations,
+                            )
                             checked_operations = operation_status.get("operations", [])
                             if checked_operations:
                                 operation = checked_operations[0]

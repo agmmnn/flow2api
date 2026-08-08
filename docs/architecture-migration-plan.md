@@ -143,12 +143,12 @@ Exit criteria:
 
 ## Phase 3: Narrow, green quality gates
 
-- [ ] Run the current backend test suite in CI.
-- [ ] Add Ruff with a deliberately narrow initial rule set.
-- [ ] Add Pyright in basic mode, initially scoped to migrated packages.
-- [ ] Add Bun lint, typecheck, test, and build jobs where supported.
-- [ ] Add fixture secret scanning for JWTs, cookies, signed URLs, and known credential patterns.
-- [ ] Preserve the existing Docker and storage-contract workflows.
+- [x] Run the current backend test suite in CI.
+- [x] Add Ruff with a deliberately narrow initial rule set.
+- [x] Add Pyright in basic mode, initially scoped to stable modules and ready to expand with migrated packages.
+- [x] Add Bun lint, typecheck, and build jobs for the admin web app plus typecheck, test, and build checks for the existing npm-locked metadata extension.
+- [x] Add fixture secret scanning for JWTs, cookies, signed URLs, and known credential patterns.
+- [x] Preserve the existing Docker and storage-contract workflows.
 
 Exit criteria:
 

@@ -110,6 +110,11 @@ def _truncate_text(text: Any, limit: int = 240) -> str:
     return f"{value[:limit - 3]}..."
 
 
+def _to_iso(value: Any) -> Any:
+    """Serialize date-like values while preserving already-serialized values."""
+    return value.isoformat() if hasattr(value, "isoformat") else value
+
+
 def _validate_uploaded_sqlite_database(path: Path) -> Dict[str, Any]:
     """Validate a candidate Flow2API SQLite DB before swapping it into place."""
     if not path.exists() or path.stat().st_size <= 0:
@@ -4362,11 +4367,12 @@ async def update_captcha_worker_key(
     if not existing:
         raise HTTPException(status_code=404, detail="Captcha worker key not found")
     fs = request.model_fields_set
-    await db.update_captcha_worker_key(
-        key_id,
-        label=request.label if "label" in fs else _DEDICATED_WORKER_UPDATE_OMIT,
-        is_active=request.is_active if "is_active" in fs else _DEDICATED_WORKER_UPDATE_OMIT,
-    )
+    updates: Dict[str, Any] = {}
+    if "label" in fs:
+        updates["label"] = request.label
+    if "is_active" in fs:
+        updates["is_active"] = request.is_active
+    await db.update_captcha_worker_key(key_id, **updates)
     updated = await db.get_captcha_worker_key(key_id)
     return {"success": True, "key": updated}
 
@@ -5499,12 +5505,12 @@ async def plugin_check_tokens(
             "email": email,
             "is_active": bool(row.get("is_active")),
             "needs_refresh": token_manager.needs_at_refresh(token_obj) if token_obj else True,
-            "at_expires": to_iso(row.get("at_expires")) if row.get("at_expires") else None,
-            "last_used_at": to_iso(row.get("last_used_at")) if row.get("last_used_at") else None,
+            "at_expires": _to_iso(row.get("at_expires")) if row.get("at_expires") else None,
+            "last_used_at": _to_iso(row.get("last_used_at")) if row.get("last_used_at") else None,
             "protocol_mode": row.get("protocol_mode") or "session",
             "auto_refresh_enabled": bool(row.get("auto_refresh_enabled", True)),
             "refresh_interval_minutes": row.get("refresh_interval_minutes") or 120,
-            "last_st_refresh_at": to_iso(row.get("last_st_refresh_at")) if row.get("last_st_refresh_at") else None,
+            "last_st_refresh_at": _to_iso(row.get("last_st_refresh_at")) if row.get("last_st_refresh_at") else None,
             "last_st_refresh_result": row.get("last_st_refresh_result") or "",
             "credits": row.get("credits", 0),
         })

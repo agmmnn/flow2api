@@ -75,14 +75,14 @@ export async function imageUrlToBase64(imageUrl: string): Promise<{ base64: stri
   // asset URLs do not need contributor-session credentials.
   const response = await fetch(imageUrl, { credentials: "omit", mode: "cors" });
   if (!response.ok) throw new Error(`Unable to download Adobe image (HTTP ${response.status}).`);
-  const blob = await response.blob();
-  if (!blob.size) throw new Error("Adobe image is empty.");
-  const bytes = new Uint8Array(await blob.arrayBuffer());
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (!bytes.length) throw new Error("Adobe image is empty.");
   let binary = "";
   for (let offset = 0; offset < bytes.length; offset += 0x8000) {
     binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
   }
-  return { base64: btoa(binary), mimeType: blob.type || "image/jpeg" };
+  const mimeType = response.headers.get("Content-Type")?.split(";", 1)[0]?.trim() || "image/jpeg";
+  return { base64: btoa(binary), mimeType };
 }
 
 export async function generateMetadata(
