@@ -6,6 +6,8 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 
 from ..api import routes as legacy
+from ..bootstrap.container import AppContainer
+from ..bootstrap.dependencies import get_container
 from ..core.api_key_manager import AuthContext
 from ..core.auth import verify_api_key_flexible
 
@@ -51,11 +53,13 @@ async def list_models(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
 
 
 @router.get("/v1/generation-capacity")
-async def get_generation_capacity(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
+async def get_generation_capacity(
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+    container: AppContainer = Depends(get_container),
+):
     """Return aggregate provider thread capacity without exposing account details."""
     legacy._require_geminigen_scope(auth_ctx)
-    handler = legacy._ensure_generation_handler()
-    capacity = await handler.db.get_geminigen_generation_capacity()
+    capacity = await container.db.get_geminigen_generation_capacity()
     return {
         "object": "generation_capacity",
         "providers": {

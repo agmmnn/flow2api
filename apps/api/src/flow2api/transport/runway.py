@@ -12,6 +12,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..api import routes as legacy
+from ..bootstrap.container import AppContainer
+from ..bootstrap.dependencies import get_container
 from ..core.api_key_manager import AuthContext
 from ..core.auth import verify_api_key_flexible
 from ..services.runway_service import RunwayService
@@ -58,9 +60,12 @@ class RunwayEstimateRequest(RunwayTaskCreateRequest):
 
 
 @router.get("/v1/runway/models")
-async def list_runway_models(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
+async def list_runway_models(
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+    container: AppContainer = Depends(get_container),
+):
     legacy._require_runway_scope(auth_ctx)
-    service = legacy._ensure_runway_service()
+    service = container.runway_service
     config = await service.db.get_runway_config()
     models = await service.db.list_runway_models(enabled_only=False)
 
@@ -97,9 +102,12 @@ async def list_runway_models(auth_ctx: AuthContext = Depends(verify_api_key_flex
 
 
 @router.get("/v1/runway/voices")
-async def list_runway_voices(auth_ctx: AuthContext = Depends(verify_api_key_flexible)):
+async def list_runway_voices(
+    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+    container: AppContainer = Depends(get_container),
+):
     legacy._require_runway_scope(auth_ctx)
-    service = legacy._ensure_runway_service()
+    service = container.runway_service
     try:
         return {"success": True, "voices": await service.get_voices()}
     except Exception as exc:
@@ -114,6 +122,7 @@ async def upload_runway_media(
     asset_group_id: Optional[str] = Form(None),
     metadata_json: str = Form("{}"),
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+    container: AppContainer = Depends(get_container),
 ):
     legacy._require_runway_scope(auth_ctx)
     content = await file.read()
@@ -126,7 +135,7 @@ async def upload_runway_media(
             metadata = parsed
     except Exception as exc:
         raise HTTPException(status_code=400, detail="metadata_json must be a JSON object") from exc
-    service = legacy._ensure_runway_service()
+    service = container.runway_service
     try:
         return await service.upload_media(
             filename=Path(file.filename or "upload.bin").name,
@@ -148,9 +157,10 @@ async def upload_runway_media(
 async def estimate_runway_task(
     request: RunwayEstimateRequest,
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+    container: AppContainer = Depends(get_container),
 ):
     legacy._require_runway_scope(auth_ctx)
-    service = legacy._ensure_runway_service()
+    service = container.runway_service
     try:
         estimate = await service.estimate_task(
             public_model_id=request.model,
@@ -180,9 +190,10 @@ async def estimate_runway_task(
 async def create_runway_task(
     request: RunwayTaskCreateRequest,
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+    container: AppContainer = Depends(get_container),
 ):
     legacy._require_runway_scope(auth_ctx)
-    service = legacy._ensure_runway_service()
+    service = container.runway_service
     try:
         task = await service.start_task(
             public_model_id=request.model,
@@ -214,9 +225,10 @@ async def get_runway_task(
     job_id: str,
     raw_request: Request,
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+    container: AppContainer = Depends(get_container),
 ):
     legacy._require_runway_scope(auth_ctx)
-    service = legacy._ensure_runway_service()
+    service = container.runway_service
     try:
         task = await service.poll_task(
             job_id,
@@ -234,9 +246,10 @@ async def get_runway_task(
 async def cancel_runway_task(
     job_id: str,
     auth_ctx: AuthContext = Depends(verify_api_key_flexible),
+    container: AppContainer = Depends(get_container),
 ):
     legacy._require_runway_scope(auth_ctx)
-    service = legacy._ensure_runway_service()
+    service = container.runway_service
     try:
         task = await service.cancel_task(job_id, api_key_id=auth_ctx.key_id)
         return service.task_to_public_dict(task)
