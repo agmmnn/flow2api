@@ -58,11 +58,11 @@ Dockerfile
 docker-compose*.yml
 .dockerignore
 
-# Documentation
-README.md
+# Documentation not needed at runtime. README.md and LICENSE must remain in the
+# build context because the Python package metadata and Dockerfiles copy them.
 DEPLOYMENT.md
-LICENSE
 *.md
+!README.md
 
 # Test files
 tests/

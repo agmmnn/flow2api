@@ -336,9 +336,7 @@ async def test_postgres_16_encrypted_dump_restore_roundtrip(monkeypatch, tmp_pat
             app_version="test",
         )
 
-        async with database._connect(write=True) as connection:
-            await connection.execute("DELETE FROM tokens WHERE id = ?", (token_id,))
-            await connection.commit()
+        await database.delete_token(token_id)
         assert await database.get_token(token_id) is None
 
         restored_manifest, extracted = await decrypt_and_extract_postgres_archive(
