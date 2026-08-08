@@ -1,13 +1,13 @@
 import asyncio
 import json
 import time
-import uuid
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from fastapi import WebSocket
 
 from ..core.config import config
 from ..core.logger import debug_logger
+from ..workers.extension.captcha import ExtensionCaptchaJobs
 from ..workers.extension.models import (
     DedicatedWorkerStats,
     ExtensionConnection,
@@ -49,6 +49,12 @@ class ExtensionCaptchaService:
         self._dedicated_hybrid_rr = self.worker_routing.round_robin
         self._dedicated_stats_lock = self.worker_routing.lock
         self.generation_uploads = GenerationUploadStore()
+        self.captcha_jobs = ExtensionCaptchaJobs(
+            self.job_broker,
+            self.worker_routing,
+            log_info=debug_logger.log_info,
+            log_error=debug_logger.log_error,
+        )
         self.generation_jobs = ExtensionGenerationJobs(self.job_broker, self.generation_uploads)
         self.refresh_jobs = ExtensionRefreshJobs(self.job_broker)
 
@@ -796,95 +802,14 @@ class ExtensionCaptchaService:
         timeout: int,
         selection_meta: Optional[Dict[str, Any]] = None,
     ) -> tuple[Optional[str], Optional[str]]:
-        track_dedicated = conn.refresh_token_id is not None or conn.captcha_worker_id is not None
-        t0 = time.time()
-        if track_dedicated:
-            async with self._dedicated_stats_lock:
-                self._dedicated_stats(conn.worker_session_id).inflight_count += 1
-        req_id = f"req_{uuid.uuid4().hex}"
-        future = self.job_broker.register("captcha", req_id, conn.websocket)
-        request_data = {
-            "type": "get_token",
-            "req_id": req_id,
-            "action": action,
-            "project_id": project_id,
-            "managed_api_key_id": managed_api_key_id,
-        }
-        try:
-            dispatch_parts = [
-                f"label={conn.client_label or '-'}",
-                f"worker_session_id={conn.worker_session_id}",
-                f"project_id={project_id}",
-                f"action={action}",
-                f"managed_api_key_id={managed_api_key_id}",
-            ]
-            if selection_meta:
-                if selection_meta.get("captcha_worker_pool"):
-                    dispatch_parts.append(f"captcha_worker_id={conn.captcha_worker_id}")
-                    dispatch_parts.append(f"captcha_worker_score={selection_meta.get('captcha_worker_score', '-')}")
-                    dispatch_parts.append(f"captcha_worker_rr_idx={selection_meta.get('captcha_worker_rr_idx', '-')}")
-                if "pool_size" in selection_meta:
-                    dispatch_parts.append(f"pool_size={selection_meta['pool_size']}")
-                if "rr_idx" in selection_meta:
-                    dispatch_parts.append(f"rr_idx={selection_meta['rr_idx']}")
-                if selection_meta.get("dedicated_hybrid"):
-                    dispatch_parts.append(f"dedicated_score={selection_meta.get('dedicated_score', '-')}")
-                    dispatch_parts.append(f"dedicated_rr_idx={selection_meta.get('dedicated_rr_idx', '-')}")
-            debug_logger.log_info("[Extension Captcha] Dispatching token request via " + ", ".join(dispatch_parts))
-            await conn.websocket.send_text(json.dumps(request_data))
-            result = await asyncio.wait_for(future, timeout=timeout)
-            latency_ms = (time.time() - t0) * 1000.0
-            if result.get("status") == "success":
-                tok = result.get("token")
-                if isinstance(tok, str) and tok.strip():
-                    user_agent = normalize_extension_captcha_user_agent(result.get("user_agent"))
-                    if user_agent is None:
-                        user_agent = normalize_extension_captcha_user_agent(result.get("userAgent"))
-                    if user_agent:
-                        self.job_broker.capture_user_agent(req_id, user_agent)
-                    if track_dedicated:
-                        async with self._dedicated_stats_lock:
-                            self._dedicated_record_success_locked(
-                                self._dedicated_stats(conn.worker_session_id), latency_ms
-                            )
-                    await self.job_broker.bind_upstream_verdict(req_id, conn.websocket)
-                    return tok.strip(), req_id
-                if track_dedicated:
-                    async with self._dedicated_stats_lock:
-                        self._dedicated_record_failure_locked(
-                            self._dedicated_stats(conn.worker_session_id), time.time(), is_timeout=False
-                        )
-                return None, None
-            error_msg = result.get("error")
-            debug_logger.log_error(f"[Extension Captcha] Error from extension: {error_msg}")
-            if track_dedicated:
-                async with self._dedicated_stats_lock:
-                    self._dedicated_record_failure_locked(
-                        self._dedicated_stats(conn.worker_session_id), time.time(), is_timeout=False
-                    )
-            return None, None
-        except asyncio.TimeoutError:
-            debug_logger.log_error(f"[Extension Captcha] Timeout waiting for token (req_id: {req_id})")
-            if track_dedicated:
-                async with self._dedicated_stats_lock:
-                    self._dedicated_record_failure_locked(
-                        self._dedicated_stats(conn.worker_session_id), time.time(), is_timeout=True
-                    )
-            return None, None
-        except Exception as e:
-            debug_logger.log_error(f"[Extension Captcha] Communication error: {e}")
-            if track_dedicated:
-                async with self._dedicated_stats_lock:
-                    self._dedicated_record_failure_locked(
-                        self._dedicated_stats(conn.worker_session_id), time.time(), is_timeout=False
-                    )
-            return None, None
-        finally:
-            if track_dedicated:
-                async with self._dedicated_stats_lock:
-                    st = self._dedicated_stats(conn.worker_session_id)
-                    st.inflight_count = max(0, st.inflight_count - 1)
-            self.job_broker.remove("captcha", req_id)
+        return await self.captcha_jobs.execute(
+            conn,
+            project_id=project_id,
+            action=action,
+            managed_api_key_id=managed_api_key_id,
+            timeout=timeout,
+            selection_meta=selection_meta,
+        )
 
     def consume_token_user_agent(self, req_id: Optional[str]) -> Optional[str]:
         """Consume validated solver metadata without changing get_token()'s tuple contract."""

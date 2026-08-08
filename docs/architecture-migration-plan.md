@@ -266,7 +266,7 @@ Exit criteria:
 
 ## Phase 9: Core decomposition
 
-- [ ] Split extension worker WebSocket handling, registry, routing, CAPTCHA jobs, refresh jobs, and generation jobs.
+- [x] Split extension worker WebSocket handling, registry, routing, CAPTCHA jobs, refresh jobs, and generation jobs.
 - [ ] Split personal/browser worker pools, sessions, tabs, policies, CAPTCHA, and refresh behavior.
 - [ ] Split `FlowClient` into shared transport plus auth, projects, images, videos, and model resources.
 - [ ] Split `generation_handler` into an orchestrator and explicit generation pipelines.
@@ -284,8 +284,10 @@ solver user-agent metadata. Generation request execution is also separated and o
 request IDs, dispatch, future cleanup, response validation, and large-upload
 negotiation. Session-token refresh execution now likewise owns its request IDs,
 dispatch, response parsing, timeout behavior, and future cleanup. The existing service
-exposes compatibility aliases while the concrete CAPTCHA executor is separated in the
-next worker slice.
+exposes compatibility aliases while the CAPTCHA executor now owns dispatch, timeout
+handling, worker health accounting, solver user-agent capture, and upstream verdict
+binding. The extension worker decomposition item is complete; personal/browser worker
+pools are the next slice.
 
 Exit criteria:
 
