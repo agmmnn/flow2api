@@ -1,11 +1,10 @@
 """API routes for OpenAI-compatible and Gemini generateContent endpoints."""
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 import asyncio
 import base64
-import hashlib
 import json
 import mimetypes
 import random
@@ -17,12 +16,12 @@ from urllib.parse import parse_qs, urlparse
 from curl_cffi.requests import AsyncSession
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..core import auth as auth_core
-from ..core.auth import verify_api_key_flexible, verify_managed_presence_key
+from ..core.auth import verify_api_key_flexible
 from ..core.api_key_manager import AuthContext
 from ..core.logger import debug_logger
 from ..core.route_log_sanitize import dumps_for_request_log
@@ -46,16 +45,13 @@ from ..core.models import (
     GeminiGenerateContentRequest,
     RunwayTask,
     GeminiGenTask,
-    Task,
 )
 from ..core.config import config as app_config
-from ..services.browser_captcha_extension import ExtensionCaptchaService
 from ..services.cloning_metadata_service import CloningMetadataService
 from ..services.generation_handler import MODEL_CONFIG, GenerationHandler
 from ..services.geminigen_service import GeminiGenService
 from ..services.llm_provider_chain import LlmProviderChain
 from ..services.runway_service import RunwayService
-from ..services.redis_runtime import RedisUnavailableError
 from ..services.tas_tracker_service import TaskTrackerService
 
 router = APIRouter()
@@ -141,34 +137,14 @@ def set_runway_service(service: RunwayService):
     runway_service = service
 
 
-@router.post("/api/client/presence", status_code=204)
-async def report_client_presence(
-    auth_ctx: AuthContext = Depends(verify_managed_presence_key),
-):
-    """Record a lightweight heartbeat for a managed desktop client."""
-    if auth_core.api_key_manager is None or auth_ctx.key_id is None:
-        raise HTTPException(status_code=503, detail="API key manager not initialized")
-    runtime = getattr(auth_core.api_key_manager, "redis_runtime", None)
-    if runtime is not None and runtime.ready:
-        try:
-            await runtime.touch_presence(auth_ctx.key_id)
-        except RedisUnavailableError as exc:
-            raise HTTPException(
-                status_code=503,
-                detail="redis_unavailable",
-                headers={"Retry-After": "5"},
-            ) from exc
-        if not runtime.required:
-            await auth_core.api_key_manager.db.touch_api_key_presence(auth_ctx.key_id)
-    elif runtime is not None and runtime.required:
-        raise HTTPException(
-            status_code=503,
-            detail="redis_unavailable",
-            headers={"Retry-After": "5"},
-        )
-    else:
-        await auth_core.api_key_manager.db.touch_api_key_presence(auth_ctx.key_id)
-    return Response(status_code=204)
+from ..transport.auth import (
+    get_allowed_tokens,
+    report_client_presence,
+    router as auth_router,
+)
+
+
+router.include_router(auth_router)
 
 
 def set_geminigen_service(service: GeminiGenService):
@@ -2106,642 +2082,31 @@ from ..transport.runway import (
 router.include_router(runway_router)
 
 
-@router.post("/v1/chat/completions")
-async def create_chat_completion(
-    request: ChatCompletionRequest,
-    raw_request: Request,
-    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
-):
-    """OpenAI-compatible unified generation endpoint."""
-    try:
-        if auth_ctx.key_id is None:
-            raise HTTPException(status_code=403, detail="Managed API key required for generation")
-        base_allowed = _resolve_allowed_token_ids(auth_ctx)
-        normalized = await _normalize_openai_request(
-            request,
-            api_key_id=auth_ctx.key_id,
-            allowed_token_ids=base_allowed,
-        )
-        if not normalized.prompt:
-            raise HTTPException(status_code=400, detail="Prompt cannot be empty")
-
-        request_base_url = _get_request_base_url(raw_request)
-        if _is_runway_model(normalized.model):
-            if normalized.project_id:
-                raise HTTPException(status_code=400, detail="project_id is only supported for native Flow models")
-            _require_runway_scope(auth_ctx)
-            if request.stream:
-                return StreamingResponse(
-                    _iterate_runway_openai_stream(
-                        request,
-                        normalized,
-                        api_key_id=auth_ctx.key_id,
-                        base_url=request_base_url,
-                    ),
-                    media_type="text/event-stream",
-                    headers={
-                        "Cache-Control": "no-cache",
-                        "Connection": "keep-alive",
-                        "X-Accel-Buffering": "no",
-                    },
-                )
-            return _build_openai_json_response(
-                await _runway_openai_non_stream(
-                    request,
-                    normalized,
-                    api_key_id=auth_ctx.key_id,
-                    base_url=request_base_url,
-                )
-            )
-
-        if _is_geminigen_model(normalized.model):
-            if normalized.project_id:
-                raise HTTPException(status_code=400, detail="project_id is only supported for native Flow models")
-            _require_geminigen_scope(auth_ctx)
-            await _require_geminigen_model_enabled(normalized.model)
-            if request.stream:
-                return StreamingResponse(
-                    _iterate_geminigen_openai_stream(
-                        request,
-                        normalized,
-                        api_key_id=auth_ctx.key_id,
-                        base_url=request_base_url,
-                    ),
-                    media_type="text/event-stream",
-                    headers={
-                        "Cache-Control": "no-cache",
-                        "Connection": "keep-alive",
-                        "X-Accel-Buffering": "no",
-                    },
-                )
-            return _build_openai_json_response(
-                await _geminigen_openai_non_stream(
-                    request,
-                    normalized,
-                    api_key_id=auth_ctx.key_id,
-                    base_url=request_base_url,
-                )
-            )
-
-        allowed_token_ids, selected_project_id = await _select_generation_target(
-            auth_ctx,
-            normalized.model,
-            normalized.project_id,
-        )
-        normalized = replace(normalized, project_id=selected_project_id)
-        selection_context = _build_selection_context(auth_ctx, allowed_token_ids, selected_project_id)
-
-        if request.stream:
-            return StreamingResponse(
-                _iterate_openai_stream(
-                    normalized,
-                    request_base_url,
-                    allowed_token_ids,
-                    selection_context,
-                    api_key_id=auth_ctx.key_id,
-                    project_id=selected_project_id,
-                ),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "X-Accel-Buffering": "no",
-                },
-            )
-
-        payload = _enrich_payload_with_direct_url(
-            _parse_handler_result(
-                await _collect_non_stream_result(
-                    normalized,
-                    request_base_url,
-                    allowed_token_ids,
-                    selection_context,
-                    api_key_id=auth_ctx.key_id,
-                )
-            )
-        )
-        payload = _with_projectid(payload, selected_project_id)
-        return _build_openai_json_response(payload)
-
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+from ..transport.openai import (
+    create_chat_completion,
+    create_chat_completion_async,
+    get_job_status,
+    router as openai_router,
+)
 
 
-@router.post("/v1/async/chat/completions")
-async def create_chat_completion_async(
-    request: ChatCompletionRequest,
-    raw_request: Request,
-    background_tasks: BackgroundTasks,
-    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
-):
-    """OpenAI-compatible async generation endpoint with polling support."""
-    try:
-        if auth_ctx.key_id is None:
-            raise HTTPException(status_code=403, detail="Managed API key required for generation")
-        base_allowed = _resolve_allowed_token_ids(auth_ctx)
-        normalized = await _normalize_openai_request(
-            request,
-            api_key_id=auth_ctx.key_id,
-            allowed_token_ids=base_allowed,
-        )
-        if not normalized.prompt:
-            raise HTTPException(status_code=400, detail="Prompt cannot be empty")
-
-        request_base_url = _get_request_base_url(raw_request)
-        if _is_runway_model(normalized.model):
-            if normalized.project_id:
-                raise HTTPException(status_code=400, detail="project_id is only supported for native Flow models")
-            _require_runway_scope(auth_ctx)
-            task = await _start_runway_from_openai_request(
-                request,
-                normalized,
-                api_key_id=auth_ctx.key_id,
-            )
-            return JSONResponse(
-                status_code=202,
-                content={
-                    "job_id": task.job_id,
-                    "status": task.status,
-                    "model": task.public_model_id,
-                    "upstream_task_id": task.upstream_task_id,
-                },
-            )
-
-        if _is_geminigen_model(normalized.model):
-            if normalized.project_id:
-                raise HTTPException(status_code=400, detail="project_id is only supported for native Flow models")
-            _require_geminigen_scope(auth_ctx)
-            await _require_geminigen_model_enabled(normalized.model)
-            task = await _enqueue_geminigen_from_request(
-                request,
-                normalized,
-                api_key_id=auth_ctx.key_id,
-            )
-            geminigen_service = _ensure_geminigen_service()
-            background_tasks.add_task(
-                geminigen_service.start_and_complete_queued_task_in_background,
-                task.job_id,
-                images=normalized.images,
-                options=_geminigen_options_from_request(request),
-                api_key_id=auth_ctx.key_id,
-                base_url=request_base_url,
-            )
-            return JSONResponse(
-                status_code=202,
-                content=geminigen_service.task_to_public_dict(task),
-            )
-
-        allowed_token_ids, selected_project_id = await _select_generation_target(
-            auth_ctx,
-            normalized.model,
-            normalized.project_id,
-        )
-        normalized = replace(normalized, project_id=selected_project_id)
-        selection_context = _build_selection_context(auth_ctx, allowed_token_ids, selected_project_id)
-
-        handler = _ensure_generation_handler()
-        selected_token_id = min(allowed_token_ids) if allowed_token_ids else 0
-        new_task_id = _new_async_job_id()
-        await handler.db.create_task(
-            Task(
-                task_id=new_task_id,
-                token_id=selected_token_id,
-                api_key_id=auth_ctx.key_id,
-                project_id=selected_project_id,
-                model=normalized.model,
-                prompt=normalized.prompt,
-                status="processing",
-                progress=0,
-                requested_resolution=_infer_requested_resolution(normalized.model),
-                upscale_status="pending" if _infer_requested_resolution(normalized.model) else "not_requested",
-                job_phase="queued",
-                captcha_status="pending",
-            )
-        )
-
-        background_tasks.add_task(
-            _run_async_generation_task,
-            task_id=new_task_id,
-            normalized=normalized,
-            base_url_override=request_base_url,
-            allowed_token_ids=allowed_token_ids,
-            selection_context=selection_context,
-            api_key_id=auth_ctx.key_id,
-        )
-        return JSONResponse(
-            status_code=202,
-            content={
-                "job_id": new_task_id,
-                "status": "processing",
-                "project_id": selected_project_id,
-            },
-        )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+router.include_router(openai_router)
 
 
-@router.get("/v1/jobs/{job_id}")
-async def get_job_status(
-    job_id: str,
-    raw_request: Request,
-    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
-):
-    """Read persisted async generation status without duplicating provider polling."""
-    if job_id.startswith("geminigen-") and geminigen_service is not None:
-        geminigen_task = await geminigen_service.db.get_geminigen_task(job_id)
-        if geminigen_task:
-            if auth_ctx.key_id is None or geminigen_task.api_key_id != auth_ctx.key_id:
-                raise HTTPException(status_code=403, detail="Not authorized to view this job")
-            return geminigen_service.task_to_public_dict(geminigen_task)
-
-    if job_id.startswith("runway-") and runway_service is not None:
-        runway_task = await runway_service.db.get_runway_task(job_id)
-        if runway_task:
-            if auth_ctx.key_id is None or runway_task.api_key_id != auth_ctx.key_id:
-                raise HTTPException(status_code=403, detail="Not authorized to view this job")
-            runway_task = await runway_service.poll_task(
-                job_id,
-                api_key_id=auth_ctx.key_id,
-                base_url=_get_request_base_url(raw_request),
-            )
-            return runway_service.task_to_public_dict(runway_task)
-
-    handler = _ensure_generation_handler()
-    task = await handler.db.get_task(job_id)
-    if not task:
-        if runway_service is not None:
-            runway_task = await runway_service.db.get_runway_task(job_id)
-            if runway_task:
-                if auth_ctx.key_id is None or runway_task.api_key_id != auth_ctx.key_id:
-                    raise HTTPException(status_code=403, detail="Not authorized to view this job")
-                runway_task = await runway_service.poll_task(
-                    job_id,
-                    api_key_id=auth_ctx.key_id,
-                    base_url=_get_request_base_url(raw_request),
-                )
-                return runway_service.task_to_public_dict(runway_task)
-        if geminigen_service is not None:
-            geminigen_task = await geminigen_service.db.get_geminigen_task(job_id)
-            if geminigen_task:
-                if auth_ctx.key_id is None or geminigen_task.api_key_id != auth_ctx.key_id:
-                    raise HTTPException(status_code=403, detail="Not authorized to view this job")
-                return geminigen_service.task_to_public_dict(geminigen_task)
-        raise HTTPException(status_code=404, detail="Job not found")
-
-    if auth_ctx.key_id is None or task.api_key_id != auth_ctx.key_id:
-        raise HTTPException(status_code=403, detail="Not authorized to view this job")
-
-    return {
-        "job_id": task.task_id,
-        "status": task.status,
-        "progress": task.progress,
-        "model": task.model,
-        "project_id": task.project_id,
-        "result_urls": task.result_urls,
-        "base_result_urls": task.base_result_urls,
-        "delivery_urls": task.delivery_urls,
-        "requested_resolution": task.requested_resolution,
-        "output_resolution": task.output_resolution,
-        "upscale_status": task.upscale_status,
-        "upscale_error_message": task.upscale_error_message,
-        "error_message": task.error_message,
-        "job_phase": getattr(task, "job_phase", None),
-        "captcha_status": getattr(task, "captcha_status", None),
-        "captcha_detail": getattr(task, "captcha_detail", None),
-        "created_at": task.created_at.isoformat() if task.created_at else None,
-        "completed_at": task.completed_at.isoformat() if task.completed_at else None,
-    }
+from ..transport.gemini import (
+    generate_content,
+    router as gemini_router,
+    stream_generate_content,
+)
 
 
-@router.post("/v1beta/models/{model}:generateContent")
-@router.post("/models/{model}:generateContent")
-async def generate_content(
-    model: str,
-    request: GeminiGenerateContentRequest,
-    raw_request: Request,
-    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
-):
-    """Gemini official generateContent endpoint."""
-    try:
-        if auth_ctx.key_id is None:
-            raise HTTPException(status_code=403, detail="Managed API key required for generation")
-        base_allowed = _resolve_allowed_token_ids(auth_ctx)
-        normalized = await _normalize_gemini_request(
-            model,
-            request,
-            api_key_id=auth_ctx.key_id,
-            allowed_token_ids=base_allowed,
-        )
-        if not normalized.prompt:
-            raise HTTPException(status_code=400, detail="Prompt cannot be empty")
-
-        request_base_url = _get_request_base_url(raw_request)
-        if _is_geminigen_model(normalized.model):
-            if normalized.project_id:
-                raise HTTPException(status_code=400, detail="project_id is only supported for native Flow models")
-            _require_geminigen_scope(auth_ctx)
-            await _require_geminigen_model_enabled(normalized.model)
-            payload = await _geminigen_openai_non_stream(
-                request,
-                normalized,
-                api_key_id=auth_ctx.key_id,
-                base_url=request_base_url,
-            )
-            if "error" in payload:
-                return _build_gemini_error_response_from_handler(payload)
-            return JSONResponse(
-                content=await _build_gemini_success_payload(
-                    payload,
-                    normalized.model,
-                    api_key_id=auth_ctx.key_id,
-                    allowed_token_ids=set(),
-                    project_id=None,
-                )
-            )
-
-        allowed_token_ids, selected_project_id = await _select_generation_target(
-            auth_ctx,
-            normalized.model,
-            normalized.project_id,
-        )
-        normalized = replace(normalized, project_id=selected_project_id)
-        selection_context = _build_selection_context(auth_ctx, allowed_token_ids, selected_project_id)
-
-        payload = _enrich_payload_with_direct_url(
-            _parse_handler_result(
-                await _collect_non_stream_result(
-                    normalized,
-                    request_base_url,
-                    allowed_token_ids,
-                    selection_context,
-                    api_key_id=auth_ctx.key_id,
-                )
-            )
-        )
-        if "error" in payload:
-            return _build_gemini_error_response_from_handler(payload)
-
-        return JSONResponse(
-            content=await _build_gemini_success_payload(
-                payload,
-                normalized.model,
-                api_key_id=auth_ctx.key_id,
-                allowed_token_ids=allowed_token_ids,
-                project_id=selected_project_id,
-            )
-        )
-
-    except HTTPException as exc:
-        return JSONResponse(
-            status_code=exc.status_code,
-            content=_build_gemini_error_payload(exc.status_code, str(exc.detail)),
-        )
-    except Exception as exc:
-        return JSONResponse(
-            status_code=500,
-            content=_build_gemini_error_payload(500, str(exc)),
-        )
+router.include_router(gemini_router)
 
 
-@router.post("/v1beta/models/{model}:streamGenerateContent")
-@router.post("/models/{model}:streamGenerateContent")
-async def stream_generate_content(
-    model: str,
-    request: GeminiGenerateContentRequest,
-    raw_request: Request,
-    alt: Optional[str] = Query(None),
-    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
-):
-    """Gemini official streamGenerateContent endpoint."""
-    try:
-        if auth_ctx.key_id is None:
-            raise HTTPException(status_code=403, detail="Managed API key required for generation")
-        base_allowed = _resolve_allowed_token_ids(auth_ctx)
-        normalized = await _normalize_gemini_request(
-            model,
-            request,
-            api_key_id=auth_ctx.key_id,
-            allowed_token_ids=base_allowed,
-        )
-        if not normalized.prompt:
-            raise HTTPException(status_code=400, detail="Prompt cannot be empty")
-
-        request_base_url = _get_request_base_url(raw_request)
-        if _is_geminigen_model(normalized.model):
-            if normalized.project_id:
-                raise HTTPException(status_code=400, detail="project_id is only supported for native Flow models")
-            _require_geminigen_scope(auth_ctx)
-            await _require_geminigen_model_enabled(normalized.model)
-            return StreamingResponse(
-                _iterate_geminigen_openai_stream(
-                    request,
-                    normalized,
-                    api_key_id=auth_ctx.key_id,
-                    base_url=request_base_url,
-                ),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "X-Accel-Buffering": "no",
-                },
-            )
-
-        allowed_token_ids, selected_project_id = await _select_generation_target(
-            auth_ctx,
-            normalized.model,
-            normalized.project_id,
-        )
-        normalized = replace(normalized, project_id=selected_project_id)
-        selection_context = _build_selection_context(auth_ctx, allowed_token_ids, selected_project_id)
-
-        return StreamingResponse(
-            _iterate_gemini_stream(
-                normalized,
-                normalized.model,
-                request_base_url,
-                allowed_token_ids,
-                selection_context,
-                api_key_id=auth_ctx.key_id,
-                project_id=selected_project_id,
-            ),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
-    except HTTPException as exc:
-        return JSONResponse(
-            status_code=exc.status_code,
-            content=_build_gemini_error_payload(exc.status_code, str(exc.detail)),
-        )
-    except Exception as exc:
-        return JSONResponse(
-            status_code=500,
-            content=_build_gemini_error_payload(500, str(exc)),
-        )
+from ..transport.websocket import (
+    captcha_websocket_endpoint,
+    router as websocket_router,
+)
 
 
-@router.websocket("/captcha_ws")
-async def captcha_websocket_endpoint(websocket: WebSocket):
-    captcha_worker_key = (
-        websocket.query_params.get("captcha_worker_key")
-        or websocket.query_params.get("captcha_key")
-        or websocket.headers.get("x-flow2-captcha-worker-key")
-    )
-    if captcha_worker_key:
-        handler_db = generation_handler.db if generation_handler is not None else None
-        if handler_db is None or not hasattr(handler_db, "get_captcha_worker_key_by_hash"):
-            await websocket.accept()
-            await websocket.close(code=1011, reason="Captcha worker auth unavailable")
-            return
-        captcha_worker_key_hash = hashlib.sha256(captcha_worker_key.encode("utf-8")).hexdigest()
-        captcha_worker = await handler_db.get_captcha_worker_key_by_hash(captcha_worker_key_hash)
-        if not captcha_worker or not bool(captcha_worker.get("is_active", True)):
-            await websocket.accept()
-            await websocket.close(code=1008, reason="Invalid captcha worker key")
-            return
-        service = await ExtensionCaptchaService.get_instance(db=handler_db)
-        await service.connect(websocket, authenticated_captcha_worker=captcha_worker)
-        try:
-            while True:
-                data = await websocket.receive_text()
-                await service.handle_message(websocket, data)
-        except WebSocketDisconnect:
-            service.disconnect(websocket)
-        except Exception as exc:
-            debug_logger.log_error(f"WebSocket error: {exc}")
-            service.disconnect(websocket)
-        return
-
-    worker_key = (
-        websocket.query_params.get("worker_key")
-        or websocket.query_params.get("worker_auth_key")
-        or websocket.headers.get("x-flow2-worker-key")
-    )
-    if worker_key:
-        await websocket.accept()
-        await websocket.close(code=1008, reason="Refresh worker keys removed; use refresh_token_id")
-        return
-
-    raw_refresh_token_id = websocket.query_params.get("refresh_token_id")
-    if raw_refresh_token_id is not None:
-        try:
-            refresh_token_id = int(str(raw_refresh_token_id).strip())
-        except (TypeError, ValueError):
-            await websocket.accept()
-            await websocket.close(code=1008, reason="refresh_token_id must be a positive integer")
-            return
-        if refresh_token_id <= 0:
-            await websocket.accept()
-            await websocket.close(code=1008, reason="refresh_token_id must be a positive integer")
-            return
-        handler_db = generation_handler.db if generation_handler is not None else None
-        if handler_db is None or not hasattr(handler_db, "get_token"):
-            await websocket.accept()
-            await websocket.close(code=1011, reason="Refresh token lookup unavailable")
-            return
-        refresh_token = await handler_db.get_token(refresh_token_id)
-        if not refresh_token:
-            await websocket.accept()
-            await websocket.close(code=1008, reason="refresh_token_id token not found")
-            return
-        service = await ExtensionCaptchaService.get_instance(db=handler_db)
-        await service.connect(websocket, refresh_token_id=refresh_token_id)
-        try:
-            while True:
-                data = await websocket.receive_text()
-                await service.handle_message(websocket, data)
-        except WebSocketDisconnect:
-            service.disconnect(websocket)
-        except Exception as exc:
-            debug_logger.log_error(f"WebSocket error: {exc}")
-            service.disconnect(websocket)
-        return
-
-    api_key = (
-        websocket.query_params.get("key")
-        or websocket.query_params.get("api_key")
-        or websocket.headers.get("x-goog-api-key")
-    )
-    if not api_key:
-        auth_header = websocket.headers.get("authorization", "")
-        if auth_header.lower().startswith("bearer "):
-            api_key = auth_header[7:].strip()
-    if not api_key:
-        await websocket.accept()
-        await websocket.close(code=1008, reason="Missing API key")
-        return
-
-    if auth_core.api_key_manager is None:
-        await websocket.accept()
-        await websocket.close(code=1011, reason="API key manager unavailable")
-        return
-
-    try:
-        auth_ctx = await auth_core.api_key_manager.authenticate(
-            api_key,
-            endpoint="/captcha_ws",
-            require_assignment=False,
-        )
-    except PermissionError as exc:
-        await websocket.accept()
-        await websocket.close(code=1008, reason=str(exc) or "Invalid API key")
-        return
-    except RuntimeError as exc:
-        await websocket.accept()
-        await websocket.close(code=1013, reason=str(exc) or "Rate limited")
-        return
-
-    if auth_ctx.is_legacy or auth_ctx.key_id is None:
-        await websocket.accept()
-        await websocket.close(code=1008, reason="Managed API key required")
-        return
-
-    service = await ExtensionCaptchaService.get_instance(
-        db=(generation_handler.db if generation_handler is not None else None)
-    )
-    await service.connect(websocket, authenticated_managed_api_key_id=int(auth_ctx.key_id))
-    try:
-        while True:
-            data = await websocket.receive_text()
-            await service.handle_message(websocket, data)
-    except WebSocketDisconnect:
-        service.disconnect(websocket)
-    except Exception as exc:
-        debug_logger.log_error(f"WebSocket error: {exc}")
-        service.disconnect(websocket)
-
-
-@router.get("/v1/api-key/allowed-tokens")
-async def get_allowed_tokens(
-    auth_ctx: AuthContext = Depends(verify_api_key_flexible),
-):
-    """Get the allowed tokens (accounts) and their credits for the current API key."""
-    handler = _ensure_generation_handler()
-    db = handler.db
-    
-    tokens_info = []
-    for token_id in auth_ctx.allowed_accounts:
-        token = await db.get_token(token_id)
-        if token and token.is_active:
-            tokens_info.append({
-                "id": token.id,
-                "email": token.email,
-                "label": token.remark or token.name or "default",
-                "credits": token.credits,
-                "user_paygate_tier": token.user_paygate_tier,
-                "is_active": token.is_active
-            })
-            
-    return {
-        "success": True,
-        "api_key_label": auth_ctx.key_label,
-        "allowed_tokens": tokens_info
-    }
+router.include_router(websocket_router)
