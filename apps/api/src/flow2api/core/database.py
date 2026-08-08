@@ -1,4 +1,5 @@
 """Database storage layer for Flow2API"""
+
 import asyncio
 import aiosqlite
 import json
@@ -43,6 +44,11 @@ from .models import (
     GeminiGenAccount,
     GeminiGenTask,
     TokenRefreshConfig,
+)
+from ..persistence.migrations.sqlite import (
+    discover_sqlite_migrations,
+    prepare_sqlite_migrations,
+    stamp_compatible_sqlite_database,
 )
 
 
@@ -186,6 +192,7 @@ class Database:
         self.log_payload_manager = None
         self._last_progress_persist: Dict[str, float] = {}
         self._last_log_progress_persist: Dict[int, float] = {}
+        self.database_revision = ""
 
     def db_exists(self) -> bool:
         """Check if database file exists"""
@@ -205,10 +212,7 @@ class Database:
         except Exception as exc:
             if not is_sqlite_recoverable_storage_error(exc):
                 raise
-            print(
-                "WARN SQLite WAL mode unavailable during startup "
-                f"({exc}); falling back to DELETE journal mode."
-            )
+            print(f"WARN SQLite WAL mode unavailable during startup ({exc}); falling back to DELETE journal mode.")
             await db.execute("PRAGMA journal_mode = DELETE")
             await db.execute("PRAGMA synchronous = FULL")
 
@@ -371,10 +375,7 @@ class Database:
 
     async def _table_exists(self, db, table_name: str) -> bool:
         """Check if a table exists in the database"""
-        cursor = await db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-            (table_name,)
-        )
+        cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,))
         result = await cursor.fetchone()
         return result is not None
 
@@ -487,7 +488,9 @@ class Database:
         await db.execute("INSERT OR IGNORE INTO runway_config (id) VALUES (1)")
         for model in RUNWAY_DEFAULT_MODELS:
             live_available = model.get("builder_key") != "unsupported"
-            disabled_reason = model.get("disabled_reason") or ("" if live_available else "Exact task builder is not available")
+            disabled_reason = model.get("disabled_reason") or (
+                "" if live_available else "Exact task builder is not available"
+            )
             await db.execute(
                 """
                 INSERT INTO runway_models (
@@ -760,10 +763,13 @@ class Database:
                 if "error_ban_enabled" in admin_config:
                     error_ban_enabled = 1 if admin_config.get("error_ban_enabled") else 0
 
-            await db.execute("""
+            await db.execute(
+                """
                 INSERT INTO admin_config (id, username, password, api_key, error_ban_threshold, error_ban_enabled)
                 VALUES (1, ?, ?, ?, ?, ?)
-            """, (admin_username, admin_password, api_key, error_ban_threshold, error_ban_enabled))
+            """,
+                (admin_username, admin_password, api_key, error_ban_threshold, error_ban_enabled),
+            )
 
         # Ensure proxy_config has a row
         cursor = await db.execute("SELECT COUNT(*) FROM proxy_config")
@@ -780,19 +786,18 @@ class Database:
                 proxy_url = proxy_config.get("proxy_url", "")
                 proxy_url = proxy_url if proxy_url else None
                 media_proxy_enabled = proxy_config.get(
-                    "media_proxy_enabled",
-                    proxy_config.get("image_io_proxy_enabled", False)
+                    "media_proxy_enabled", proxy_config.get("image_io_proxy_enabled", False)
                 )
-                media_proxy_url = proxy_config.get(
-                    "media_proxy_url",
-                    proxy_config.get("image_io_proxy_url", "")
-                )
+                media_proxy_url = proxy_config.get("media_proxy_url", proxy_config.get("image_io_proxy_url", ""))
                 media_proxy_url = media_proxy_url if media_proxy_url else None
 
-            await db.execute("""
+            await db.execute(
+                """
                 INSERT INTO proxy_config (id, enabled, proxy_url, media_proxy_enabled, media_proxy_url)
                 VALUES (1, ?, ?, ?, ?)
-            """, (proxy_enabled, proxy_url, media_proxy_enabled, media_proxy_url))
+            """,
+                (proxy_enabled, proxy_url, media_proxy_enabled, media_proxy_url),
+            )
 
         # Ensure generation_config has a row
         cursor = await db.execute("SELECT COUNT(*) FROM generation_config")
@@ -814,13 +819,17 @@ class Database:
                 extension_generation_enabled = bool(
                     generation_routing_config.get("extension_generation_enabled", False)
                 )
-                mode = str(
-                    generation_routing_config.get(
-                        "extension_generation_fallback_mode",
-                        "local_http_on_recaptcha",
+                mode = (
+                    str(
+                        generation_routing_config.get(
+                            "extension_generation_fallback_mode",
+                            "local_http_on_recaptcha",
+                        )
+                        or ""
                     )
-                    or ""
-                ).strip().lower()
+                    .strip()
+                    .lower()
+                )
                 extension_generation_fallback_mode = (
                     mode if mode in {"none", "local_http_on_recaptcha"} else "local_http_on_recaptcha"
                 )
@@ -830,7 +839,8 @@ class Database:
             except Exception:
                 max_retries = 3
 
-            await db.execute("""
+            await db.execute(
+                """
                 INSERT INTO generation_config (
                     id,
                     image_timeout,
@@ -840,13 +850,15 @@ class Database:
                     extension_generation_fallback_mode
                 )
                 VALUES (1, ?, ?, ?, ?, ?)
-            """, (
-                image_timeout,
-                video_timeout,
-                max_retries,
-                extension_generation_enabled,
-                extension_generation_fallback_mode,
-            ))
+            """,
+                (
+                    image_timeout,
+                    video_timeout,
+                    max_retries,
+                    extension_generation_enabled,
+                    extension_generation_fallback_mode,
+                ),
+            )
 
         # Ensure call_logic_config has a row
         cursor = await db.execute("SELECT COUNT(*) FROM call_logic_config")
@@ -864,10 +876,13 @@ class Database:
                 else:
                     polling_mode_enabled = call_mode == "polling"
 
-            await db.execute("""
+            await db.execute(
+                """
                 INSERT INTO call_logic_config (id, call_mode, polling_mode_enabled)
                 VALUES (1, ?, ?)
-            """, (call_mode, polling_mode_enabled))
+            """,
+                (call_mode, polling_mode_enabled),
+            )
 
         # Ensure cache_config has a row
         cursor = await db.execute("SELECT COUNT(*) FROM cache_config")
@@ -889,15 +904,21 @@ class Database:
                 # Convert empty string to None
                 cache_base_url = cache_base_url if cache_base_url else None
 
-            await db.execute("""
+            await db.execute(
+                """
                 INSERT INTO cache_config (
                     id, cache_enabled, cache_timeout, cache_base_url,
                     cache_provider, cache_delivery_mode
                 ) VALUES (1, ?, ?, ?, ?, ?)
-            """, (
-                cache_enabled, cache_timeout, cache_base_url,
-                cache_provider, cache_delivery_mode,
-            ))
+            """,
+                (
+                    cache_enabled,
+                    cache_timeout,
+                    cache_base_url,
+                    cache_provider,
+                    cache_delivery_mode,
+                ),
+            )
 
         # Ensure debug_config has a row
         cursor = await db.execute("SELECT COUNT(*) FROM debug_config")
@@ -915,10 +936,13 @@ class Database:
                 log_responses = debug_config.get("log_responses", True)
                 mask_token = debug_config.get("mask_token", True)
 
-            await db.execute("""
+            await db.execute(
+                """
                 INSERT INTO debug_config (id, enabled, log_requests, log_responses, mask_token)
                 VALUES (1, ?, ?, ?, ?)
-            """, (debug_enabled, log_requests, log_responses, mask_token))
+            """,
+                (debug_enabled, log_requests, log_responses, mask_token),
+            )
 
         # Ensure captcha_config has a row
         cursor = await db.execute("SELECT COUNT(*) FROM captcha_config")
@@ -984,12 +1008,20 @@ class Database:
                     "https://labs.google/fx/tools/flow,https://labs.google/fx",
                 )
                 session_refresh_wait_seconds_per_url = captcha_config.get("session_refresh_wait_seconds_per_url", 60)
-                session_refresh_overall_timeout_seconds = captcha_config.get("session_refresh_overall_timeout_seconds", 180)
-                session_refresh_update_st_from_cookie = captcha_config.get("session_refresh_update_st_from_cookie", True)
-                session_refresh_fail_if_st_refresh_fails = captcha_config.get("session_refresh_fail_if_st_refresh_fails", True)
+                session_refresh_overall_timeout_seconds = captcha_config.get(
+                    "session_refresh_overall_timeout_seconds", 180
+                )
+                session_refresh_update_st_from_cookie = captcha_config.get(
+                    "session_refresh_update_st_from_cookie", True
+                )
+                session_refresh_fail_if_st_refresh_fails = captcha_config.get(
+                    "session_refresh_fail_if_st_refresh_fails", True
+                )
                 session_refresh_local_only = captcha_config.get("session_refresh_local_only", True)
                 session_refresh_scheduler_enabled = captcha_config.get("session_refresh_scheduler_enabled", False)
-                session_refresh_scheduler_interval_minutes = captcha_config.get("session_refresh_scheduler_interval_minutes", 30)
+                session_refresh_scheduler_interval_minutes = captcha_config.get(
+                    "session_refresh_scheduler_interval_minutes", 30
+                )
                 session_refresh_scheduler_batch_size = captcha_config.get("session_refresh_scheduler_batch_size", 10)
                 session_refresh_scheduler_only_expiring_within_minutes = captcha_config.get(
                     "session_refresh_scheduler_only_expiring_within_minutes",
@@ -1036,7 +1068,8 @@ class Database:
             except Exception:
                 personal_idle_tab_ttl_seconds = 600
 
-            await db.execute("""
+            await db.execute(
+                """
                 INSERT INTO captcha_config (
                     id, captcha_method, yescaptcha_api_key, yescaptcha_base_url,
                     yescaptcha_task_type,
@@ -1055,39 +1088,41 @@ class Database:
                     dedicated_extension_st_refresh_timeout_seconds
                 )
                 VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                captcha_method,
-                yescaptcha_api_key,
-                yescaptcha_base_url,
-                yescaptcha_task_type,
-                remote_browser_base_url,
-                remote_browser_api_key,
-                remote_browser_timeout,
-                bool(browser_fallback_to_remote_browser),
-                browser_count,
-                browser_personal_fresh_restart_every_n_solves,
-                personal_project_pool_size,
-                personal_max_resident_tabs,
-                personal_idle_tab_ttl_seconds,
-                bool(session_refresh_enabled),
-                bool(session_refresh_browser_first),
-                bool(session_refresh_inject_st_cookie),
-                str(session_refresh_warmup_urls or "").strip()
-                or "https://labs.google/fx/tools/flow,https://labs.google/fx",
-                max(0, int(session_refresh_wait_seconds_per_url or 60)),
-                max(10, int(session_refresh_overall_timeout_seconds or 180)),
-                bool(session_refresh_update_st_from_cookie),
-                bool(session_refresh_fail_if_st_refresh_fails),
-                bool(session_refresh_local_only),
-                bool(session_refresh_scheduler_enabled),
-                max(1, int(session_refresh_scheduler_interval_minutes or 30)),
-                max(1, int(session_refresh_scheduler_batch_size or 10)),
-                max(1, int(session_refresh_scheduler_only_expiring_within_minutes or 60)),
-                max(1, min(120, int(extension_queue_wait_timeout_seconds or 20))),
-                bool(dedicated_extension_enabled),
-                max(5, min(180, int(dedicated_extension_captcha_timeout_seconds or 25))),
-                max(10, min(300, int(dedicated_extension_st_refresh_timeout_seconds or 45))),
-            ))
+            """,
+                (
+                    captcha_method,
+                    yescaptcha_api_key,
+                    yescaptcha_base_url,
+                    yescaptcha_task_type,
+                    remote_browser_base_url,
+                    remote_browser_api_key,
+                    remote_browser_timeout,
+                    bool(browser_fallback_to_remote_browser),
+                    browser_count,
+                    browser_personal_fresh_restart_every_n_solves,
+                    personal_project_pool_size,
+                    personal_max_resident_tabs,
+                    personal_idle_tab_ttl_seconds,
+                    bool(session_refresh_enabled),
+                    bool(session_refresh_browser_first),
+                    bool(session_refresh_inject_st_cookie),
+                    str(session_refresh_warmup_urls or "").strip()
+                    or "https://labs.google/fx/tools/flow,https://labs.google/fx",
+                    max(0, int(session_refresh_wait_seconds_per_url or 60)),
+                    max(10, int(session_refresh_overall_timeout_seconds or 180)),
+                    bool(session_refresh_update_st_from_cookie),
+                    bool(session_refresh_fail_if_st_refresh_fails),
+                    bool(session_refresh_local_only),
+                    bool(session_refresh_scheduler_enabled),
+                    max(1, int(session_refresh_scheduler_interval_minutes or 30)),
+                    max(1, int(session_refresh_scheduler_batch_size or 10)),
+                    max(1, int(session_refresh_scheduler_only_expiring_within_minutes or 60)),
+                    max(1, min(120, int(extension_queue_wait_timeout_seconds or 20))),
+                    bool(dedicated_extension_enabled),
+                    max(5, min(180, int(dedicated_extension_captcha_timeout_seconds or 25))),
+                    max(10, min(300, int(dedicated_extension_st_refresh_timeout_seconds or 45))),
+                ),
+            )
 
         # Ensure plugin_config has a row
         cursor = await db.execute("SELECT COUNT(*) FROM plugin_config")
@@ -1112,6 +1147,7 @@ class Database:
                         Existing config rows will NOT be overwritten.
         """
         async with self._connect(write=True) as db:
+            migration_state = await prepare_sqlite_migrations(db)
             print("Checking database integrity and performing migrations...")
             await self._configure_write_pragmas(db)
             await self._ensure_runway_tables(db)
@@ -1510,7 +1546,10 @@ class Database:
                     ("session_refresh_enabled", "BOOLEAN DEFAULT 1"),
                     ("session_refresh_browser_first", "BOOLEAN DEFAULT 1"),
                     ("session_refresh_inject_st_cookie", "BOOLEAN DEFAULT 1"),
-                    ("session_refresh_warmup_urls", "TEXT DEFAULT 'https://labs.google/fx/tools/flow,https://labs.google/fx'"),
+                    (
+                        "session_refresh_warmup_urls",
+                        "TEXT DEFAULT 'https://labs.google/fx/tools/flow,https://labs.google/fx'",
+                    ),
                     ("session_refresh_wait_seconds_per_url", "INTEGER DEFAULT 60"),
                     ("session_refresh_overall_timeout_seconds", "INTEGER DEFAULT 180"),
                     ("session_refresh_update_st_from_cookie", "BOOLEAN DEFAULT 1"),
@@ -1618,24 +1657,43 @@ class Database:
             # It only ensures missing rows are created with default values from setting.toml
             await self._ensure_config_rows(db, config_dict=config_dict)
 
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_projects_api_key_created_at ON projects(api_key_id, created_at DESC)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_id_created_at ON request_logs(api_key_id, created_at DESC)")
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_projects_api_key_created_at ON projects(api_key_id, created_at DESC)"
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_id_created_at ON request_logs(api_key_id, created_at DESC)"
+            )
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_op_created ON request_logs(api_key_id, operation, created_at DESC)"
             )
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_cache_files_api_key_filename ON cache_files(api_key_id, filename)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_cache_files_api_key_project ON cache_files(api_key_id, flow_project_id)")
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cache_files_api_key_filename ON cache_files(api_key_id, filename)"
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cache_files_api_key_project ON cache_files(api_key_id, flow_project_id)"
+            )
             await db.execute("CREATE INDEX IF NOT EXISTS idx_operation_stats_operation ON operation_stats(operation)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_extension_worker_bindings_api_key_id ON extension_worker_bindings(api_key_id)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_captcha_worker_keys_active ON captcha_worker_keys(is_active)")
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_extension_worker_bindings_api_key_id ON extension_worker_bindings(api_key_id)"
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_captcha_worker_keys_active ON captcha_worker_keys(is_active)"
+            )
 
             await db.commit()
+            if migration_state == "legacy":
+                self.database_revision = await stamp_compatible_sqlite_database(db)
+            else:
+                self.database_revision = discover_sqlite_migrations()[-1].revision
             print("Database migration check completed.")
 
     async def init_db(self):
         """Initialize database tables"""
         async with self._connect(write=True) as db:
             await self._configure_write_pragmas(db)
+            migration_state = await prepare_sqlite_migrations(db)
+            if migration_state != "legacy":
+                self.database_revision = discover_sqlite_migrations()[-1].revision
             # Tokens table (Flow2API版本)
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS tokens (
@@ -1697,8 +1755,7 @@ class Database:
                 )
             """)
             await db.execute(
-                "INSERT OR IGNORE INTO token_refresh_config "
-                "(id, enabled, refresh_interval_minutes) VALUES (1, 1, 120)"
+                "INSERT OR IGNORE INTO token_refresh_config (id, enabled, refresh_interval_minutes) VALUES (1, 1, 120)"
             )
 
             # Projects table (新增)
@@ -2113,31 +2170,57 @@ class Database:
             await db.execute("CREATE INDEX IF NOT EXISTS idx_task_id ON tasks(task_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_token_st ON tokens(st)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_project_id ON projects(project_id)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_projects_api_key_created_at ON projects(api_key_id, created_at DESC)")
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_projects_api_key_created_at ON projects(api_key_id, created_at DESC)"
+            )
             await db.execute("CREATE INDEX IF NOT EXISTS idx_tokens_email ON tokens(email)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_tokens_is_active_last_used_at ON tokens(is_active, last_used_at)")
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tokens_is_active_last_used_at ON tokens(is_active, last_used_at)"
+            )
             await db.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_client_id ON api_keys(client_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_api_key_accounts_key_id ON api_key_accounts(api_key_id)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_api_key_rl_key_endpoint ON api_key_rate_limits(api_key_id, endpoint)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_api_key_audit_created_at ON api_key_audit_logs(created_at DESC)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_captcha_worker_keys_active ON captcha_worker_keys(is_active)")
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_api_key_rl_key_endpoint ON api_key_rate_limits(api_key_id, endpoint)"
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_api_key_audit_created_at ON api_key_audit_logs(created_at DESC)"
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_captcha_worker_keys_active ON captcha_worker_keys(is_active)"
+            )
 
             # Migrate request_logs table if needed
             await self._migrate_request_logs(db)
 
             # Request logs query indexes (列表按 created_at 排序 / token 过滤)
             await db.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs(created_at DESC)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_token_id_created_at ON request_logs(token_id, created_at DESC)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_id_created_at ON request_logs(api_key_id, created_at DESC)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_operation_created_at ON request_logs(operation, created_at DESC)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_status_created_at ON request_logs(status_code, status_text, created_at DESC)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_geminigen_tasks_retention ON geminigen_tasks(status, completed_at, updated_at)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_api_key_audit_logs_created_at ON api_key_audit_logs(created_at)")
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_request_logs_token_id_created_at ON request_logs(token_id, created_at DESC)"
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_id_created_at ON request_logs(api_key_id, created_at DESC)"
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_request_logs_operation_created_at ON request_logs(operation, created_at DESC)"
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_request_logs_status_created_at ON request_logs(status_code, status_text, created_at DESC)"
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_geminigen_tasks_retention ON geminigen_tasks(status, completed_at, updated_at)"
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_api_key_audit_logs_created_at ON api_key_audit_logs(created_at)"
+            )
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_request_logs_api_key_op_created ON request_logs(api_key_id, operation, created_at DESC)"
             )
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_cache_files_api_key_filename ON cache_files(api_key_id, filename)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_cache_files_api_key_project ON cache_files(api_key_id, flow_project_id)")
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cache_files_api_key_filename ON cache_files(api_key_id, filename)"
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cache_files_api_key_project ON cache_files(api_key_id, flow_project_id)"
+            )
 
             # Token stats lookup index
             await db.execute("CREATE INDEX IF NOT EXISTS idx_token_stats_token_id ON token_stats(token_id)")
@@ -2236,10 +2319,7 @@ class Database:
                 if not await self._column_exists(db, "cache_files", column_name):
                     await db.execute(f"ALTER TABLE cache_files ADD COLUMN {column_name} {column_type}")
                     print(f"  OK Added column '{column_name}' to cache_files")
-            await db.execute(
-                "UPDATE cache_files SET object_key = filename "
-                "WHERE object_key IS NULL OR object_key = ''"
-            )
+            await db.execute("UPDATE cache_files SET object_key = filename WHERE object_key IS NULL OR object_key = ''")
 
         if await self._table_exists(db, "cache_config"):
             for column_name, column_type in {
@@ -2370,7 +2450,8 @@ class Database:
     async def add_token(self, token: Token) -> int:
         """Add a new token"""
         async with self._connect(write=True) as db:
-            cursor = await db.execute("""
+            cursor = await db.execute(
+                """
                 INSERT INTO tokens (st, at, at_expires, email, name, remark, is_active,
                                    credits, user_paygate_tier, current_project_id, current_project_name,
                                    image_enabled, video_enabled, image_concurrency, video_concurrency,
@@ -2384,41 +2465,60 @@ class Database:
                                    auto_refresh_enabled, refresh_interval_minutes,
                                    last_st_refresh_at, last_st_refresh_result)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (token.st, token.at, token.at_expires, token.email, token.name, token.remark,
-                  token.is_active, token.credits, token.user_paygate_tier,
-                  token.current_project_id, token.current_project_name,
-                  token.image_enabled, token.video_enabled,
-                  token.image_concurrency, token.video_concurrency, token.captcha_proxy_url, token.extension_route_key,
-                  1 if getattr(token, "use_extension_for_generation", True) else 0,
-                  getattr(token, "auth_mode", "session_token"),
-                  getattr(token, "browser_profile_path", None),
-                  getattr(token, "browser_profile_status", "not_created"),
-                  getattr(token, "browser_profile_email", None),
-                  getattr(token, "browser_profile_name", None),
-                  getattr(token, "browser_profile_login_state", "unknown"),
-                  getattr(token, "browser_profile_cookie_status", "unknown"),
-                  getattr(token, "browser_profile_st_status", "unknown"),
-                  getattr(token, "browser_profile_at_status", "unknown"),
-                  getattr(token, "browser_profile_last_opened_at", None),
-                  getattr(token, "browser_profile_last_sync_at", None),
-                  getattr(token, "browser_profile_last_refresh_at", None),
-                  getattr(token, "browser_profile_last_error", None),
-                  getattr(token, "protocol_mode", "session"),
-                  getattr(token, "google_cookies", ""),
-                  getattr(token, "login_account", ""),
-                  getattr(token, "login_password", ""),
-                  getattr(token, "proxy_url", ""),
-                  1 if getattr(token, "auto_refresh_enabled", True) else 0,
-                  max(1, min(10080, int(getattr(token, "refresh_interval_minutes", 120) or 120))),
-                  getattr(token, "last_st_refresh_at", None),
-                  getattr(token, "last_st_refresh_result", "")))
+            """,
+                (
+                    token.st,
+                    token.at,
+                    token.at_expires,
+                    token.email,
+                    token.name,
+                    token.remark,
+                    token.is_active,
+                    token.credits,
+                    token.user_paygate_tier,
+                    token.current_project_id,
+                    token.current_project_name,
+                    token.image_enabled,
+                    token.video_enabled,
+                    token.image_concurrency,
+                    token.video_concurrency,
+                    token.captcha_proxy_url,
+                    token.extension_route_key,
+                    1 if getattr(token, "use_extension_for_generation", True) else 0,
+                    getattr(token, "auth_mode", "session_token"),
+                    getattr(token, "browser_profile_path", None),
+                    getattr(token, "browser_profile_status", "not_created"),
+                    getattr(token, "browser_profile_email", None),
+                    getattr(token, "browser_profile_name", None),
+                    getattr(token, "browser_profile_login_state", "unknown"),
+                    getattr(token, "browser_profile_cookie_status", "unknown"),
+                    getattr(token, "browser_profile_st_status", "unknown"),
+                    getattr(token, "browser_profile_at_status", "unknown"),
+                    getattr(token, "browser_profile_last_opened_at", None),
+                    getattr(token, "browser_profile_last_sync_at", None),
+                    getattr(token, "browser_profile_last_refresh_at", None),
+                    getattr(token, "browser_profile_last_error", None),
+                    getattr(token, "protocol_mode", "session"),
+                    getattr(token, "google_cookies", ""),
+                    getattr(token, "login_account", ""),
+                    getattr(token, "login_password", ""),
+                    getattr(token, "proxy_url", ""),
+                    1 if getattr(token, "auto_refresh_enabled", True) else 0,
+                    max(1, min(10080, int(getattr(token, "refresh_interval_minutes", 120) or 120))),
+                    getattr(token, "last_st_refresh_at", None),
+                    getattr(token, "last_st_refresh_result", ""),
+                ),
+            )
             await db.commit()
             token_id = cursor.lastrowid
 
             # Create stats entry
-            await db.execute("""
+            await db.execute(
+                """
                 INSERT INTO token_stats (token_id) VALUES (?)
-            """, (token_id,))
+            """,
+                (token_id,),
+            )
             await db.commit()
 
             return token_id
@@ -2466,7 +2566,8 @@ class Database:
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             today = self._current_stats_date()
-            cursor = await db.execute("""
+            cursor = await db.execute(
+                """
                 SELECT
                     t.*,
                     COALESCE(ts.image_count, 0) AS image_count,
@@ -2480,7 +2581,9 @@ class Database:
                 FROM tokens t
                 LEFT JOIN token_stats ts ON ts.token_id = t.id
                 ORDER BY t.created_at DESC
-            """, (today, today, today))
+            """,
+                (today, today, today),
+            )
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
@@ -2498,7 +2601,8 @@ class Database:
             """)
             token_row = await token_cursor.fetchone()
 
-            stats_cursor = await db.execute("""
+            stats_cursor = await db.execute(
+                """
                 SELECT
                     COALESCE(SUM(image_count), 0) AS total_images,
                     COALESCE(SUM(video_count), 0) AS total_videos,
@@ -2507,10 +2611,13 @@ class Database:
                     COALESCE(SUM(CASE WHEN today_date = ? THEN today_video_count ELSE 0 END), 0) AS today_videos,
                     COALESCE(SUM(CASE WHEN today_date = ? THEN today_error_count ELSE 0 END), 0) AS today_errors
                 FROM token_stats
-            """, (today, today, today))
+            """,
+                (today, today, today),
+            )
             stats_row = await stats_cursor.fetchone()
 
-            geminigen_cursor = await db.execute("""
+            geminigen_cursor = await db.execute(
+                """
                 SELECT
                     COALESCE(SUM(CASE WHEN status = 'completed' AND kind = 'image' THEN 1 ELSE 0 END), 0) AS total_images,
                     COALESCE(SUM(CASE WHEN status = 'completed' AND kind = 'video' THEN 1 ELSE 0 END), 0) AS total_videos,
@@ -2525,7 +2632,9 @@ class Database:
                         WHEN status = 'failed'
                              AND DATE(completed_at, 'localtime') = ? THEN 1 ELSE 0 END), 0) AS today_errors
                 FROM geminigen_tasks
-            """, (today, today, today))
+            """,
+                (today, today, today),
+            )
             geminigen_row = await geminigen_cursor.fetchone()
 
             token_data = dict(token_row) if token_row else {}
@@ -2585,12 +2694,7 @@ class Database:
             db.row_factory = aiosqlite.Row
 
             native_params: List[Any] = (
-                image_params
-                + video_params
-                + image_params
-                + [today]
-                + video_params
-                + [today, today, api_key_id]
+                image_params + video_params + image_params + [today] + video_params + [today, today, api_key_id]
             )
             native_cursor = await db.execute(
                 f"""
@@ -2674,7 +2778,7 @@ class Database:
             return {
                 "total_tokens": int(data.get("total_tokens") or 0),
                 "active_tokens": int(data.get("active_tokens") or 0),
-                "total_credits": int(data.get("total_credits") or 0)
+                "total_credits": int(data.get("total_credits") or 0),
             }
 
     async def get_active_tokens(self) -> List[Token]:
@@ -2708,7 +2812,9 @@ class Database:
             await db.execute("UPDATE cache_files SET token_id = NULL WHERE token_id = ?", (token_id,))
             if await self._table_exists(db, "dedicated_extension_workers"):
                 # Existing databases may still have inert legacy rows with a token FK.
-                await db.execute("UPDATE dedicated_extension_workers SET token_id = NULL WHERE token_id = ?", (token_id,))
+                await db.execute(
+                    "UPDATE dedicated_extension_workers SET token_id = NULL WHERE token_id = ?", (token_id,)
+                )
             await db.execute("DELETE FROM tasks WHERE token_id = ?", (token_id,))
             await db.execute("DELETE FROM token_stats WHERE token_id = ?", (token_id,))
             await db.execute("DELETE FROM projects WHERE token_id = ?", (token_id,))
@@ -2720,17 +2826,24 @@ class Database:
     async def add_project(self, project: Project) -> int:
         """Add a new project"""
         async with self._connect(write=True) as db:
-            cursor = await db.execute("""
+            cursor = await db.execute(
+                """
                 INSERT INTO projects (project_id, token_id, api_key_id, project_name, tool_name, is_active)
                 VALUES (?, ?, ?, ?, ?, ?)
-            """, (project.project_id, project.token_id, project.api_key_id, project.project_name,
-                  project.tool_name, project.is_active))
+            """,
+                (
+                    project.project_id,
+                    project.token_id,
+                    project.api_key_id,
+                    project.project_name,
+                    project.tool_name,
+                    project.is_active,
+                ),
+            )
             await db.commit()
             return cursor.lastrowid
 
-    async def deactivate_projects_for_token_scope(
-        self, token_id: int, api_key_id: Optional[int] = None
-    ) -> int:
+    async def deactivate_projects_for_token_scope(self, token_id: int, api_key_id: Optional[int] = None) -> int:
         """Set prior projects inactive for one token scope.
 
         Scope is token + api_key when api_key_id is provided; otherwise token + NULL api_key.
@@ -2780,13 +2893,12 @@ class Database:
             db.row_factory = aiosqlite.Row
             if api_key_id is None:
                 cursor = await db.execute(
-                    "SELECT * FROM projects WHERE token_id = ? ORDER BY created_at DESC",
-                    (token_id,)
+                    "SELECT * FROM projects WHERE token_id = ? ORDER BY created_at DESC", (token_id,)
                 )
             else:
                 cursor = await db.execute(
                     "SELECT * FROM projects WHERE token_id = ? AND api_key_id = ? ORDER BY created_at DESC",
-                    (token_id, api_key_id)
+                    (token_id, api_key_id),
                 )
             rows = await cursor.fetchall()
             return [Project(**dict(row)) for row in rows]
@@ -2834,9 +2946,7 @@ class Database:
             rows = await cursor.fetchall()
             return [Project(**dict(row)) for row in rows]
 
-    async def list_projects_by_api_key(
-        self, api_key_id: int, limit: int = 10, offset: int = 0
-    ) -> List[Project]:
+    async def list_projects_by_api_key(self, api_key_id: int, limit: int = 10, offset: int = 0) -> List[Project]:
         """Paginated projects for a managed API key, newest first."""
         limit = max(1, min(int(limit), 100))
         offset = max(0, int(offset))
@@ -2864,7 +2974,8 @@ class Database:
     async def create_task(self, task: Task) -> int:
         """Create a new task"""
         async with self._connect(write=True) as db:
-            cursor = await db.execute("""
+            cursor = await db.execute(
+                """
                 INSERT INTO tasks (
                     task_id, token_id, api_key_id, project_id, model, prompt, status, progress,
                     result_urls, base_result_urls, delivery_urls,
@@ -2872,27 +2983,31 @@ class Database:
                     scene_id, job_phase, captcha_status, captcha_detail
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                task.task_id,
-                task.token_id,
-                task.api_key_id,
-                task.project_id,
-                task.model,
-                task.prompt,
-                task.status,
-                task.progress,
-                json.dumps(task.result_urls) if isinstance(task.result_urls, list) else task.result_urls,
-                json.dumps(task.base_result_urls) if isinstance(task.base_result_urls, list) else task.base_result_urls,
-                json.dumps(task.delivery_urls) if isinstance(task.delivery_urls, list) else task.delivery_urls,
-                task.requested_resolution,
-                task.output_resolution,
-                task.upscale_status,
-                task.upscale_error_message,
-                task.scene_id,
-                task.job_phase,
-                task.captcha_status,
-                task.captcha_detail,
-            ))
+            """,
+                (
+                    task.task_id,
+                    task.token_id,
+                    task.api_key_id,
+                    task.project_id,
+                    task.model,
+                    task.prompt,
+                    task.status,
+                    task.progress,
+                    json.dumps(task.result_urls) if isinstance(task.result_urls, list) else task.result_urls,
+                    json.dumps(task.base_result_urls)
+                    if isinstance(task.base_result_urls, list)
+                    else task.base_result_urls,
+                    json.dumps(task.delivery_urls) if isinstance(task.delivery_urls, list) else task.delivery_urls,
+                    task.requested_resolution,
+                    task.output_resolution,
+                    task.upscale_status,
+                    task.upscale_error_message,
+                    task.scene_id,
+                    task.job_phase,
+                    task.captcha_status,
+                    task.captcha_detail,
+                ),
+            )
             await db.commit()
             return cursor.lastrowid
 
@@ -2981,8 +3096,11 @@ class Database:
         current = await self.get_runway_config()
         values = {
             "enabled": int(current.enabled if enabled is None else bool(enabled)),
-            "base_url": (base_url if base_url is not None else current.base_url).strip().rstrip("/") or "https://api.runwayml.com/v1",
-            "poll_interval_sec": max(0.5, float(current.poll_interval_sec if poll_interval_sec is None else poll_interval_sec)),
+            "base_url": (base_url if base_url is not None else current.base_url).strip().rstrip("/")
+            or "https://api.runwayml.com/v1",
+            "poll_interval_sec": max(
+                0.5, float(current.poll_interval_sec if poll_interval_sec is None else poll_interval_sec)
+            ),
             "timeout_sec": max(10.0, float(current.timeout_sec if timeout_sec is None else timeout_sec)),
             "cache_outputs": int(current.cache_outputs if cache_outputs is None else bool(cache_outputs)),
         }
@@ -3015,9 +3133,7 @@ class Database:
     async def list_runway_accounts(self) -> List[RunwayAccount]:
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                "SELECT * FROM runway_accounts ORDER BY is_active DESC, id ASC"
-            )
+            cursor = await db.execute("SELECT * FROM runway_accounts ORDER BY is_active DESC, id ASC")
             rows = await cursor.fetchall()
             return [RunwayAccount(**dict(row)) for row in rows]
 
@@ -3304,7 +3420,9 @@ class Database:
                 source_version=RUNWAY_MANIFEST_VERSION,
                 live_available=live_available,
                 disabled_reason=disabled_reason,
-                is_enabled=bool(existing.is_enabled) if existing else bool(model.get("default_enabled", True) and live_available),
+                is_enabled=bool(existing.is_enabled)
+                if existing
+                else bool(model.get("default_enabled", True) and live_available),
             )
             count += 1
         for existing_model in await self.list_runway_models(enabled_only=False):
@@ -3367,8 +3485,12 @@ class Database:
                     task.prompt,
                     task.status,
                     task.progress,
-                    json.dumps(task.raw_artifact_urls) if isinstance(task.raw_artifact_urls, list) else task.raw_artifact_urls,
-                    json.dumps(task.cached_artifact_urls) if isinstance(task.cached_artifact_urls, list) else task.cached_artifact_urls,
+                    json.dumps(task.raw_artifact_urls)
+                    if isinstance(task.raw_artifact_urls, list)
+                    else task.raw_artifact_urls,
+                    json.dumps(task.cached_artifact_urls)
+                    if isinstance(task.cached_artifact_urls, list)
+                    else task.cached_artifact_urls,
                     task.request_payload,
                     task.response_payload,
                     task.error_message,
@@ -3473,13 +3595,30 @@ class Database:
         values = {
             "enabled": int(current.enabled if enabled is None else bool(enabled)),
             "video_enabled": int(current.video_enabled if video_enabled is None else bool(video_enabled)),
-            "base_url": (base_url if base_url is not None else current.base_url).strip().rstrip("/") or "https://api.geminigen.ai",
-            "poll_interval_image_sec": max(1.0, float(current.poll_interval_image_sec if poll_interval_image_sec is None else poll_interval_image_sec)),
-            "poll_interval_video_sec": max(2.0, float(current.poll_interval_video_sec if poll_interval_video_sec is None else poll_interval_video_sec)),
-            "timeout_image_sec": max(30.0, float(current.timeout_image_sec if timeout_image_sec is None else timeout_image_sec)),
-            "timeout_video_sec": max(60.0, float(current.timeout_video_sec if timeout_video_sec is None else timeout_video_sec)),
-            "global_image_concurrency": max(-1, int(current.global_image_concurrency if global_image_concurrency is None else global_image_concurrency)),
-            "global_video_concurrency": max(-1, int(current.global_video_concurrency if global_video_concurrency is None else global_video_concurrency)),
+            "base_url": (base_url if base_url is not None else current.base_url).strip().rstrip("/")
+            or "https://api.geminigen.ai",
+            "poll_interval_image_sec": max(
+                1.0,
+                float(current.poll_interval_image_sec if poll_interval_image_sec is None else poll_interval_image_sec),
+            ),
+            "poll_interval_video_sec": max(
+                2.0,
+                float(current.poll_interval_video_sec if poll_interval_video_sec is None else poll_interval_video_sec),
+            ),
+            "timeout_image_sec": max(
+                30.0, float(current.timeout_image_sec if timeout_image_sec is None else timeout_image_sec)
+            ),
+            "timeout_video_sec": max(
+                60.0, float(current.timeout_video_sec if timeout_video_sec is None else timeout_video_sec)
+            ),
+            "global_image_concurrency": max(
+                -1,
+                int(current.global_image_concurrency if global_image_concurrency is None else global_image_concurrency),
+            ),
+            "global_video_concurrency": max(
+                -1,
+                int(current.global_video_concurrency if global_video_concurrency is None else global_video_concurrency),
+            ),
             "cache_outputs": int(current.cache_outputs if cache_outputs is None else bool(cache_outputs)),
         }
         async with self._connect(write=True) as db:
@@ -3653,24 +3792,62 @@ class Database:
 
     async def update_geminigen_account(self, account_id: int, **kwargs) -> None:
         allowed = {
-            "label", "raw_cookie", "bearer_token", "refresh_token", "guard_id", "turnstile_token",
-            "is_active", "image_concurrency", "video_concurrency",
-            "image_in_flight", "video_in_flight", "last_status", "last_error", "last_used_at",
-            "image_gen_daily_limit_reset_at", "grok_image_daily_limit_reset_at", "video_daily_limit_reset_at",
-            "profile_user_id", "profile_uuid", "profile_email", "profile_full_name", "profile_is_active",
-            "available_credit", "plan_credit", "purchased_credit", "locked_credit", "subscription_credit",
-            "plan_name", "plan_expire_at", "active_benefits_json", "remaining_bulk_videos",
-            "is_image_gen_max", "is_image_premium", "image_gen_concurrent_streams",
-            "remaining_image_gen_max_daily_images", "remaining_image_gen_free_daily_images",
+            "label",
+            "raw_cookie",
+            "bearer_token",
+            "refresh_token",
+            "guard_id",
+            "turnstile_token",
+            "is_active",
+            "image_concurrency",
+            "video_concurrency",
+            "image_in_flight",
+            "video_in_flight",
+            "last_status",
+            "last_error",
+            "last_used_at",
+            "image_gen_daily_limit_reset_at",
+            "grok_image_daily_limit_reset_at",
+            "video_daily_limit_reset_at",
+            "profile_user_id",
+            "profile_uuid",
+            "profile_email",
+            "profile_full_name",
+            "profile_is_active",
+            "available_credit",
+            "plan_credit",
+            "purchased_credit",
+            "locked_credit",
+            "subscription_credit",
+            "plan_name",
+            "plan_expire_at",
+            "active_benefits_json",
+            "remaining_bulk_videos",
+            "is_image_gen_max",
+            "is_image_premium",
+            "image_gen_concurrent_streams",
+            "remaining_image_gen_max_daily_images",
+            "remaining_image_gen_free_daily_images",
             "image_gen_quota_synced_at",
-            "is_grok_image_max", "grok_image_concurrent_streams",
-            "remaining_grok_image_max_daily_images", "remaining_grok_image_free_daily_images",
-            "grok_image_quota_synced_at", "is_grok_max", "grok_max_concurrent_streams",
+            "is_grok_image_max",
+            "grok_image_concurrent_streams",
+            "remaining_grok_image_max_daily_images",
+            "remaining_grok_image_free_daily_images",
+            "grok_image_quota_synced_at",
+            "is_grok_max",
+            "grok_max_concurrent_streams",
             "grok_max_quota_synced_at",
-            "remaining_daily_videos", "remaining_grok_max_daily_videos",
-            "remaining_grok_max_daily_720p_videos", "remaining_grok_max_daily_10s_videos",
-            "remaining_grok_max_daily_15s_videos", "quota_synced_at", "quota_sync_status", "quota_sync_error",
-            "profile_synced_at", "profile_sync_status", "profile_sync_error",
+            "remaining_daily_videos",
+            "remaining_grok_max_daily_videos",
+            "remaining_grok_max_daily_720p_videos",
+            "remaining_grok_max_daily_10s_videos",
+            "remaining_grok_max_daily_15s_videos",
+            "quota_synced_at",
+            "quota_sync_status",
+            "quota_sync_error",
+            "profile_synced_at",
+            "profile_sync_status",
+            "profile_sync_error",
         }
         updates = []
         params = []
@@ -3681,19 +3858,40 @@ class Database:
                 value = int(bool(value))
             if key == "profile_is_active" and value is not None:
                 value = int(bool(value))
-            if key in {"is_image_gen_max", "is_image_premium", "is_grok_image_max", "is_grok_max"} and value is not None:
+            if (
+                key in {"is_image_gen_max", "is_image_premium", "is_grok_image_max", "is_grok_max"}
+                and value is not None
+            ):
                 value = int(bool(value))
-            if key in {
-                "image_concurrency", "video_concurrency", "image_in_flight", "video_in_flight",
-                "profile_user_id", "available_credit", "plan_credit", "purchased_credit", "locked_credit",
-                "subscription_credit", "remaining_bulk_videos", "remaining_daily_videos",
-                "remaining_grok_max_daily_videos", "remaining_grok_max_daily_720p_videos",
-                "remaining_grok_max_daily_10s_videos", "remaining_grok_max_daily_15s_videos",
-                "image_gen_concurrent_streams", "remaining_image_gen_max_daily_images",
-                "remaining_image_gen_free_daily_images", "grok_image_concurrent_streams",
-                "remaining_grok_image_max_daily_images", "remaining_grok_image_free_daily_images",
-                "grok_max_concurrent_streams",
-            } and value is not None:
+            if (
+                key
+                in {
+                    "image_concurrency",
+                    "video_concurrency",
+                    "image_in_flight",
+                    "video_in_flight",
+                    "profile_user_id",
+                    "available_credit",
+                    "plan_credit",
+                    "purchased_credit",
+                    "locked_credit",
+                    "subscription_credit",
+                    "remaining_bulk_videos",
+                    "remaining_daily_videos",
+                    "remaining_grok_max_daily_videos",
+                    "remaining_grok_max_daily_720p_videos",
+                    "remaining_grok_max_daily_10s_videos",
+                    "remaining_grok_max_daily_15s_videos",
+                    "image_gen_concurrent_streams",
+                    "remaining_image_gen_max_daily_images",
+                    "remaining_image_gen_free_daily_images",
+                    "grok_image_concurrent_streams",
+                    "remaining_grok_image_max_daily_images",
+                    "remaining_grok_image_free_daily_images",
+                    "grok_max_concurrent_streams",
+                }
+                and value is not None
+            ):
                 value = int(value)
             updates.append(f"{key} = ?")
             params.append(value)
@@ -3898,7 +4096,9 @@ class Database:
             )
             await db.commit()
 
-    async def clear_geminigen_queue(self, account_id: Optional[int] = None, reason: str = "Manually cleared by admin") -> Dict[str, int]:
+    async def clear_geminigen_queue(
+        self, account_id: Optional[int] = None, reason: str = "Manually cleared by admin"
+    ) -> Dict[str, int]:
         now = datetime.utcnow()
         response = json.dumps(
             {"status": "manual_cleared", "reason": reason},
@@ -4101,8 +4301,12 @@ class Database:
                     task.prompt,
                     task.status,
                     task.progress,
-                    json.dumps(task.raw_artifact_urls) if isinstance(task.raw_artifact_urls, list) else task.raw_artifact_urls,
-                    json.dumps(task.cached_artifact_urls) if isinstance(task.cached_artifact_urls, list) else task.cached_artifact_urls,
+                    json.dumps(task.raw_artifact_urls)
+                    if isinstance(task.raw_artifact_urls, list)
+                    else task.raw_artifact_urls,
+                    json.dumps(task.cached_artifact_urls)
+                    if isinstance(task.cached_artifact_urls, list)
+                    else task.cached_artifact_urls,
                     task.request_payload,
                     task.response_payload,
                     task.error_message,
@@ -4145,11 +4349,19 @@ class Database:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    log.token_id, log.api_key_id, log.operation,
-                    summary["request_body"], summary["response_body"],
-                    log.status_code, log.duration, log.status_text or "", log.progress,
-                    summary["request_excerpt"], summary["response_excerpt"],
-                    summary["request_size_bytes"], summary["response_size_bytes"],
+                    log.token_id,
+                    log.api_key_id,
+                    log.operation,
+                    summary["request_body"],
+                    summary["response_body"],
+                    log.status_code,
+                    log.duration,
+                    log.status_text or "",
+                    log.progress,
+                    summary["request_excerpt"],
+                    summary["response_excerpt"],
+                    summary["request_size_bytes"],
+                    summary["response_size_bytes"],
                 ),
             )
             request_log_id = int(log_cursor.lastrowid)
@@ -4164,13 +4376,30 @@ class Database:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    task.job_id, task.upstream_uuid, task.account_id, task.api_key_id,
-                    request_log_id, task.public_model_id, task.kind, task.endpoint_type,
-                    task.prompt, task.status, task.progress,
-                    json.dumps(task.raw_artifact_urls) if isinstance(task.raw_artifact_urls, list) else task.raw_artifact_urls,
-                    json.dumps(task.cached_artifact_urls) if isinstance(task.cached_artifact_urls, list) else task.cached_artifact_urls,
-                    task.request_payload, task.response_payload, task.error_message,
-                    task.error_code, task.retry_at, task.started_at, task.completed_at,
+                    task.job_id,
+                    task.upstream_uuid,
+                    task.account_id,
+                    task.api_key_id,
+                    request_log_id,
+                    task.public_model_id,
+                    task.kind,
+                    task.endpoint_type,
+                    task.prompt,
+                    task.status,
+                    task.progress,
+                    json.dumps(task.raw_artifact_urls)
+                    if isinstance(task.raw_artifact_urls, list)
+                    else task.raw_artifact_urls,
+                    json.dumps(task.cached_artifact_urls)
+                    if isinstance(task.cached_artifact_urls, list)
+                    else task.cached_artifact_urls,
+                    task.request_payload,
+                    task.response_payload,
+                    task.error_message,
+                    task.error_code,
+                    task.retry_at,
+                    task.started_at,
+                    task.completed_at,
                 ),
             )
             await db.commit()
@@ -4237,10 +4466,25 @@ class Database:
             if terminal:
                 self._last_progress_persist.pop(progress_key, None)
         allowed = {
-            "upstream_uuid", "account_id", "api_key_id", "request_log_id", "public_model_id", "kind",
-            "endpoint_type", "prompt", "status", "progress", "raw_artifact_urls",
-            "cached_artifact_urls", "request_payload", "response_payload",
-            "error_message", "error_code", "retry_at", "started_at", "completed_at",
+            "upstream_uuid",
+            "account_id",
+            "api_key_id",
+            "request_log_id",
+            "public_model_id",
+            "kind",
+            "endpoint_type",
+            "prompt",
+            "status",
+            "progress",
+            "raw_artifact_urls",
+            "cached_artifact_urls",
+            "request_payload",
+            "response_payload",
+            "error_message",
+            "error_code",
+            "retry_at",
+            "started_at",
+            "completed_at",
         }
         updates = []
         params = []
@@ -4368,7 +4612,8 @@ class Database:
 
             # If date changed, reset all daily counters before recording today's image usage.
             if row and row[0] != today:
-                await db.execute("""
+                await db.execute(
+                    """
                     UPDATE token_stats
                     SET image_count = image_count + 1,
                         today_image_count = 1,
@@ -4376,16 +4621,21 @@ class Database:
                         today_error_count = 0,
                         today_date = ?
                     WHERE token_id = ?
-                """, (today, token_id))
+                """,
+                    (today, token_id),
+                )
             else:
                 # Same day, just increment both
-                await db.execute("""
+                await db.execute(
+                    """
                     UPDATE token_stats
                     SET image_count = image_count + 1,
                         today_image_count = today_image_count + 1,
                         today_date = ?
                     WHERE token_id = ?
-                """, (today, token_id))
+                """,
+                    (today, token_id),
+                )
             await db.commit()
 
     async def increment_video_count(self, token_id: int):
@@ -4398,7 +4648,8 @@ class Database:
 
             # If date changed, reset all daily counters before recording today's video usage.
             if row and row[0] != today:
-                await db.execute("""
+                await db.execute(
+                    """
                     UPDATE token_stats
                     SET video_count = video_count + 1,
                         today_image_count = 0,
@@ -4406,16 +4657,21 @@ class Database:
                         today_error_count = 0,
                         today_date = ?
                     WHERE token_id = ?
-                """, (today, token_id))
+                """,
+                    (today, token_id),
+                )
             else:
                 # Same day, just increment both
-                await db.execute("""
+                await db.execute(
+                    """
                     UPDATE token_stats
                     SET video_count = video_count + 1,
                         today_video_count = today_video_count + 1,
                         today_date = ?
                     WHERE token_id = ?
-                """, (today, token_id))
+                """,
+                    (today, token_id),
+                )
             await db.commit()
 
     async def increment_error_count(self, token_id: int):
@@ -4434,7 +4690,8 @@ class Database:
 
             # If date changed, reset all daily counters before recording today's error.
             if row and row[0] != today:
-                await db.execute("""
+                await db.execute(
+                    """
                     UPDATE token_stats
                     SET error_count = error_count + 1,
                         consecutive_error_count = consecutive_error_count + 1,
@@ -4444,10 +4701,13 @@ class Database:
                         today_date = ?,
                         last_error_at = CURRENT_TIMESTAMP
                     WHERE token_id = ?
-                """, (today, token_id))
+                """,
+                    (today, token_id),
+                )
             else:
                 # Same day, just increment all counters
-                await db.execute("""
+                await db.execute(
+                    """
                     UPDATE token_stats
                     SET error_count = error_count + 1,
                         consecutive_error_count = consecutive_error_count + 1,
@@ -4455,7 +4715,9 @@ class Database:
                         today_date = ?,
                         last_error_at = CURRENT_TIMESTAMP
                     WHERE token_id = ?
-                """, (today, token_id))
+                """,
+                    (today, token_id),
+                )
             await db.commit()
 
     async def reset_error_count(self, token_id: int):
@@ -4468,9 +4730,12 @@ class Database:
         Note: error_count (total historical errors) is NEVER reset
         """
         async with self._connect(write=True) as db:
-            await db.execute("""
+            await db.execute(
+                """
                 UPDATE token_stats SET consecutive_error_count = 0 WHERE token_id = ?
-            """, (token_id,))
+            """,
+                (token_id,),
+            )
             await db.commit()
 
     # Config operations
@@ -4581,7 +4846,7 @@ class Database:
         enabled: bool,
         proxy_url: Optional[str] = None,
         media_proxy_enabled: Optional[bool] = None,
-        media_proxy_url: Optional[str] = None
+        media_proxy_url: Optional[str] = None,
     ):
         """Update proxy configuration"""
         async with self._connect(write=True) as db:
@@ -4596,26 +4861,28 @@ class Database:
                     if media_proxy_enabled is not None
                     else current.get("media_proxy_enabled", False)
                 )
-                new_media_proxy_url = (
-                    media_proxy_url
-                    if media_proxy_url is not None
-                    else current.get("media_proxy_url")
-                )
+                new_media_proxy_url = media_proxy_url if media_proxy_url is not None else current.get("media_proxy_url")
 
-                await db.execute("""
+                await db.execute(
+                    """
                     UPDATE proxy_config
                     SET enabled = ?, proxy_url = ?,
                         media_proxy_enabled = ?, media_proxy_url = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = 1
-                """, (enabled, proxy_url, new_media_proxy_enabled, new_media_proxy_url))
+                """,
+                    (enabled, proxy_url, new_media_proxy_enabled, new_media_proxy_url),
+                )
             else:
                 new_media_proxy_enabled = media_proxy_enabled if media_proxy_enabled is not None else False
                 new_media_proxy_url = media_proxy_url
-                await db.execute("""
+                await db.execute(
+                    """
                     INSERT INTO proxy_config (id, enabled, proxy_url, media_proxy_enabled, media_proxy_url)
                     VALUES (1, ?, ?, ?, ?)
-                """, (enabled, proxy_url, new_media_proxy_enabled, new_media_proxy_url))
+                """,
+                    (enabled, proxy_url, new_media_proxy_enabled, new_media_proxy_url),
+                )
 
             await db.commit()
 
@@ -4682,21 +4949,13 @@ class Database:
             row = await cursor.fetchone()
             current = dict(row) if row else {}
 
-            normalized_image_timeout = (
-                image_timeout
-                if image_timeout is not None
-                else current.get("image_timeout", 300)
-            )
+            normalized_image_timeout = image_timeout if image_timeout is not None else current.get("image_timeout", 300)
             normalized_video_timeout = (
-                video_timeout
-                if video_timeout is not None
-                else current.get("video_timeout", 1500)
+                video_timeout if video_timeout is not None else current.get("video_timeout", 1500)
             )
             try:
                 normalized_max_retries = (
-                    max(1, int(max_retries))
-                    if max_retries is not None
-                    else max(1, int(current.get("max_retries", 3)))
+                    max(1, int(max_retries)) if max_retries is not None else max(1, int(current.get("max_retries", 3)))
                 )
             except Exception:
                 normalized_max_retries = 3
@@ -4705,11 +4964,15 @@ class Database:
                 if extension_generation_enabled is not None
                 else bool(current.get("extension_generation_enabled", False))
             )
-            normalized_extension_generation_fallback_mode = str(
-                extension_generation_fallback_mode
-                if extension_generation_fallback_mode is not None
-                else current.get("extension_generation_fallback_mode", "local_http_on_recaptcha")
-            ).strip().lower()
+            normalized_extension_generation_fallback_mode = (
+                str(
+                    extension_generation_fallback_mode
+                    if extension_generation_fallback_mode is not None
+                    else current.get("extension_generation_fallback_mode", "local_http_on_recaptcha")
+                )
+                .strip()
+                .lower()
+            )
             if normalized_extension_generation_fallback_mode not in {"none", "local_http_on_recaptcha"}:
                 normalized_extension_generation_fallback_mode = "local_http_on_recaptcha"
             normalized_flow2api_gemini_api_keys = (
@@ -4876,7 +5139,9 @@ class Database:
                 else str(current.get("flow2api_metadata_fallback_models", "") or "")
             )
             if flow2api_metadata_model is None and flow2api_metadata_primary_model is not None:
-                normalized_flow2api_metadata_model = str(flow2api_metadata_primary_model or "").strip() or normalized_flow2api_metadata_model
+                normalized_flow2api_metadata_model = (
+                    str(flow2api_metadata_primary_model or "").strip() or normalized_flow2api_metadata_model
+                )
             if not normalized_flow2api_metadata_primary_model.strip():
                 normalized_flow2api_metadata_primary_model = normalized_flow2api_metadata_model
             if not normalized_flow2api_metadata_enabled_models.strip():
@@ -4884,9 +5149,7 @@ class Database:
                 enabled.extend(
                     [m.strip() for m in normalized_flow2api_metadata_fallback_models.split(",") if m.strip()]
                 )
-                normalized_flow2api_metadata_enabled_models = ",".join(
-                    list(dict.fromkeys([m for m in enabled if m]))
-                )
+                normalized_flow2api_metadata_enabled_models = ",".join(list(dict.fromkeys([m for m in enabled if m])))
             normalized_metadata_system_prompt = (
                 str(metadata_system_prompt)
                 if metadata_system_prompt is not None
@@ -4934,7 +5197,8 @@ class Database:
             )
 
             if row:
-                await db.execute("""
+                await db.execute(
+                    """
                     UPDATE generation_config
                     SET image_timeout = ?,
                         video_timeout = ?,
@@ -4981,53 +5245,56 @@ class Database:
                         task_tracker_tls_profile = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = 1
-                """, (
-                    normalized_image_timeout,
-                    normalized_video_timeout,
-                    normalized_max_retries,
-                    normalized_extension_generation_enabled,
-                    normalized_extension_generation_fallback_mode,
-                    normalized_flow2api_gemini_api_keys,
-                    normalized_flow2api_openai_api_keys,
-                    normalized_flow2api_openrouter_api_keys,
-                    normalized_flow2api_third_party_gemini_api_keys,
-                    normalized_flow2api_third_party_gemini_base_url,
-                    normalized_cloudflare_account_id,
-                    normalized_cloudflare_api_token,
-                    normalized_flow2api_csvgen_cookie,
-                    normalized_flow2api_csvgen_api_keys,
-                    normalized_flow2api_cloning_model,
-                    normalized_flow2api_cloning_backend,
-                    normalized_flow2api_cloning_provider_order,
-                    normalized_flow2api_cloning_enabled_providers,
-                    normalized_flow2api_cloning_provider_retry_count,
-                    normalized_flow2api_cloning_gemini_api_keys,
-                    normalized_flow2api_cloning_openai_api_keys,
-                    normalized_flow2api_cloning_openrouter_api_keys,
-                    normalized_flow2api_cloning_third_party_gemini_api_keys,
-                    normalized_flow2api_cloning_third_party_gemini_base_url,
-                    normalized_flow2api_cloning_cloudflare_account_id,
-                    normalized_flow2api_cloning_cloudflare_api_token,
-                    normalized_flow2api_metadata_backend,
-                    normalized_flow2api_metadata_provider_order,
-                    normalized_flow2api_metadata_enabled_providers,
-                    normalized_flow2api_metadata_provider_retry_count,
-                    normalized_flow2api_metadata_model,
-                    normalized_flow2api_metadata_enabled_models,
-                    normalized_flow2api_metadata_primary_model,
-                    normalized_flow2api_metadata_fallback_models,
-                    normalized_metadata_system_prompt,
-                    normalized_cloning_image_system_prompt,
-                    normalized_cloning_video_system_prompt,
-                    normalized_task_tracker_device_id,
-                    normalized_task_tracker_device_name,
-                    normalized_task_tracker_cookies,
-                    normalized_task_tracker_device_token,
-                    normalized_task_tracker_turnstile_token,
-                    normalized_task_tracker_tls_profile,
-                ))
+                """,
+                    (
+                        normalized_image_timeout,
+                        normalized_video_timeout,
+                        normalized_max_retries,
+                        normalized_extension_generation_enabled,
+                        normalized_extension_generation_fallback_mode,
+                        normalized_flow2api_gemini_api_keys,
+                        normalized_flow2api_openai_api_keys,
+                        normalized_flow2api_openrouter_api_keys,
+                        normalized_flow2api_third_party_gemini_api_keys,
+                        normalized_flow2api_third_party_gemini_base_url,
+                        normalized_cloudflare_account_id,
+                        normalized_cloudflare_api_token,
+                        normalized_flow2api_csvgen_cookie,
+                        normalized_flow2api_csvgen_api_keys,
+                        normalized_flow2api_cloning_model,
+                        normalized_flow2api_cloning_backend,
+                        normalized_flow2api_cloning_provider_order,
+                        normalized_flow2api_cloning_enabled_providers,
+                        normalized_flow2api_cloning_provider_retry_count,
+                        normalized_flow2api_cloning_gemini_api_keys,
+                        normalized_flow2api_cloning_openai_api_keys,
+                        normalized_flow2api_cloning_openrouter_api_keys,
+                        normalized_flow2api_cloning_third_party_gemini_api_keys,
+                        normalized_flow2api_cloning_third_party_gemini_base_url,
+                        normalized_flow2api_cloning_cloudflare_account_id,
+                        normalized_flow2api_cloning_cloudflare_api_token,
+                        normalized_flow2api_metadata_backend,
+                        normalized_flow2api_metadata_provider_order,
+                        normalized_flow2api_metadata_enabled_providers,
+                        normalized_flow2api_metadata_provider_retry_count,
+                        normalized_flow2api_metadata_model,
+                        normalized_flow2api_metadata_enabled_models,
+                        normalized_flow2api_metadata_primary_model,
+                        normalized_flow2api_metadata_fallback_models,
+                        normalized_metadata_system_prompt,
+                        normalized_cloning_image_system_prompt,
+                        normalized_cloning_video_system_prompt,
+                        normalized_task_tracker_device_id,
+                        normalized_task_tracker_device_name,
+                        normalized_task_tracker_cookies,
+                        normalized_task_tracker_device_token,
+                        normalized_task_tracker_turnstile_token,
+                        normalized_task_tracker_tls_profile,
+                    ),
+                )
             else:
-                await db.execute("""
+                await db.execute(
+                    """
                     INSERT INTO generation_config (
                         id,
                         image_timeout,
@@ -5075,51 +5342,53 @@ class Database:
                         task_tracker_tls_profile
                     )
                     VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    normalized_image_timeout,
-                    normalized_video_timeout,
-                    normalized_max_retries,
-                    normalized_extension_generation_enabled,
-                    normalized_extension_generation_fallback_mode,
-                    normalized_flow2api_gemini_api_keys,
-                    normalized_flow2api_openai_api_keys,
-                    normalized_flow2api_openrouter_api_keys,
-                    normalized_flow2api_third_party_gemini_api_keys,
-                    normalized_flow2api_third_party_gemini_base_url,
-                    normalized_cloudflare_account_id,
-                    normalized_cloudflare_api_token,
-                    normalized_flow2api_csvgen_cookie,
-                    normalized_flow2api_csvgen_api_keys,
-                    normalized_flow2api_cloning_model,
-                    normalized_flow2api_cloning_backend,
-                    normalized_flow2api_cloning_provider_order,
-                    normalized_flow2api_cloning_enabled_providers,
-                    normalized_flow2api_cloning_provider_retry_count,
-                    normalized_flow2api_cloning_gemini_api_keys,
-                    normalized_flow2api_cloning_openai_api_keys,
-                    normalized_flow2api_cloning_openrouter_api_keys,
-                    normalized_flow2api_cloning_third_party_gemini_api_keys,
-                    normalized_flow2api_cloning_third_party_gemini_base_url,
-                    normalized_flow2api_cloning_cloudflare_account_id,
-                    normalized_flow2api_cloning_cloudflare_api_token,
-                    normalized_flow2api_metadata_backend,
-                    normalized_flow2api_metadata_provider_order,
-                    normalized_flow2api_metadata_enabled_providers,
-                    normalized_flow2api_metadata_provider_retry_count,
-                    normalized_flow2api_metadata_model,
-                    normalized_flow2api_metadata_enabled_models,
-                    normalized_flow2api_metadata_primary_model,
-                    normalized_flow2api_metadata_fallback_models,
-                    normalized_metadata_system_prompt,
-                    normalized_cloning_image_system_prompt,
-                    normalized_cloning_video_system_prompt,
-                    normalized_task_tracker_device_id,
-                    normalized_task_tracker_device_name,
-                    normalized_task_tracker_cookies,
-                    normalized_task_tracker_device_token,
-                    normalized_task_tracker_turnstile_token,
-                    normalized_task_tracker_tls_profile,
-                ))
+                """,
+                    (
+                        normalized_image_timeout,
+                        normalized_video_timeout,
+                        normalized_max_retries,
+                        normalized_extension_generation_enabled,
+                        normalized_extension_generation_fallback_mode,
+                        normalized_flow2api_gemini_api_keys,
+                        normalized_flow2api_openai_api_keys,
+                        normalized_flow2api_openrouter_api_keys,
+                        normalized_flow2api_third_party_gemini_api_keys,
+                        normalized_flow2api_third_party_gemini_base_url,
+                        normalized_cloudflare_account_id,
+                        normalized_cloudflare_api_token,
+                        normalized_flow2api_csvgen_cookie,
+                        normalized_flow2api_csvgen_api_keys,
+                        normalized_flow2api_cloning_model,
+                        normalized_flow2api_cloning_backend,
+                        normalized_flow2api_cloning_provider_order,
+                        normalized_flow2api_cloning_enabled_providers,
+                        normalized_flow2api_cloning_provider_retry_count,
+                        normalized_flow2api_cloning_gemini_api_keys,
+                        normalized_flow2api_cloning_openai_api_keys,
+                        normalized_flow2api_cloning_openrouter_api_keys,
+                        normalized_flow2api_cloning_third_party_gemini_api_keys,
+                        normalized_flow2api_cloning_third_party_gemini_base_url,
+                        normalized_flow2api_cloning_cloudflare_account_id,
+                        normalized_flow2api_cloning_cloudflare_api_token,
+                        normalized_flow2api_metadata_backend,
+                        normalized_flow2api_metadata_provider_order,
+                        normalized_flow2api_metadata_enabled_providers,
+                        normalized_flow2api_metadata_provider_retry_count,
+                        normalized_flow2api_metadata_model,
+                        normalized_flow2api_metadata_enabled_models,
+                        normalized_flow2api_metadata_primary_model,
+                        normalized_flow2api_metadata_fallback_models,
+                        normalized_metadata_system_prompt,
+                        normalized_cloning_image_system_prompt,
+                        normalized_cloning_video_system_prompt,
+                        normalized_task_tracker_device_id,
+                        normalized_task_tracker_device_name,
+                        normalized_task_tracker_cookies,
+                        normalized_task_tracker_device_token,
+                        normalized_task_tracker_turnstile_token,
+                        normalized_task_tracker_tls_profile,
+                    ),
+                )
             await db.commit()
 
     async def get_call_logic_config(self) -> CallLogicConfig:
@@ -5141,10 +5410,13 @@ class Database:
         normalized = "polling" if call_mode == "polling" else "default"
         polling_mode_enabled = normalized == "polling"
         async with self._connect(write=True) as db:
-            await db.execute("""
+            await db.execute(
+                """
                 INSERT OR REPLACE INTO call_logic_config (id, call_mode, polling_mode_enabled, updated_at)
                 VALUES (1, ?, ?, CURRENT_TIMESTAMP)
-            """, (normalized, polling_mode_enabled))
+            """,
+                (normalized, polling_mode_enabled),
+            )
             await db.commit()
 
     # Request log operations
@@ -5165,28 +5437,31 @@ class Database:
             }
         )
         async with self._connect(write=True) as db:
-            cursor = await db.execute("""
+            cursor = await db.execute(
+                """
                 INSERT INTO request_logs (
                     token_id, api_key_id, operation, request_body, response_body,
                     status_code, duration, status_text, progress,
                     request_excerpt, response_excerpt, request_size_bytes, response_size_bytes
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                log.token_id,
-                log.api_key_id,
-                log.operation,
-                summary_fields["request_body"],
-                summary_fields["response_body"],
-                log.status_code,
-                log.duration,
-                log.status_text or "",
-                log.progress,
-                summary_fields["request_excerpt"],
-                summary_fields["response_excerpt"],
-                summary_fields["request_size_bytes"],
-                summary_fields["response_size_bytes"],
-            ))
+            """,
+                (
+                    log.token_id,
+                    log.api_key_id,
+                    log.operation,
+                    summary_fields["request_body"],
+                    summary_fields["response_body"],
+                    log.status_code,
+                    log.duration,
+                    log.status_text or "",
+                    log.progress,
+                    summary_fields["request_excerpt"],
+                    summary_fields["response_excerpt"],
+                    summary_fields["request_size_bytes"],
+                    summary_fields["response_size_bytes"],
+                ),
+            )
             await db.commit()
             log_id = int(cursor.lastrowid)
         if self.log_payload_manager is not None:
@@ -5241,7 +5516,8 @@ class Database:
             response_body=response_body,
             status_code=status_code,
             duration=duration,
-            status_text=status_text or ("completed" if status_code == 200 else "failed" if status_code >= 400 else "processing"),
+            status_text=status_text
+            or ("completed" if status_code == 200 else "failed" if status_code >= 400 else "processing"),
             progress=100 if status_code == 200 else 0 if status_code >= 400 else 0,
         )
         return await self.add_request_log(log)
@@ -5316,7 +5592,12 @@ class Database:
         status_text = str(update_fields.get("status_text") or "").strip().lower()
         status_code = int(update_fields.get("status_code") or 0)
         terminal = status_code >= 200 or status_text in {
-            "completed", "failed", "cancelled", "canceled", "error", "timeout"
+            "completed",
+            "failed",
+            "cancelled",
+            "canceled",
+            "error",
+            "timeout",
         }
         runtime = self.event_runtime
         if runtime is not None and runtime.ready:
@@ -5911,8 +6192,16 @@ class Database:
                     updated_at = CURRENT_TIMESTAMP
                 """,
                 (
-                    filename, api_key_id, token_id, flow_project_id, media_type, source_url,
-                    storage_provider, object_key or filename, delivery_mode, size_bytes,
+                    filename,
+                    api_key_id,
+                    token_id,
+                    flow_project_id,
+                    media_type,
+                    source_url,
+                    storage_provider,
+                    object_key or filename,
+                    delivery_mode,
+                    size_bytes,
                 ),
             )
             await db.commit()
@@ -6016,9 +6305,7 @@ class Database:
             rows = await cursor.fetchall()
             return [dict(r) for r in rows]
 
-    async def count_cache_files_for_api_key_project(
-        self, api_key_id: int, flow_project_id: str
-    ) -> int:
+    async def count_cache_files_for_api_key_project(self, api_key_id: int, flow_project_id: str) -> int:
         pid = (flow_project_id or "").strip()
         async with self._connect() as db:
             cursor = await db.execute(
@@ -6091,12 +6378,8 @@ class Database:
             config.set_extension_generation_fallback_mode(
                 str(getattr(generation_config, "extension_generation_fallback_mode", "local_http_on_recaptcha"))
             )
-            config.set_flow2api_gemini_api_keys(
-                str(getattr(generation_config, "flow2api_gemini_api_keys", "") or "")
-            )
-            config.set_flow2api_openai_api_keys(
-                str(getattr(generation_config, "flow2api_openai_api_keys", "") or "")
-            )
+            config.set_flow2api_gemini_api_keys(str(getattr(generation_config, "flow2api_gemini_api_keys", "") or ""))
+            config.set_flow2api_openai_api_keys(str(getattr(generation_config, "flow2api_openai_api_keys", "") or ""))
             config.set_flow2api_openrouter_api_keys(
                 str(getattr(generation_config, "flow2api_openrouter_api_keys", "") or "")
             )
@@ -6106,18 +6389,10 @@ class Database:
             config.set_flow2api_third_party_gemini_base_url(
                 str(getattr(generation_config, "flow2api_third_party_gemini_base_url", "") or "")
             )
-            config.set_cloudflare_account_id(
-                str(getattr(generation_config, "cloudflare_account_id", "") or "")
-            )
-            config.set_cloudflare_api_token(
-                str(getattr(generation_config, "cloudflare_api_token", "") or "")
-            )
-            config.set_flow2api_csvgen_cookie(
-                str(getattr(generation_config, "flow2api_csvgen_cookie", "") or "")
-            )
-            config.set_flow2api_csvgen_api_keys(
-                str(getattr(generation_config, "flow2api_csvgen_api_keys", "") or "")
-            )
+            config.set_cloudflare_account_id(str(getattr(generation_config, "cloudflare_account_id", "") or ""))
+            config.set_cloudflare_api_token(str(getattr(generation_config, "cloudflare_api_token", "") or ""))
+            config.set_flow2api_csvgen_cookie(str(getattr(generation_config, "flow2api_csvgen_cookie", "") or ""))
+            config.set_flow2api_csvgen_api_keys(str(getattr(generation_config, "flow2api_csvgen_api_keys", "") or ""))
             config.set_flow2api_cloning_model(
                 str(getattr(generation_config, "flow2api_cloning_model", "gemini-2.5-flash") or "gemini-2.5-flash")
             )
@@ -6178,33 +6453,21 @@ class Database:
             config.set_flow2api_metadata_fallback_models(
                 str(getattr(generation_config, "flow2api_metadata_fallback_models", "") or "")
             )
-            config.set_metadata_system_prompt(
-                str(getattr(generation_config, "metadata_system_prompt", "") or "")
-            )
+            config.set_metadata_system_prompt(str(getattr(generation_config, "metadata_system_prompt", "") or ""))
             config.set_cloning_image_system_prompt(
                 str(getattr(generation_config, "cloning_image_system_prompt", "") or "")
             )
             config.set_cloning_video_system_prompt(
                 str(getattr(generation_config, "cloning_video_system_prompt", "") or "")
             )
-            config.set_task_tracker_device_id(
-                str(getattr(generation_config, "task_tracker_device_id", "") or "")
-            )
-            config.set_task_tracker_device_name(
-                str(getattr(generation_config, "task_tracker_device_name", "") or "")
-            )
-            config.set_task_tracker_cookies(
-                str(getattr(generation_config, "task_tracker_cookies", "") or "")
-            )
-            config.set_task_tracker_device_token(
-                str(getattr(generation_config, "task_tracker_device_token", "") or "")
-            )
+            config.set_task_tracker_device_id(str(getattr(generation_config, "task_tracker_device_id", "") or ""))
+            config.set_task_tracker_device_name(str(getattr(generation_config, "task_tracker_device_name", "") or ""))
+            config.set_task_tracker_cookies(str(getattr(generation_config, "task_tracker_cookies", "") or ""))
+            config.set_task_tracker_device_token(str(getattr(generation_config, "task_tracker_device_token", "") or ""))
             config.set_task_tracker_turnstile_token(
                 str(getattr(generation_config, "task_tracker_turnstile_token", "") or "")
             )
-            config.set_task_tracker_tls_profile(
-                str(getattr(generation_config, "task_tracker_tls_profile", "") or "")
-            )
+            config.set_task_tracker_tls_profile(str(getattr(generation_config, "task_tracker_tls_profile", "") or ""))
 
         # Reload call logic config
         call_logic_config = await self.get_call_logic_config()
@@ -6243,12 +6506,14 @@ class Database:
             config.set_personal_project_pool_size(captcha_config.personal_project_pool_size)
             config.set_personal_max_resident_tabs(captcha_config.personal_max_resident_tabs)
             config.set_personal_idle_tab_ttl_seconds(captcha_config.personal_idle_tab_ttl_seconds)
-            config.set_browser_captcha_page_url(
-                getattr(captcha_config, "browser_captcha_page_url", None) or ""
-            )
+            config.set_browser_captcha_page_url(getattr(captcha_config, "browser_captcha_page_url", None) or "")
             config.set_session_refresh_enabled(bool(getattr(captcha_config, "session_refresh_enabled", True)))
-            config.set_session_refresh_browser_first(bool(getattr(captcha_config, "session_refresh_browser_first", True)))
-            config.set_session_refresh_inject_st_cookie(bool(getattr(captcha_config, "session_refresh_inject_st_cookie", True)))
+            config.set_session_refresh_browser_first(
+                bool(getattr(captcha_config, "session_refresh_browser_first", True))
+            )
+            config.set_session_refresh_inject_st_cookie(
+                bool(getattr(captcha_config, "session_refresh_inject_st_cookie", True))
+            )
             config.set_session_refresh_warmup_urls(getattr(captcha_config, "session_refresh_warmup_urls", ""))
             config.set_session_refresh_wait_seconds_per_url(
                 int(getattr(captcha_config, "session_refresh_wait_seconds_per_url", 60) or 60)
@@ -6287,9 +6552,7 @@ class Database:
             config.set_st_only_refresh_scheduler_expiring_within_minutes(
                 int(getattr(captcha_config, "st_only_refresh_scheduler_expiring_within_minutes", 5) or 5)
             )
-            config.set_dedicated_extension_enabled(
-                bool(getattr(captcha_config, "dedicated_extension_enabled", False))
-            )
+            config.set_dedicated_extension_enabled(bool(getattr(captcha_config, "dedicated_extension_enabled", False)))
             config.set_dedicated_extension_captcha_timeout_seconds(
                 int(getattr(captcha_config, "dedicated_extension_captcha_timeout_seconds", 25) or 25)
             )
@@ -6334,18 +6597,23 @@ class Database:
                 new_timeout = timeout if timeout is not None else current.get("cache_timeout", 7200)
                 new_base_url = base_url if base_url is not None else current.get("cache_base_url")
                 new_provider = provider if provider is not None else current.get("cache_provider", "local")
-                new_delivery_mode = delivery_mode if delivery_mode is not None else current.get("cache_delivery_mode", "proxy")
+                new_delivery_mode = (
+                    delivery_mode if delivery_mode is not None else current.get("cache_delivery_mode", "proxy")
+                )
 
                 # If base_url is explicitly set to empty string, treat as None
                 if base_url == "":
                     new_base_url = None
 
-                await db.execute("""
+                await db.execute(
+                    """
                     UPDATE cache_config
                     SET cache_enabled = ?, cache_timeout = ?, cache_base_url = ?,
                         cache_provider = ?, cache_delivery_mode = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE id = 1
-                """, (new_enabled, new_timeout, new_base_url, new_provider, new_delivery_mode))
+                """,
+                    (new_enabled, new_timeout, new_base_url, new_provider, new_delivery_mode),
+                )
             else:
                 # Insert default row if not exists
                 new_enabled = enabled if enabled is not None else False
@@ -6354,17 +6622,20 @@ class Database:
                 new_provider = provider if provider is not None else "local"
                 new_delivery_mode = delivery_mode if delivery_mode is not None else "proxy"
 
-                await db.execute("""
+                await db.execute(
+                    """
                     INSERT INTO cache_config (
                         id, cache_enabled, cache_timeout, cache_base_url,
                         cache_provider, cache_delivery_mode
                     ) VALUES (1, ?, ?, ?, ?, ?)
-                """, (new_enabled, new_timeout, new_base_url, new_provider, new_delivery_mode))
+                """,
+                    (new_enabled, new_timeout, new_base_url, new_provider, new_delivery_mode),
+                )
 
             await db.commit()
 
     # Debug config operations
-    async def get_debug_config(self) -> 'DebugConfig':
+    async def get_debug_config(self) -> "DebugConfig":
         """Get debug configuration"""
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
@@ -6376,11 +6647,7 @@ class Database:
             return DebugConfig(enabled=False, log_requests=True, log_responses=True, mask_token=True)
 
     async def update_debug_config(
-        self,
-        enabled: bool = None,
-        log_requests: bool = None,
-        log_responses: bool = None,
-        mask_token: bool = None
+        self, enabled: bool = None, log_requests: bool = None, log_responses: bool = None, mask_token: bool = None
     ):
         """Update debug configuration"""
         async with self._connect(write=True) as db:
@@ -6397,11 +6664,14 @@ class Database:
                 new_log_responses = log_responses if log_responses is not None else current.get("log_responses", True)
                 new_mask_token = mask_token if mask_token is not None else current.get("mask_token", True)
 
-                await db.execute("""
+                await db.execute(
+                    """
                     UPDATE debug_config
                     SET enabled = ?, log_requests = ?, log_responses = ?, mask_token = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE id = 1
-                """, (new_enabled, new_log_requests, new_log_responses, new_mask_token))
+                """,
+                    (new_enabled, new_log_requests, new_log_responses, new_mask_token),
+                )
             else:
                 # Insert default row if not exists
                 new_enabled = enabled if enabled is not None else False
@@ -6409,10 +6679,13 @@ class Database:
                 new_log_responses = log_responses if log_responses is not None else True
                 new_mask_token = mask_token if mask_token is not None else True
 
-                await db.execute("""
+                await db.execute(
+                    """
                     INSERT INTO debug_config (id, enabled, log_requests, log_responses, mask_token)
                     VALUES (1, ?, ?, ?, ?)
-                """, (new_enabled, new_log_requests, new_log_responses, new_mask_token))
+                """,
+                    (new_enabled, new_log_requests, new_log_responses, new_mask_token),
+                )
 
             await db.commit()
 
@@ -6483,32 +6756,74 @@ class Database:
 
             if row:
                 current = dict(row)
-                new_method = captcha_method if captcha_method is not None else current.get("captcha_method", "yescaptcha")
-                new_yes_key = yescaptcha_api_key if yescaptcha_api_key is not None else current.get("yescaptcha_api_key", "")
-                new_yes_url = yescaptcha_base_url if yescaptcha_base_url is not None else current.get("yescaptcha_base_url", "https://api.yescaptcha.com")
+                new_method = (
+                    captcha_method if captcha_method is not None else current.get("captcha_method", "yescaptcha")
+                )
+                new_yes_key = (
+                    yescaptcha_api_key if yescaptcha_api_key is not None else current.get("yescaptcha_api_key", "")
+                )
+                new_yes_url = (
+                    yescaptcha_base_url
+                    if yescaptcha_base_url is not None
+                    else current.get("yescaptcha_base_url", "https://api.yescaptcha.com")
+                )
                 new_yes_task_type = normalize_yescaptcha_task_type(
                     yescaptcha_task_type if yescaptcha_task_type is not None else current.get("yescaptcha_task_type")
                 )
-                new_cap_key = capmonster_api_key if capmonster_api_key is not None else current.get("capmonster_api_key", "")
-                new_cap_url = capmonster_base_url if capmonster_base_url is not None else current.get("capmonster_base_url", "https://api.capmonster.cloud")
+                new_cap_key = (
+                    capmonster_api_key if capmonster_api_key is not None else current.get("capmonster_api_key", "")
+                )
+                new_cap_url = (
+                    capmonster_base_url
+                    if capmonster_base_url is not None
+                    else current.get("capmonster_base_url", "https://api.capmonster.cloud")
+                )
                 new_cap_min_score = normalize_capmonster_min_score(
                     capmonster_min_score
                     if capmonster_min_score is not None
                     else current.get("capmonster_min_score", DEFAULT_CAPMONSTER_MIN_SCORE)
                 )
-                new_ez_key = ezcaptcha_api_key if ezcaptcha_api_key is not None else current.get("ezcaptcha_api_key", "")
-                new_ez_url = ezcaptcha_base_url if ezcaptcha_base_url is not None else current.get("ezcaptcha_base_url", "https://api.ez-captcha.com")
-                new_cs_key = capsolver_api_key if capsolver_api_key is not None else current.get("capsolver_api_key", "")
-                new_cs_url = capsolver_base_url if capsolver_base_url is not None else current.get("capsolver_base_url", "https://api.capsolver.com")
-                new_remote_base_url = remote_browser_base_url if remote_browser_base_url is not None else current.get("remote_browser_base_url", "")
-                new_remote_api_key = remote_browser_api_key if remote_browser_api_key is not None else current.get("remote_browser_api_key", "")
-                new_remote_timeout = remote_browser_timeout if remote_browser_timeout is not None else current.get("remote_browser_timeout", 60)
+                new_ez_key = (
+                    ezcaptcha_api_key if ezcaptcha_api_key is not None else current.get("ezcaptcha_api_key", "")
+                )
+                new_ez_url = (
+                    ezcaptcha_base_url
+                    if ezcaptcha_base_url is not None
+                    else current.get("ezcaptcha_base_url", "https://api.ez-captcha.com")
+                )
+                new_cs_key = (
+                    capsolver_api_key if capsolver_api_key is not None else current.get("capsolver_api_key", "")
+                )
+                new_cs_url = (
+                    capsolver_base_url
+                    if capsolver_base_url is not None
+                    else current.get("capsolver_base_url", "https://api.capsolver.com")
+                )
+                new_remote_base_url = (
+                    remote_browser_base_url
+                    if remote_browser_base_url is not None
+                    else current.get("remote_browser_base_url", "")
+                )
+                new_remote_api_key = (
+                    remote_browser_api_key
+                    if remote_browser_api_key is not None
+                    else current.get("remote_browser_api_key", "")
+                )
+                new_remote_timeout = (
+                    remote_browser_timeout
+                    if remote_browser_timeout is not None
+                    else current.get("remote_browser_timeout", 60)
+                )
                 new_browser_fallback = (
                     browser_fallback_to_remote_browser
                     if browser_fallback_to_remote_browser is not None
                     else current.get("browser_fallback_to_remote_browser", True)
                 )
-                new_proxy_enabled = browser_proxy_enabled if browser_proxy_enabled is not None else current.get("browser_proxy_enabled", False)
+                new_proxy_enabled = (
+                    browser_proxy_enabled
+                    if browser_proxy_enabled is not None
+                    else current.get("browser_proxy_enabled", False)
+                )
                 new_proxy_url = browser_proxy_url if browser_proxy_url is not None else current.get("browser_proxy_url")
                 new_browser_count = browser_count if browser_count is not None else current.get("browser_count", 1)
                 new_browser_personal_fresh_restart_every_n_solves = (
@@ -6516,16 +6831,30 @@ class Database:
                     if browser_personal_fresh_restart_every_n_solves is not None
                     else current.get("browser_personal_fresh_restart_every_n_solves", 10)
                 )
-                new_personal_project_pool_size = personal_project_pool_size if personal_project_pool_size is not None else current.get("personal_project_pool_size", 4)
-                new_personal_max_tabs = personal_max_resident_tabs if personal_max_resident_tabs is not None else current.get("personal_max_resident_tabs", 5)
-                new_personal_idle_ttl = personal_idle_tab_ttl_seconds if personal_idle_tab_ttl_seconds is not None else current.get("personal_idle_tab_ttl_seconds", 600)
+                new_personal_project_pool_size = (
+                    personal_project_pool_size
+                    if personal_project_pool_size is not None
+                    else current.get("personal_project_pool_size", 4)
+                )
+                new_personal_max_tabs = (
+                    personal_max_resident_tabs
+                    if personal_max_resident_tabs is not None
+                    else current.get("personal_max_resident_tabs", 5)
+                )
+                new_personal_idle_ttl = (
+                    personal_idle_tab_ttl_seconds
+                    if personal_idle_tab_ttl_seconds is not None
+                    else current.get("personal_idle_tab_ttl_seconds", 600)
+                )
                 default_page_url = "https://labs.google/fx/api/auth/providers"
                 new_browser_captcha_page_url = (
                     browser_captcha_page_url
                     if browser_captcha_page_url is not None
                     else current.get("browser_captcha_page_url", default_page_url)
                 )
-                new_browser_captcha_page_url = (new_browser_captcha_page_url or default_page_url).strip() or default_page_url
+                new_browser_captcha_page_url = (
+                    new_browser_captcha_page_url or default_page_url
+                ).strip() or default_page_url
                 new_session_refresh_enabled = (
                     session_refresh_enabled
                     if session_refresh_enabled is not None
@@ -6643,10 +6972,18 @@ class Database:
                 new_personal_project_pool_size = max(1, min(50, int(new_personal_project_pool_size)))
                 new_personal_max_tabs = max(1, min(50, int(new_personal_max_tabs)))  # 限制1-50
                 new_personal_idle_ttl = max(60, int(new_personal_idle_ttl))  # 最少60秒
-                new_session_refresh_wait_seconds_per_url = max(0, min(600, int(new_session_refresh_wait_seconds_per_url)))
-                new_session_refresh_overall_timeout_seconds = max(10, min(1800, int(new_session_refresh_overall_timeout_seconds)))
-                new_session_refresh_scheduler_interval_minutes = max(1, min(1440, int(new_session_refresh_scheduler_interval_minutes)))
-                new_session_refresh_scheduler_batch_size = max(1, min(200, int(new_session_refresh_scheduler_batch_size)))
+                new_session_refresh_wait_seconds_per_url = max(
+                    0, min(600, int(new_session_refresh_wait_seconds_per_url))
+                )
+                new_session_refresh_overall_timeout_seconds = max(
+                    10, min(1800, int(new_session_refresh_overall_timeout_seconds))
+                )
+                new_session_refresh_scheduler_interval_minutes = max(
+                    1, min(1440, int(new_session_refresh_scheduler_interval_minutes))
+                )
+                new_session_refresh_scheduler_batch_size = max(
+                    1, min(200, int(new_session_refresh_scheduler_batch_size))
+                )
                 new_session_refresh_scheduler_only_expiring_within_minutes = max(
                     1, min(10080, int(new_session_refresh_scheduler_only_expiring_within_minutes))
                 )
@@ -6660,25 +6997,22 @@ class Database:
                     1, min(10080, int(new_st_only_refresh_scheduler_expiring_within_minutes))
                 )
                 new_extension_queue_wait_timeout = max(1, min(120, int(new_extension_queue_wait_timeout)))
-                new_dedicated_extension_captcha_timeout = max(
-                    5, min(180, int(new_dedicated_extension_captcha_timeout))
-                )
+                new_dedicated_extension_captcha_timeout = max(5, min(180, int(new_dedicated_extension_captcha_timeout)))
                 new_dedicated_extension_st_refresh_timeout = max(
                     10, min(300, int(new_dedicated_extension_st_refresh_timeout))
                 )
                 new_extension_fallback_to_managed_on_dedicated_failure = (
                     bool(extension_fallback_to_managed_on_dedicated_failure)
                     if extension_fallback_to_managed_on_dedicated_failure is not None
-                    else bool(
-                        current.get("extension_fallback_to_managed_on_dedicated_failure", False)
-                    )
+                    else bool(current.get("extension_fallback_to_managed_on_dedicated_failure", False))
                 )
                 new_session_refresh_warmup_urls = (
                     str(new_session_refresh_warmup_urls or "").strip()
                     or "https://labs.google/fx/tools/flow,https://labs.google/fx"
                 )
 
-                await db.execute("""
+                await db.execute(
+                    """
                     UPDATE captcha_config
                     SET captcha_method = ?, yescaptcha_api_key = ?, yescaptcha_base_url = ?,
                         yescaptcha_task_type = ?,
@@ -6710,31 +7044,55 @@ class Database:
                         extension_fallback_to_managed_on_dedicated_failure = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = 1
-                """, (new_method, new_yes_key, new_yes_url, new_yes_task_type,
-                      new_cap_key, new_cap_url, new_cap_min_score,
-                      new_ez_key, new_ez_url, new_cs_key, new_cs_url,
-                      (new_remote_base_url or "").strip(), (new_remote_api_key or "").strip(), new_remote_timeout,
-                      bool(new_browser_fallback),
-                      new_proxy_enabled, new_proxy_url, new_browser_count,
-                      new_browser_personal_fresh_restart_every_n_solves, new_personal_project_pool_size,
-                      new_personal_max_tabs, new_personal_idle_ttl, new_browser_captcha_page_url,
-                      bool(new_session_refresh_enabled), bool(new_session_refresh_browser_first),
-                      bool(new_session_refresh_inject_st_cookie), new_session_refresh_warmup_urls,
-                      new_session_refresh_wait_seconds_per_url, new_session_refresh_overall_timeout_seconds,
-                      bool(new_session_refresh_update_st_from_cookie),
-                      bool(new_session_refresh_fail_if_st_refresh_fails),
-                      bool(new_session_refresh_local_only), bool(new_session_refresh_scheduler_enabled),
-                      new_session_refresh_scheduler_interval_minutes, new_session_refresh_scheduler_batch_size,
-                      new_session_refresh_scheduler_only_expiring_within_minutes,
-                      bool(new_st_only_refresh_scheduler_enabled),
-                      new_st_only_refresh_scheduler_interval_minutes,
-                      new_st_only_refresh_scheduler_batch_size,
-                      new_st_only_refresh_scheduler_expiring_within_minutes,
-                      new_extension_queue_wait_timeout,
-                      bool(new_dedicated_extension_enabled),
-                      new_dedicated_extension_captcha_timeout,
-                      new_dedicated_extension_st_refresh_timeout,
-                      bool(new_extension_fallback_to_managed_on_dedicated_failure)))
+                """,
+                    (
+                        new_method,
+                        new_yes_key,
+                        new_yes_url,
+                        new_yes_task_type,
+                        new_cap_key,
+                        new_cap_url,
+                        new_cap_min_score,
+                        new_ez_key,
+                        new_ez_url,
+                        new_cs_key,
+                        new_cs_url,
+                        (new_remote_base_url or "").strip(),
+                        (new_remote_api_key or "").strip(),
+                        new_remote_timeout,
+                        bool(new_browser_fallback),
+                        new_proxy_enabled,
+                        new_proxy_url,
+                        new_browser_count,
+                        new_browser_personal_fresh_restart_every_n_solves,
+                        new_personal_project_pool_size,
+                        new_personal_max_tabs,
+                        new_personal_idle_ttl,
+                        new_browser_captcha_page_url,
+                        bool(new_session_refresh_enabled),
+                        bool(new_session_refresh_browser_first),
+                        bool(new_session_refresh_inject_st_cookie),
+                        new_session_refresh_warmup_urls,
+                        new_session_refresh_wait_seconds_per_url,
+                        new_session_refresh_overall_timeout_seconds,
+                        bool(new_session_refresh_update_st_from_cookie),
+                        bool(new_session_refresh_fail_if_st_refresh_fails),
+                        bool(new_session_refresh_local_only),
+                        bool(new_session_refresh_scheduler_enabled),
+                        new_session_refresh_scheduler_interval_minutes,
+                        new_session_refresh_scheduler_batch_size,
+                        new_session_refresh_scheduler_only_expiring_within_minutes,
+                        bool(new_st_only_refresh_scheduler_enabled),
+                        new_st_only_refresh_scheduler_interval_minutes,
+                        new_st_only_refresh_scheduler_batch_size,
+                        new_st_only_refresh_scheduler_expiring_within_minutes,
+                        new_extension_queue_wait_timeout,
+                        bool(new_dedicated_extension_enabled),
+                        new_dedicated_extension_captcha_timeout,
+                        new_dedicated_extension_st_refresh_timeout,
+                        bool(new_extension_fallback_to_managed_on_dedicated_failure),
+                    ),
+                )
             else:
                 new_method = captcha_method if captcha_method is not None else "yescaptcha"
                 new_yes_key = yescaptcha_api_key if yescaptcha_api_key is not None else ""
@@ -6743,9 +7101,7 @@ class Database:
                 new_cap_key = capmonster_api_key if capmonster_api_key is not None else ""
                 new_cap_url = capmonster_base_url if capmonster_base_url is not None else "https://api.capmonster.cloud"
                 new_cap_min_score = normalize_capmonster_min_score(
-                    capmonster_min_score
-                    if capmonster_min_score is not None
-                    else DEFAULT_CAPMONSTER_MIN_SCORE
+                    capmonster_min_score if capmonster_min_score is not None else DEFAULT_CAPMONSTER_MIN_SCORE
                 )
                 new_ez_key = ezcaptcha_api_key if ezcaptcha_api_key is not None else ""
                 new_ez_url = ezcaptcha_base_url if ezcaptcha_base_url is not None else "https://api.ez-captcha.com"
@@ -6755,9 +7111,7 @@ class Database:
                 new_remote_api_key = remote_browser_api_key if remote_browser_api_key is not None else ""
                 new_remote_timeout = remote_browser_timeout if remote_browser_timeout is not None else 60
                 new_browser_fallback = (
-                    bool(browser_fallback_to_remote_browser)
-                    if browser_fallback_to_remote_browser is not None
-                    else True
+                    bool(browser_fallback_to_remote_browser) if browser_fallback_to_remote_browser is not None else True
                 )
                 new_proxy_enabled = browser_proxy_enabled if browser_proxy_enabled is not None else False
                 new_proxy_url = browser_proxy_url
@@ -6767,9 +7121,13 @@ class Database:
                     if browser_personal_fresh_restart_every_n_solves is not None
                     else 10
                 )
-                new_personal_project_pool_size = personal_project_pool_size if personal_project_pool_size is not None else 4
+                new_personal_project_pool_size = (
+                    personal_project_pool_size if personal_project_pool_size is not None else 4
+                )
                 new_personal_max_tabs = personal_max_resident_tabs if personal_max_resident_tabs is not None else 5
-                new_personal_idle_ttl = personal_idle_tab_ttl_seconds if personal_idle_tab_ttl_seconds is not None else 600
+                new_personal_idle_ttl = (
+                    personal_idle_tab_ttl_seconds if personal_idle_tab_ttl_seconds is not None else 600
+                )
                 default_page_url = "https://labs.google/fx/api/auth/providers"
                 new_browser_captcha_page_url = (
                     (browser_captcha_page_url or default_page_url).strip()
@@ -6786,29 +7144,79 @@ class Database:
                 new_personal_project_pool_size = max(1, min(50, int(new_personal_project_pool_size)))
                 new_personal_max_tabs = max(1, min(50, int(new_personal_max_tabs)))
                 new_personal_idle_ttl = max(60, int(new_personal_idle_ttl))
-                new_session_refresh_enabled = bool(session_refresh_enabled) if session_refresh_enabled is not None else True
-                new_session_refresh_browser_first = bool(session_refresh_browser_first) if session_refresh_browser_first is not None else True
-                new_session_refresh_inject_st_cookie = bool(session_refresh_inject_st_cookie) if session_refresh_inject_st_cookie is not None else True
+                new_session_refresh_enabled = (
+                    bool(session_refresh_enabled) if session_refresh_enabled is not None else True
+                )
+                new_session_refresh_browser_first = (
+                    bool(session_refresh_browser_first) if session_refresh_browser_first is not None else True
+                )
+                new_session_refresh_inject_st_cookie = (
+                    bool(session_refresh_inject_st_cookie) if session_refresh_inject_st_cookie is not None else True
+                )
                 new_session_refresh_warmup_urls = (
                     str(session_refresh_warmup_urls or "").strip()
                     if session_refresh_warmup_urls is not None
                     else "https://labs.google/fx/tools/flow,https://labs.google/fx"
                 ) or "https://labs.google/fx/tools/flow,https://labs.google/fx"
                 new_session_refresh_wait_seconds_per_url = max(
-                    0, min(600, int(session_refresh_wait_seconds_per_url if session_refresh_wait_seconds_per_url is not None else 60))
+                    0,
+                    min(
+                        600,
+                        int(
+                            session_refresh_wait_seconds_per_url
+                            if session_refresh_wait_seconds_per_url is not None
+                            else 60
+                        ),
+                    ),
                 )
                 new_session_refresh_overall_timeout_seconds = max(
-                    10, min(1800, int(session_refresh_overall_timeout_seconds if session_refresh_overall_timeout_seconds is not None else 180))
+                    10,
+                    min(
+                        1800,
+                        int(
+                            session_refresh_overall_timeout_seconds
+                            if session_refresh_overall_timeout_seconds is not None
+                            else 180
+                        ),
+                    ),
                 )
-                new_session_refresh_update_st_from_cookie = bool(session_refresh_update_st_from_cookie) if session_refresh_update_st_from_cookie is not None else True
-                new_session_refresh_fail_if_st_refresh_fails = bool(session_refresh_fail_if_st_refresh_fails) if session_refresh_fail_if_st_refresh_fails is not None else True
-                new_session_refresh_local_only = bool(session_refresh_local_only) if session_refresh_local_only is not None else True
-                new_session_refresh_scheduler_enabled = bool(session_refresh_scheduler_enabled) if session_refresh_scheduler_enabled is not None else False
+                new_session_refresh_update_st_from_cookie = (
+                    bool(session_refresh_update_st_from_cookie)
+                    if session_refresh_update_st_from_cookie is not None
+                    else True
+                )
+                new_session_refresh_fail_if_st_refresh_fails = (
+                    bool(session_refresh_fail_if_st_refresh_fails)
+                    if session_refresh_fail_if_st_refresh_fails is not None
+                    else True
+                )
+                new_session_refresh_local_only = (
+                    bool(session_refresh_local_only) if session_refresh_local_only is not None else True
+                )
+                new_session_refresh_scheduler_enabled = (
+                    bool(session_refresh_scheduler_enabled) if session_refresh_scheduler_enabled is not None else False
+                )
                 new_session_refresh_scheduler_interval_minutes = max(
-                    1, min(1440, int(session_refresh_scheduler_interval_minutes if session_refresh_scheduler_interval_minutes is not None else 30))
+                    1,
+                    min(
+                        1440,
+                        int(
+                            session_refresh_scheduler_interval_minutes
+                            if session_refresh_scheduler_interval_minutes is not None
+                            else 30
+                        ),
+                    ),
                 )
                 new_session_refresh_scheduler_batch_size = max(
-                    1, min(200, int(session_refresh_scheduler_batch_size if session_refresh_scheduler_batch_size is not None else 10))
+                    1,
+                    min(
+                        200,
+                        int(
+                            session_refresh_scheduler_batch_size
+                            if session_refresh_scheduler_batch_size is not None
+                            else 10
+                        ),
+                    ),
                 )
                 new_session_refresh_scheduler_only_expiring_within_minutes = max(
                     1,
@@ -6822,9 +7230,7 @@ class Database:
                     ),
                 )
                 new_st_only_refresh_scheduler_enabled = (
-                    bool(st_only_refresh_scheduler_enabled)
-                    if st_only_refresh_scheduler_enabled is not None
-                    else False
+                    bool(st_only_refresh_scheduler_enabled) if st_only_refresh_scheduler_enabled is not None else False
                 )
                 new_st_only_refresh_scheduler_interval_minutes = max(
                     1,
@@ -6863,7 +7269,11 @@ class Database:
                     1,
                     min(
                         120,
-                        int(extension_queue_wait_timeout_seconds if extension_queue_wait_timeout_seconds is not None else 20),
+                        int(
+                            extension_queue_wait_timeout_seconds
+                            if extension_queue_wait_timeout_seconds is not None
+                            else 20
+                        ),
                     ),
                 )
                 new_dedicated_extension_enabled = (
@@ -6897,7 +7307,8 @@ class Database:
                     else False
                 )
 
-                await db.execute("""
+                await db.execute(
+                    """
                     INSERT INTO captcha_config (id, captcha_method, yescaptcha_api_key, yescaptcha_base_url,
                         yescaptcha_task_type,
                         capmonster_api_key, capmonster_base_url, capmonster_min_score,
@@ -6926,28 +7337,55 @@ class Database:
                         dedicated_extension_st_refresh_timeout_seconds,
                         extension_fallback_to_managed_on_dedicated_failure)
                     VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (new_method, new_yes_key, new_yes_url, new_yes_task_type,
-                      new_cap_key, new_cap_url, new_cap_min_score,
-                      new_ez_key, new_ez_url, new_cs_key, new_cs_url,
-                      (new_remote_base_url or "").strip(), (new_remote_api_key or "").strip(), new_remote_timeout,
-                      new_browser_fallback,
-                      new_proxy_enabled, new_proxy_url, new_browser_count,
-                      new_browser_personal_fresh_restart_every_n_solves, new_personal_project_pool_size,
-                      new_personal_max_tabs, new_personal_idle_ttl, new_browser_captcha_page_url,
-                      new_session_refresh_enabled, new_session_refresh_browser_first,
-                      new_session_refresh_inject_st_cookie, new_session_refresh_warmup_urls,
-                      new_session_refresh_wait_seconds_per_url, new_session_refresh_overall_timeout_seconds,
-                      new_session_refresh_update_st_from_cookie, new_session_refresh_fail_if_st_refresh_fails,
-                      new_session_refresh_local_only, new_session_refresh_scheduler_enabled,
-                      new_session_refresh_scheduler_interval_minutes, new_session_refresh_scheduler_batch_size,
-                      new_session_refresh_scheduler_only_expiring_within_minutes,
-                      bool(new_st_only_refresh_scheduler_enabled),
-                      new_st_only_refresh_scheduler_interval_minutes,
-                      new_st_only_refresh_scheduler_batch_size,
-                      new_st_only_refresh_scheduler_expiring_within_minutes,
-                      new_extension_queue_wait_timeout, new_dedicated_extension_enabled,
-                      new_dedicated_extension_captcha_timeout, new_dedicated_extension_st_refresh_timeout,
-                      bool(new_extension_fallback_to_managed_on_dedicated_failure)))
+                """,
+                    (
+                        new_method,
+                        new_yes_key,
+                        new_yes_url,
+                        new_yes_task_type,
+                        new_cap_key,
+                        new_cap_url,
+                        new_cap_min_score,
+                        new_ez_key,
+                        new_ez_url,
+                        new_cs_key,
+                        new_cs_url,
+                        (new_remote_base_url or "").strip(),
+                        (new_remote_api_key or "").strip(),
+                        new_remote_timeout,
+                        new_browser_fallback,
+                        new_proxy_enabled,
+                        new_proxy_url,
+                        new_browser_count,
+                        new_browser_personal_fresh_restart_every_n_solves,
+                        new_personal_project_pool_size,
+                        new_personal_max_tabs,
+                        new_personal_idle_ttl,
+                        new_browser_captcha_page_url,
+                        new_session_refresh_enabled,
+                        new_session_refresh_browser_first,
+                        new_session_refresh_inject_st_cookie,
+                        new_session_refresh_warmup_urls,
+                        new_session_refresh_wait_seconds_per_url,
+                        new_session_refresh_overall_timeout_seconds,
+                        new_session_refresh_update_st_from_cookie,
+                        new_session_refresh_fail_if_st_refresh_fails,
+                        new_session_refresh_local_only,
+                        new_session_refresh_scheduler_enabled,
+                        new_session_refresh_scheduler_interval_minutes,
+                        new_session_refresh_scheduler_batch_size,
+                        new_session_refresh_scheduler_only_expiring_within_minutes,
+                        bool(new_st_only_refresh_scheduler_enabled),
+                        new_st_only_refresh_scheduler_interval_minutes,
+                        new_st_only_refresh_scheduler_batch_size,
+                        new_st_only_refresh_scheduler_expiring_within_minutes,
+                        new_extension_queue_wait_timeout,
+                        new_dedicated_extension_enabled,
+                        new_dedicated_extension_captcha_timeout,
+                        new_dedicated_extension_st_refresh_timeout,
+                        bool(new_extension_fallback_to_managed_on_dedicated_failure),
+                    ),
+                )
 
             await db.commit()
 
@@ -6970,16 +7408,22 @@ class Database:
             row = await cursor.fetchone()
 
             if row:
-                await db.execute("""
+                await db.execute(
+                    """
                     UPDATE plugin_config
                     SET connection_token = ?, auto_enable_on_update = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE id = 1
-                """, (connection_token, auto_enable_on_update))
+                """,
+                    (connection_token, auto_enable_on_update),
+                )
             else:
-                await db.execute("""
+                await db.execute(
+                    """
                     INSERT INTO plugin_config (id, connection_token, auto_enable_on_update)
                     VALUES (1, ?, ?)
-                """, (connection_token, auto_enable_on_update))
+                """,
+                    (connection_token, auto_enable_on_update),
+                )
 
             await db.commit()
 
@@ -7704,9 +8148,7 @@ class Database:
         current = await self.get_token_refresh_config()
         new_enabled = current.enabled if enabled is None else bool(enabled)
         raw_interval = (
-            current.refresh_interval_minutes
-            if refresh_interval_minutes is None
-            else refresh_interval_minutes
+            current.refresh_interval_minutes if refresh_interval_minutes is None else refresh_interval_minutes
         )
         try:
             interval = max(1, min(10080, int(raw_interval)))

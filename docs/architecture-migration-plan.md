@@ -235,12 +235,21 @@ Exit criteria:
 
 - [ ] Extract repositories for accounts, projects, API keys, cache, request logs, and workers.
 - [ ] Define and test behavioral parity between SQLite and PostgreSQL implementations.
-- [ ] Add ordered SQL migrations for both database engines.
-- [ ] Add a shared `schema_migrations` table and migration runner.
-- [ ] Define an existing-schema validator.
-- [ ] Stamp validated existing databases at the baseline without recreating tables.
-- [ ] Apply the full baseline normally for new databases.
-- [ ] Document backup, failure recovery, and rollback expectations.
+- [x] Add ordered SQL migrations for both database engines.
+- [x] Add a shared `schema_migrations` table and migration runner.
+- [x] Define an existing-schema validator.
+- [x] Stamp validated existing databases at the baseline without recreating tables.
+- [x] Apply the full baseline normally for new databases.
+- [x] Document backup, failure recovery, and rollback expectations.
+
+SQLite now has a deterministic `0001` schema alongside PostgreSQL. Both engines
+discover numbered SQL files through the same checksum contract and record revisions
+in `schema_migrations`. Fresh SQLite databases apply the baseline before compatibility
+initialization; legacy files are recognized, upgraded, fully validated, and only then
+stamped. PostgreSQL validates a pre-existing untracked schema before adopting its
+baseline. Operational backup and recovery expectations are documented in
+`docs/database-migrations.md`. Repository extraction and cross-engine behavioral
+parity are the remaining Phase 8 work.
 
 Exit criteria:
 

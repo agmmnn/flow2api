@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 from flow2api.core.database_runtime import DatabaseSettings
 from flow2api.core.postgres_database import coerce_boolean_parameters, translate_sql
-from flow2api.core.postgres_migrations import discover_migrations
+from flow2api.core.postgres_migrations import baseline_schema_signature, discover_migrations
 from flow2api.services.postgres_backup import (
     PostgresBackupError,
     create_postgres_archive,
@@ -40,9 +40,7 @@ class TestDatabaseSettings(unittest.TestCase):
     def test_invalid_schema_is_rejected(self):
         with patch.dict(os.environ, {"FLOW2API_DB_SCHEMA": "bad-schema"}, clear=False):
             with self.assertRaises(ValueError):
-                DatabaseSettings.from_env(
-                    backend="postgres", url="postgresql://localhost/flow2api"
-                )
+                DatabaseSettings.from_env(backend="postgres", url="postgresql://localhost/flow2api")
 
 
 class TestPostgresDialect(unittest.TestCase):
@@ -57,10 +55,7 @@ class TestPostgresDialect(unittest.TestCase):
         self.assertIn("ON CONFLICT DO NOTHING", query)
         self.assertNotIn("?", query)
 
-        query = translate_sql(
-            "SELECT * FROM tokens WHERE is_active = 1 "
-            "AND datetime(created_at) >= datetime('now', ?)"
-        )
+        query = translate_sql("SELECT * FROM tokens WHERE is_active = 1 AND datetime(created_at) >= datetime('now', ?)")
         self.assertIn("is_active = TRUE", query)
         self.assertIn("created_at >= CURRENT_TIMESTAMP + (%s)::interval", query)
         self.assertNotIn("datetime(", query)
@@ -74,8 +69,7 @@ class TestPostgresDialect(unittest.TestCase):
         self.assertIn("ON CONFLICT (api_key_id, endpoint) DO UPDATE SET", query)
         self.assertNotIn("INSERT OR REPLACE", query)
         update = translate_sql(
-            "UPDATE request_logs SET request_size_bytes = "
-            "MAX(COALESCE(request_size_bytes, 0), ?) WHERE id = ?"
+            "UPDATE request_logs SET request_size_bytes = MAX(COALESCE(request_size_bytes, 0), ?) WHERE id = ?"
         )
         self.assertIn("GREATEST(COALESCE(request_size_bytes, 0), %s)", update)
 
@@ -95,6 +89,12 @@ class TestPostgresDialect(unittest.TestCase):
         self.assertIn("CREATE TABLE system_metadata", sql_text)
         self.assertNotIn("AUTOINCREMENT", sql_text)
         self.assertNotIn("PRAGMA", sql_text)
+
+        tables, indexes = baseline_schema_signature(migrations[-1])
+        self.assertIn("tokens", tables)
+        self.assertIn("st", tables["tokens"])
+        self.assertIn("system_metadata", tables)
+        self.assertIn("idx_token_st", indexes)
 
 
 class TestEncryptedPostgresBackup(unittest.TestCase):
@@ -158,22 +158,26 @@ class TestPostgresBackupSnapshot(unittest.IsolatedAsyncioTestCase):
             dump_path = Path(command[command.index("--file") + 1])
             dump_path.write_bytes(b"postgres-custom-dump")
 
-        with tempfile.TemporaryDirectory() as temporary, patch.dict(
-            os.environ,
-            {
-                "FLOW2API_BACKUP_ACTIVE_KEY_ID": "current",
-                "FLOW2API_BACKUP_KEYS_JSON": '{"current":"' + encoded + '"}',
-            },
-            clear=False,
-        ), patch(
-            "flow2api.services.postgres_backup._require_pg16", new=AsyncMock()
-        ), patch(
-            "flow2api.services.postgres_backup.open_backup_snapshot",
-            new=AsyncMock(return_value=snapshot),
-        ), patch(
-            "flow2api.services.postgres_backup._run_process",
-            new=AsyncMock(side_effect=fake_run),
-        ) as run_process:
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.dict(
+                os.environ,
+                {
+                    "FLOW2API_BACKUP_ACTIVE_KEY_ID": "current",
+                    "FLOW2API_BACKUP_KEYS_JSON": '{"current":"' + encoded + '"}',
+                },
+                clear=False,
+            ),
+            patch("flow2api.services.postgres_backup._require_pg16", new=AsyncMock()),
+            patch(
+                "flow2api.services.postgres_backup.open_backup_snapshot",
+                new=AsyncMock(return_value=snapshot),
+            ),
+            patch(
+                "flow2api.services.postgres_backup._run_process",
+                new=AsyncMock(side_effect=fake_run),
+            ) as run_process,
+        ):
             root = Path(temporary)
             profiles = root / "profiles"
             profiles.mkdir()
