@@ -32,24 +32,47 @@
 - Docker and Docker Compose (recommended)
 - Or [uv](https://docs.astral.sh/uv/getting-started/installation/) and [Bun](https://bun.sh/) for local use. uv installs the required Python 3.11 runtime when necessary.
 
+### Repository layout
+
+- `apps/api/`: the installable `flow2api` Python package and backend tests
+- `apps/admin-web/`: the React administration interface
+- `apps/captcha-extension/`: the Chrome CAPTCHA/account-sync worker
+- `apps/metadata-extension/`: the TypeScript metadata extension
+- `apps/agent-gateway/`: the standalone remote browser agent gateway
+- `infra/docker/` and `infra/compose/`: container images and Compose stacks
+- `packages/`: reserved shared API and extension contracts
+- `.runtime/`: local databases, browser profiles, generated files, and cache data
+
+If you are upgrading a checkout created before this layout, stop Flow2API and
+move the old local runtime directories once:
+
+```bash
+mkdir -p .runtime
+mv data .runtime/data
+mv tmp .runtime/tmp
+```
+
+Skip a move when its legacy directory does not exist. Do not overwrite an
+existing `.runtime/data`; back up both directories and reconcile them first.
+
 Flow now requires an additional CAPTCHA. You can solve it through a browser or a third-party service.
 
 - To use YesCaptcha, [register here](https://yescaptcha.com/i/13Xd8K), obtain an API key, and enter it in the **YesCaptcha API key** field on the system settings page.
 - The admin UI supports these YesCaptcha task types: `RecaptchaV3TaskProxyless`, `RecaptchaV3TaskProxylessM1`, `RecaptchaV3TaskProxylessM1S7`, and `RecaptchaV3TaskProxylessM1S9`. `M1S9` is currently recommended by default. S7 and S9 force `minScore` values of 0.7 and 0.9 respectively.
-- The default `docker-compose.yml` is intended for third-party solvers such as YesCaptcha, CapMonster, EzCaptcha, or CapSolver. For headed `browser` or `personal` solving inside Docker, use `docker-compose.headed.yml` below.
+- The default `infra/compose/docker-compose.yml` is intended for third-party solvers such as YesCaptcha, CapMonster, EzCaptcha, or CapSolver. For headed `browser` or `personal` solving inside Docker, use `infra/compose/docker-compose.headed.yml` below.
 - To test `remote_browser` mode locally, run the Node mock solver on the host. It verifies HTTP and authentication only and does not produce real reCAPTCHA tokens. See [`tools/remote-browser-mock/`](./tools/remote-browser-mock/).
-- For the production **Agent Gateway** (Flow2API over HTTP, with jobs delivered to user PCs over WebSocket), see [`docs/agent-gateway.md`](./docs/agent-gateway.md) and [`src/agent_gateway/`](./src/agent_gateway/).
+- For the production **Agent Gateway** (Flow2API over HTTP, with jobs delivered to user PCs over WebSocket), see [`apps/agent-gateway/src/flow2api_gateway/README.md`](./apps/agent-gateway/src/flow2api_gateway/README.md).
 - For asynchronous submission and polling through `/v1/async/chat/completions` and `/v1/jobs/{job_id}`, see [`docs/async-polling.md`](./docs/async-polling.md).
 - Runway web-task integration is available through the admin `Runway` tab, `runway-*` models, and `/v1/runway/*` routes. See [`docs/runway.md`](./docs/runway.md). It includes a manifest-backed model registry, live feature sync, real Runway uploads/datasets, image/video/audio/upscale task builders, OpenAI-compatible dispatch, voices, estimates, cancel, async polling, and cache mirroring.
 - Production performance, Railway Redis, WebSocket events, and seven-day retention are documented in [`docs/performance-redis-rollout.md`](./docs/performance-redis-rollout.md). The PostgreSQL 16 bridge, migration, encrypted Google Drive backup, cutover, and rollback procedure is in [`docs/postgres-migration-runbook.md`](./docs/postgres-migration-runbook.md).
 
-- The bundled [`extension/`](./extension/) supports CAPTCHA work, current-account import, scheduled ST/cookie synchronization, and token-bound refresh workers.
+- The bundled [`apps/captcha-extension/`](./apps/captcha-extension/) supports CAPTCHA work, current-account import, scheduled ST/cookie synchronization, and token-bound refresh workers.
 
 ### Chrome Extension per-key isolation setup
 
 When using captcha method `extension`, Flow2API keeps one global captcha mode but isolates end-user workers per managed API key.
 
-1. Load [`extension/`](./extension/) as an unpacked Chrome extension.
+1. Load [`apps/captcha-extension/`](./apps/captcha-extension/) as an unpacked Chrome extension.
 2. Create a managed API key in **API key manager**. Add `tokens:import` if this extension may add or refresh the Google account signed in to its Chrome profile.
 3. Select **End User Worker**, enter the WebSocket URL and managed API key, then save the connection.
 4. Click **Save / Import Current Google Account** to create or update the dashboard token by Google email. The imported account is automatically assigned to that managed key, uses `protocol` refresh, and stores the required Google cookies.
@@ -69,22 +92,22 @@ git clone https://github.com/TheSmallHanCat/flow2api.git
 cd flow2api
 
 # Start the service
-docker-compose up -d
+docker compose -f infra/compose/docker-compose.yml up -d
 
 # Follow the logs
-docker-compose logs -f
+docker compose -f infra/compose/docker-compose.yml logs -f
 ```
 
-> Compose mounts `./tmp:/app/tmp` by default. Setting the cache timeout to `0` means files do not expire automatically. Keep this mount if cached files must survive container recreation.
+> Compose mounts `.runtime/tmp` by default. Setting the cache timeout to `0` means files do not expire automatically. Keep this mount if cached files must survive container recreation.
 
 #### WARP mode (with a proxy)
 
 ```bash
 # Start with the WARP proxy
-docker-compose -f docker-compose.warp.yml up -d
+docker compose -f infra/compose/docker-compose.proxy.yml up -d
 
 # Follow the logs
-docker-compose -f docker-compose.warp.yml logs -f
+docker compose -f infra/compose/docker-compose.proxy.yml logs -f
 ```
 
 #### Headed CAPTCHA mode in Docker (`browser` / `personal`)
@@ -96,10 +119,10 @@ docker-compose -f docker-compose.warp.yml logs -f
 
 ```bash
 # Start headed mode (use --build on the first run)
-docker compose -f docker-compose.headed.yml up -d --build
+docker compose -f infra/compose/docker-compose.headed.yml up -d --build
 
 # Follow the logs
-docker compose -f docker-compose.headed.yml logs -f
+docker compose -f infra/compose/docker-compose.headed.yml logs -f
 ```
 
 - API port: `8000`
@@ -114,21 +137,21 @@ Run [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/c
    - **API only** (no admin UI or frontend): `https://flow-api.prismacreative.online` → `http://flow2api:8000`
    - **Admin UI and frontend**: `https://admin-flow.prismacreative.online` → `http://flow2api:8000`
    Docker resolves `flow2api` to the application container on the shared network. Do not use a host-mapped port such as `38000` as the tunnel origin.
-3. Run `cp .env.example .env` in the repository root and set `TUNNEL_TOKEN=...`. [`docker-compose.yml`](./docker-compose.yml) contains the main **flow2api** service. Merging [`docker-compose.agent.yml`](./docker-compose.agent.yml) adds **agent-gateway**, **redis**, and **cloudflared** on the same tunnel. Configure `agents.*` in Cloudflare to use `http://agent-gateway:9080`. `FLOW2API_API_ONLY_HOST` is defined on the `flow2api` service. On that hostname, `ApiOnlyHostMiddleware` exposes only OpenAI-compatible routes (`/v1/...`), Gemini-style routes (`/v1beta/models/...:generateContent`, `:streamGenerateContent`, `/models/...`), cache files under `/tmp`, `/openapi.json`, and `/health`. It blocks the web UI, `/api` administration routes, and `/assets`. Always use a different hostname such as `admin-flow.*` for the admin UI. Override it with `FLOW2API_API_ONLY_HOST=your-api-subdomain`. Do not run another `cloudflared` connector with the same tunnel token on the host.
-4. Start the merged stack with `docker compose -f docker-compose.yml -f docker-compose.agent.yml up -d`. Add `--build` to build **agent-gateway**. To run only the local application without the tunnel or agent, use `docker compose up -d`. To build the main image from source, run `docker build -t flow2api:local -f Dockerfile .`, set the `flow2api` image in Compose to `flow2api:local`, and run `up`.
+3. Run `cp .env.example .env` in the repository root and set `TUNNEL_TOKEN=...`. [`infra/compose/docker-compose.yml`](./infra/compose/docker-compose.yml) contains the main **flow2api** service. Merging [`infra/compose/docker-compose.agent.yml`](./infra/compose/docker-compose.agent.yml) adds **agent-gateway**, **redis**, and **cloudflared** on the same tunnel. Configure `agents.*` in Cloudflare to use `http://agent-gateway:9080`. `FLOW2API_API_ONLY_HOST` is defined on the `flow2api` service. On that hostname, `ApiOnlyHostMiddleware` exposes only OpenAI-compatible routes (`/v1/...`), Gemini-style routes (`/v1beta/models/...:generateContent`, `:streamGenerateContent`, `/models/...`), cache files under `/tmp`, `/openapi.json`, and `/health`. It blocks the web UI, `/api` administration routes, and `/assets`. Always use a different hostname such as `admin-flow.*` for the admin UI. Override it with `FLOW2API_API_ONLY_HOST=your-api-subdomain`. Do not run another `cloudflared` connector with the same tunnel token on the host.
+4. Start the merged stack with `docker compose -f infra/compose/docker-compose.yml -f infra/compose/docker-compose.agent.yml up -d`. Add `--build` to build **agent-gateway**. To run only the local application without the tunnel or agent, use `docker compose -f infra/compose/docker-compose.yml up -d`. To build the main image from source, run `docker build -t flow2api:local -f infra/docker/Dockerfile .`, set the `flow2api` image in Compose to `flow2api:local`, and run `up`.
 5. Open the **admin-flow** hostname for administration and use the **flow-api** hostname as the OpenAI-compatible API base URL, for example `https://flow-api.prismacreative.online/v1/...`. See [`docs/agent-gateway.md`](./docs/agent-gateway.md) for the public Agent Gateway.
 6. Set `[cache].base_url` in `config/setting.toml` to the public API URL, for example `base_url = "https://flow-api.prismacreative.online"`. See the comments in `config/setting_example.toml`.
-7. Configure `FLOW2API_API_ONLY_HOST` as an environment variable. The default is shown in the `flow2api` service in `docker-compose.yml`; Docker Compose reads the root `.env` file.
+7. Configure `FLOW2API_API_ONLY_HOST` as an environment variable. The default is shown in the `flow2api` service in `infra/compose/docker-compose.yml`; Docker Compose reads the root `.env` file.
 
-**If `/login` or another UI page remains accessible on the `flow-api` hostname:** the current image does not contain this repository's `ApiOnlyHostMiddleware`, usually because it is an older `ghcr.io/.../flow2api:latest` image. Build and deploy from this repository with `docker build -t flow2api:local -f Dockerfile .`, set the Compose service image to `flow2api:local`, and run `up -d` again. Confirm that the startup log contains `API-only host(s)`. The environment variable can also be set when running `uv run flow2api` directly. If the current image is deployed but the old page remains, disable aggressive HTML caching for that hostname or purge the Cloudflare cache.
+**If `/login` or another UI page remains accessible on the `flow-api` hostname:** the current image does not contain this repository's `ApiOnlyHostMiddleware`, usually because it is an older `ghcr.io/.../flow2api:latest` image. Build and deploy from this repository with `docker build -t flow2api:local -f infra/docker/Dockerfile .`, set the Compose service image to `flow2api:local`, and run `up -d` again. Confirm that the startup log contains `API-only host(s)`. The environment variable can also be set when running `uv run flow2api` directly. If the current image is deployed but the old page remains, disable aggressive HTML caching for that hostname or purge the Cloudflare cache.
 
-For headed CAPTCHA solving, use `docker-compose.headed.yml`, which already includes Cloudflare Tunnel and `flow2api-headed`:
+For headed CAPTCHA solving, use `infra/compose/docker-compose.headed.yml`, which already includes Cloudflare Tunnel and `flow2api-headed`:
 
 ```bash
-docker compose -f docker-compose.headed.yml up -d
+docker compose -f infra/compose/docker-compose.headed.yml up -d
 ```
 
-In Zero Trust, set both public hostnames' origin to `http://flow2api-headed:8000`, matching the service name in `docker-compose.headed.yml`.
+In Zero Trust, set both public hostnames' origin to `http://flow2api-headed:8000`, matching the service name in `infra/compose/docker-compose.headed.yml`.
 
 ### Option 2: Local deployment
 
@@ -144,7 +167,7 @@ uv run setup
 uv run flow2api
 ```
 
-`uv run setup` installs Python 3.11 if needed, creates `.venv`, installs the exact versions from `uv.lock`, installs the locked frontend dependencies with Bun, and builds them into `static/`. Run it after cloning or when frontend dependencies change.
+`uv run setup` installs Python 3.11 if needed, creates `.venv`, installs the exact versions from `uv.lock`, installs the locked workspace dependencies with Bun, and builds the admin UI into `apps/api/static/`. Run it after cloning or when frontend dependencies change.
 
 `uv run flow2api` starts the backend without rebuilding the frontend. For development, update Python dependencies with `uv add`/`uv remove`, then commit both `pyproject.toml` and `uv.lock`.
 

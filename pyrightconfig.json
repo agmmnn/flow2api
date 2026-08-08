@@ -1,16 +1,16 @@
 {
   "include": [
-    "src/core/account_tiers.py",
-    "src/core/route_log_sanitize.py",
-    "src/core/storage_errors.py",
-    "src/services/st_refresh_reasons.py"
+    "apps/api/src/flow2api/core/account_tiers.py",
+    "apps/api/src/flow2api/core/route_log_sanitize.py",
+    "apps/api/src/flow2api/core/storage_errors.py",
+    "apps/api/src/flow2api/services/st_refresh_reasons.py"
   ],
   "exclude": [
     "**/__pycache__",
     ".venv",
-    "frontend",
-    "flow2-metadata-extension",
-    "static"
+    "apps/admin-web",
+    "apps/metadata-extension",
+    "apps/api/static"
   ],
   "venvPath": ".",
   "venv": ".venv",

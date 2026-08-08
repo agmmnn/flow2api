@@ -20,7 +20,7 @@ dist/
 downloads/
 eggs/
 .eggs/
-# Root-only — bare `lib/` ignores frontend/src/lib (admin API helpers)
+# Root-only — bare `lib/` would ignore apps/admin-web/src/lib (admin API helpers)
 /lib/
 /lib64/
 parts/
@@ -30,9 +30,6 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-scripts/
-!src/scripts/
-!src/scripts/*.py
 # Database
 *.db
 *.sqlite
@@ -69,8 +66,8 @@ logs.txt
 browser_data
 browser_data_rt
 
-# Canonical local runtime root. The legacy data/ and tmp/ paths remain ignored
-# until the atomic apps/ migration moves existing installations safely.
+# Canonical local runtime root. Legacy data/ and tmp/ remain ignored so a
+# checkout upgraded from an earlier release never commits runtime state.
 .runtime/
 data/
 tmp/
@@ -83,7 +80,9 @@ config/setting_warp_example.toml
 *.har
 node_modules/
 
-# Root GUI static build (keep local-only)
+# Built admin UI served by the API (keep local-only)
+/apps/api/static/
+# Legacy build output left by pre-monorepo checkouts.
 /static/
 
 extension.zip

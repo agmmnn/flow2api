@@ -23,11 +23,11 @@ jobs:
       matrix:
         include:
           - variant: standard
-            dockerfile: Dockerfile
+            dockerfile: infra/docker/Dockerfile
             image_suffix: ""
             cache_scope: standard
           - variant: headed
-            dockerfile: Dockerfile.headed
+            dockerfile: infra/docker/Dockerfile.headed
             image_suffix: -headed
             cache_scope: headed
     permissions:

@@ -58,6 +58,6 @@ jobs:
       - name: Run storage contract tests
         run: >-
           uv run pytest -q
-          tests/test_postgres_bridge.py
-          tests/test_postgres_integration.py
-          tests/test_performance_runtime.py
+          apps/api/tests/test_postgres_bridge.py
+          apps/api/tests/test_postgres_integration.py
+          apps/api/tests/test_performance_runtime.py

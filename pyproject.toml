@@ -4,7 +4,8 @@ version = "0.1.0"
 description = "OpenAI-compatible API service for Google Flow"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
   "aiosqlite==0.20.0",
   "bcrypt==4.2.1",
@@ -27,8 +28,8 @@ dependencies = [
 ]
 
 [project.scripts]
-setup = "src.local_runner:setup"
-flow2api = "main:main"
+setup = "flow2api.local_runner:setup"
+flow2api = "flow2api.cli:main"
 
 [dependency-groups]
 dev = [
@@ -50,20 +51,21 @@ agent-gateway = [
 requires = ["setuptools>=80"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-py-modules = ["main"]
-
 [tool.setuptools.packages.find]
-include = ["src*"]
+where = ["apps/api/src", "apps/agent-gateway/src"]
+include = ["flow2api*", "flow2api_gateway*"]
+
+[tool.setuptools.package-data]
+flow2api = ["migrations/**/*.sql", "services/*.csv"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests"]
+testpaths = ["apps/api/tests"]
 
 [tool.ruff]
 target-version = "py311"
 line-length = 120
-extend-exclude = ["frontend", "flow2-metadata-extension", "static"]
+extend-exclude = ["apps/admin-web", "apps/metadata-extension", "apps/api/static"]
 
 [tool.ruff.lint]
 # Start with correctness-only rules. Broader style rules will be enabled only

@@ -1,6 +1,6 @@
 # Flow2API Architecture Migration Plan
 
-Status: planned; implementation has not started.
+Status: in progress; Phases 1-3 are complete and Phase 4 is under verification.
 
 This plan restructures Flow2API as a modular monolith in a monorepo. It avoids a full rewrite, preserves existing API contracts, and keeps these commands working throughout the migration:
 

@@ -15,7 +15,7 @@ dist/
 downloads/
 eggs/
 .eggs/
-# Only root-level Python/packaging dirs — do NOT use bare `lib/` or `frontend/src/lib` is excluded
+# Only root-level Python/packaging dirs — do not exclude apps/admin-web/src/lib
 /lib/
 /lib64/
 parts/
@@ -47,9 +47,9 @@ ENV/
 .DS_Store
 
 # Project specific
-data/*.db
-data/*.db-journal
-tmp/*
+.runtime/
+data/
+tmp/
 logs/*
 *.log
 
@@ -65,7 +65,7 @@ DEPLOYMENT.md
 !README.md
 
 # Test files
-tests/
+apps/api/tests/
 test_*.py
 *_test.py
 

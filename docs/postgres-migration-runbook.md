@@ -54,14 +54,14 @@ Key rotation adds a key and changes the active ID. Do not remove an old key whil
 ## Migration CLI
 
 ```text
-python -m src.scripts.migrate_sqlite_to_postgres preflight
-python -m src.scripts.migrate_sqlite_to_postgres backfill
-python -m src.scripts.migrate_sqlite_to_postgres cutover --confirm CUTOVER
-python -m src.scripts.migrate_sqlite_to_postgres verify
-python -m src.scripts.migrate_sqlite_to_postgres abort --confirm ABORT
+uv run python -m flow2api.scripts.migrate_sqlite_to_postgres preflight
+uv run python -m flow2api.scripts.migrate_sqlite_to_postgres backfill
+uv run python -m flow2api.scripts.migrate_sqlite_to_postgres cutover --confirm CUTOVER
+uv run python -m flow2api.scripts.migrate_sqlite_to_postgres verify
+uv run python -m flow2api.scripts.migrate_sqlite_to_postgres abort --confirm ABORT
 ```
 
-Shared options include `--sqlite`, `--database-url`, `--schema`, `--retention-days`, `--volume-capacity-gb`, and `--state-dir`. Defaults are `data/flow.db`, `FLOW2API_DATABASE_URL`, `flow2api`, seven days, 5 GB, and `data/migration/postgres-bridge`.
+Shared options include `--sqlite`, `--database-url`, `--schema`, `--retention-days`, `--volume-capacity-gb`, and `--state-dir`. Defaults are `.runtime/data/flow.db`, `FLOW2API_DATABASE_URL`, `flow2api`, seven days, 5 GB, and `.runtime/data/migration/postgres-bridge`.
 
 ### Preflight and backfill
 

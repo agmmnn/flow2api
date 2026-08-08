@@ -19,8 +19,8 @@ FLOW2API_DEBUG_PAYLOAD_LOGGING=false
 Initialize a new Redis service explicitly from a Railway shell:
 
 ```bash
-python -m src.scripts.redis_state init
-python -m src.scripts.redis_state status
+uv run python -m flow2api.scripts.redis_state init
+uv run python -m flow2api.scripts.redis_state status
 ```
 
 The application never creates a missing marker during startup. A missing or mismatched marker keeps Redis unavailable so a lost Redis volume cannot silently reset rate limits.
@@ -127,7 +127,7 @@ Open the Request logs dashboard and confirm that new rows and progress arrive wi
 Run the five-minute, 50-connection control-plane benchmark from a host near the origin and again from Pakistan/Asia:
 
 ```bash
-python -m src.scripts.load_control_plane \
+uv run python -m flow2api.scripts.load_control_plane \
   --base-url https://YOUR_HOST \
   --path /health \
   --duration 300 \
@@ -157,7 +157,7 @@ Redeploy and validate the outage policy in staging by temporarily stopping Redis
 Stop the Flow2API service before running compaction. The command creates and verifies a Google Drive `pre-change-7d` backup first, applies cleanup in batches of 500, checks protected row counts and foreign keys, runs `VACUUM INTO`, verifies the compact file, and atomically swaps it into place.
 
 ```bash
-python -m src.scripts.compact_sqlite \
+uv run python -m flow2api.scripts.compact_sqlite \
   --database /app/storage/data/flow.db \
   --days 7 \
   --confirm COMPACT

@@ -1,0 +1,9 @@
+{
+  "name": "@flow2api/captcha-extension",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "bun run check",
+    "check": "node --check background.js && node --check content.js && node --check options.js && node --check stealth.js"
+  }
+}
