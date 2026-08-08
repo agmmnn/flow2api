@@ -8,6 +8,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from ..bootstrap.dependencies import get_websocket_container
 from ..core.logger import debug_logger
+from ..persistence.repositories import Repositories
 from ..services.browser_captcha_extension import ExtensionCaptchaService
 
 
@@ -18,6 +19,9 @@ router = APIRouter()
 async def captcha_websocket_endpoint(websocket: WebSocket):
     container = get_websocket_container(websocket)
     database = container.db
+    repositories = getattr(container, "repositories", None) or Repositories.from_database(
+        database
+    )
     captcha_worker_key = (
         websocket.query_params.get("captcha_worker_key")
         or websocket.query_params.get("captcha_key")
@@ -29,7 +33,9 @@ async def captcha_websocket_endpoint(websocket: WebSocket):
             await websocket.close(code=1011, reason="Captcha worker auth unavailable")
             return
         captcha_worker_key_hash = hashlib.sha256(captcha_worker_key.encode("utf-8")).hexdigest()
-        captcha_worker = await database.get_captcha_worker_key_by_hash(captcha_worker_key_hash)
+        captcha_worker = await repositories.workers.get_captcha_worker_key_by_hash(
+            captcha_worker_key_hash
+        )
         if not captcha_worker or not bool(captcha_worker.get("is_active", True)):
             await websocket.accept()
             await websocket.close(code=1008, reason="Invalid captcha worker key")
@@ -73,7 +79,7 @@ async def captcha_websocket_endpoint(websocket: WebSocket):
             await websocket.accept()
             await websocket.close(code=1011, reason="Refresh token lookup unavailable")
             return
-        refresh_token = await database.get_token(refresh_token_id)
+        refresh_token = await repositories.accounts.get_token(refresh_token_id)
         if not refresh_token:
             await websocket.accept()
             await websocket.close(code=1008, reason="refresh_token_id token not found")

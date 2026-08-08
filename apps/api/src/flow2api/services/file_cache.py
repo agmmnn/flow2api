@@ -13,6 +13,7 @@ import httpx
 from curl_cffi.requests import AsyncSession
 from ..core.config import config
 from ..core.logger import debug_logger
+from ..persistence.repositories import CacheRepository
 from .cache_backends import (
     DigitalOceanSpacesBackend,
     DigitalOceanSpacesSettings,
@@ -38,6 +39,7 @@ class FileCache:
         proxy_manager=None,
         flow_client=None,
         db=None,
+        cache_repository: CacheRepository | None = None,
     ):
         """
         Initialize file cache
@@ -53,6 +55,9 @@ class FileCache:
         self.proxy_manager = proxy_manager
         self.flow_client = flow_client
         self.db = db
+        self.cache_repository = cache_repository or (
+            CacheRepository(db) if db is not None else None
+        )
         self._cleanup_task = None
         self._cleanup_lock = asyncio.Lock()
         self._download_locks: Dict[str, asyncio.Lock] = {}
@@ -1382,8 +1387,8 @@ class FileCache:
     async def clear_all(self) -> int:
         """Clear all cached files (async wrapper). Returns removed file count."""
         count, _ = await self.backend.clear()
-        if self.db is not None and hasattr(self.db, "delete_all_cache_file_metadata"):
-            await self.db.delete_all_cache_file_metadata()
+        if self.cache_repository is not None:
+            await self.cache_repository.delete_all_cache_file_metadata()
         return count
 
     async def _record_cache_metadata(
@@ -1407,11 +1412,11 @@ class FileCache:
                     self._safe_unlink(staging_path)
             else:
                 stored_object = await self.backend.stat(filename)
-        if self.db is None or api_key_id is None:
+        if self.cache_repository is None or api_key_id is None:
             return
         try:
             fpid = (flow_project_id or "").strip() or None
-            await self.db.upsert_cache_file(
+            await self.cache_repository.upsert_cache_file(
                 filename=filename,
                 api_key_id=int(api_key_id),
                 token_id=token_id,

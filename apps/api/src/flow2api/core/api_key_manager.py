@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from typing import Dict, Optional, Set, Tuple
 
+from ..persistence.repositories import ApiKeyRepository
 from ..services.redis_runtime import RedisRuntime, RedisUnavailableError
 
 
@@ -39,8 +40,16 @@ class AuthContext:
 class ApiKeyManager:
     """Validates API keys, account bindings, and simple fixed-window rate limits."""
 
-    def __init__(self, db, legacy_api_key_provider, redis_runtime: Optional[RedisRuntime] = None):
+    def __init__(
+        self,
+        db,
+        legacy_api_key_provider,
+        redis_runtime: Optional[RedisRuntime] = None,
+        *,
+        repository: ApiKeyRepository | None = None,
+    ):
         self.db = db
+        self.repository = repository or ApiKeyRepository(db)
         self.legacy_api_key_provider = legacy_api_key_provider
         self.redis_runtime = redis_runtime
         self._rate_limit_lock = asyncio.Lock()
@@ -70,7 +79,7 @@ class ApiKeyManager:
             raise ValueError("scopes must be non-empty")
         full_key, key_hash = self.generate_key()
         key_prefix = full_key[:18]
-        key_id = await self.db.create_client_api_key(
+        key_id = await self.repository.create_client_api_key(
             client_name=client_name.strip(),
             label=label.strip() or "default",
             key_prefix=key_prefix,
@@ -109,7 +118,7 @@ class ApiKeyManager:
         row = cached.get("row") if isinstance(cached, dict) else None
         cached_accounts = cached.get("account_ids") if isinstance(cached, dict) else None
         if not row:
-            row = await self.db.get_client_api_key_by_hash(key_hash)
+            row = await self.repository.get_client_api_key_by_hash(key_hash)
         if row:
             if not bool(row.get("is_active", True)):
                 raise PermissionError("API key is disabled")
@@ -125,7 +134,7 @@ class ApiKeyManager:
             if isinstance(cached_accounts, list):
                 allowed_accounts = {int(value) for value in cached_accounts}
             else:
-                allowed_accounts = set(await self.db.get_api_key_account_ids(key_id))
+                allowed_accounts = set(await self.repository.get_api_key_account_ids(key_id))
             scopes = {x.strip() for x in (row.get("scopes") or "").split(",") if x.strip()}
             if not scopes:
                 scopes = {"*"}
@@ -152,12 +161,12 @@ class ApiKeyManager:
                     except RedisUnavailableError:
                         if require_redis:
                             raise
-                        await self.db.touch_api_key_usage(key_id)
+                        await self.repository.touch_api_key_usage(key_id)
                     else:
                         if not runtime.required:
-                            await self.db.touch_api_key_usage(key_id)
+                            await self.repository.touch_api_key_usage(key_id)
                 else:
-                    await self.db.touch_api_key_usage(key_id)
+                    await self.repository.touch_api_key_usage(key_id)
 
             acl, ame, atr = adobe_flags_from_scopes(scopes)
 
@@ -196,7 +205,7 @@ class ApiKeyManager:
         if runtime is not None and runtime.ready and runtime.required:
             limits = await runtime.get_rate_config(key_id, endpoint)
         if limits is None:
-            limits = await self.db.get_api_key_rate_limits(key_id, endpoint)
+            limits = await self.repository.get_api_key_rate_limits(key_id, endpoint)
             if runtime is not None and runtime.ready:
                 await runtime.set_rate_config(key_id, endpoint, limits)
         if not limits:

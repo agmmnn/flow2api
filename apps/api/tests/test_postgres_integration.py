@@ -10,6 +10,7 @@ import pytest
 from flow2api.core.database_runtime import DatabaseSettings
 from flow2api.core.models import GeminiGenTask, Project, RequestLog, RunwayTask, Task, Token
 from flow2api.core.postgres_database import PostgresDatabase
+from flow2api.persistence.repositories import Repositories
 from flow2api.services.postgres_backup import (
     create_postgres_archive,
     database_row_counts,
@@ -19,13 +20,9 @@ from flow2api.services.postgres_backup import (
 )
 
 
-POSTGRES_URL = os.environ.get("FLOW2API_TEST_POSTGRES_URL") or os.environ.get(
-    "DATABASE_PUBLIC_URL"
-)
+POSTGRES_URL = os.environ.get("FLOW2API_TEST_POSTGRES_URL") or os.environ.get("DATABASE_PUBLIC_URL")
 REDIS_URL = os.environ.get("FLOW2API_TEST_REDIS_URL") or os.environ.get("FLOW2API_REDIS_URL")
-STORAGE_CONTRACT = json.loads(
-    (Path(__file__).parent / "contracts" / "storage-state.json").read_text(encoding="utf-8")
-)
+STORAGE_CONTRACT = json.loads((Path(__file__).parent / "contracts" / "storage-state.json").read_text(encoding="utf-8"))
 
 
 pytestmark = pytest.mark.skipif(
@@ -43,34 +40,35 @@ async def test_postgres_storage_contract_roundtrip(monkeypatch):
     database = PostgresDatabase(settings=settings)
     await database.init_db()
     await database.cache_schema_capabilities()
+    repositories = Repositories.from_database(database)
     try:
-        token_id = await database.add_token(
+        token_id = await repositories.accounts.add_token(
             Token(st=f"st-{uuid.uuid4().hex}", email=STORAGE_CONTRACT["token"]["email"])
         )
-        token = await database.get_token(token_id)
+        token = await repositories.accounts.get_token(token_id)
         assert token is not None
         assert token.email == STORAGE_CONTRACT["token"]["email"]
         assert token.is_active is True
 
-        await database.update_token(
+        await repositories.accounts.update_token(
             token_id,
             is_active=STORAGE_CONTRACT["token"]["is_active"],
             credits=STORAGE_CONTRACT["token"]["credits"],
         )
-        updated = await database.get_token(token_id)
+        updated = await repositories.accounts.get_token(token_id)
         assert updated is not None
         assert updated.is_active is STORAGE_CONTRACT["token"]["is_active"]
         assert updated.credits == STORAGE_CONTRACT["token"]["credits"]
 
         project_id = f"project-{uuid.uuid4().hex}"
-        await database.add_project(
+        await repositories.projects.add_project(
             Project(
                 project_id=project_id,
                 token_id=token_id,
                 project_name=STORAGE_CONTRACT["project"]["name"],
             )
         )
-        project = await database.get_project_by_id(project_id)
+        project = await repositories.projects.get_project_by_id(project_id)
         assert project is not None
         assert project.token_id == token_id
         assert project.project_name == STORAGE_CONTRACT["project"]["name"]
@@ -90,7 +88,7 @@ async def test_postgres_storage_contract_roundtrip(monkeypatch):
         assert task is not None
         assert task.progress == 50
 
-        log_id = await database.add_request_log(
+        log_id = await repositories.request_logs.add_request_log(
             RequestLog(
                 token_id=token_id,
                 operation="postgres-contract",
@@ -100,11 +98,11 @@ async def test_postgres_storage_contract_roundtrip(monkeypatch):
                 duration=0.01,
             )
         )
-        detail = await database.get_log_detail(log_id)
+        detail = await repositories.request_logs.get_log_detail(log_id)
         assert detail is not None
         assert detail["operation"] == "postgres-contract"
 
-        key_id = await database.create_client_api_key(
+        key_id = await repositories.api_keys.create_client_api_key(
             client_name="postgres-contract-client",
             label="contract-key",
             key_prefix="f2_contract",
@@ -115,7 +113,7 @@ async def test_postgres_storage_contract_roundtrip(monkeypatch):
             endpoint_limits={"/v1/chat/completions": {"rpm": 10, "rph": 100, "burst": 2}},
             expires_at=None,
         )
-        key_detail = await database.get_api_key_detail(key_id)
+        key_detail = await repositories.api_keys.get_api_key_detail(key_id)
         assert key_detail is not None
         assert key_detail["is_active"] is STORAGE_CONTRACT["managed_key"]["is_active"]
         assert len(key_detail["account_ids"]) == STORAGE_CONTRACT["managed_key"]["account_count"]
@@ -154,9 +152,7 @@ async def test_postgres_storage_contract_roundtrip(monkeypatch):
             delivery_mode="proxy",
         )
         assert (await database.get_cache_config()).cache_enabled is True
-        await database.update_debug_config(
-            enabled=True, log_requests=False, log_responses=False, mask_token=True
-        )
+        await database.update_debug_config(enabled=True, log_requests=False, log_responses=False, mask_token=True)
         debug = await database.get_debug_config()
         assert debug.enabled is True and debug.log_requests is False
 
@@ -167,7 +163,7 @@ async def test_postgres_storage_contract_roundtrip(monkeypatch):
         await database.delete_admin_session(session_token)
         assert await database.is_admin_session_valid(session_token) is False
 
-        await database.upsert_cache_file(
+        await repositories.cache.upsert_cache_file(
             filename="postgres-contract.bin",
             api_key_id=key_id,
             token_id=token_id,
@@ -176,9 +172,7 @@ async def test_postgres_storage_contract_roundtrip(monkeypatch):
             flow_project_id=project_id,
             size_bytes=STORAGE_CONTRACT["cache"]["size_bytes"],
         )
-        cache_file = await database.get_cache_file_for_api_key(
-            "postgres-contract.bin", key_id
-        )
+        cache_file = await repositories.cache.get_cache_file_for_api_key("postgres-contract.bin", key_id)
         assert cache_file is not None
         assert cache_file["media_type"] == STORAGE_CONTRACT["cache"]["media_type"]
         assert cache_file["size_bytes"] == STORAGE_CONTRACT["cache"]["size_bytes"]
@@ -195,10 +189,10 @@ async def test_postgres_storage_contract_roundtrip(monkeypatch):
         assert await database.count_api_key_audit_logs(key_id) == 1
         assert len(await database.list_api_key_audit_logs(key_id=key_id)) == 1
 
-        await database.upsert_extension_worker_binding("contract-route", key_id)
-        binding = await database.get_extension_worker_binding_for_route_key("contract-route")
+        await repositories.workers.upsert_extension_worker_binding("contract-route", key_id)
+        binding = await repositories.workers.get_extension_worker_binding_for_route_key("contract-route")
         assert binding is not None and binding["api_key_id"] == key_id
-        await database.delete_extension_worker_binding("contract-route")
+        await repositories.workers.delete_extension_worker_binding("contract-route")
 
         worker_id = await database.create_captcha_worker_key(
             key_prefix="cwk_contract",
@@ -236,9 +230,7 @@ async def test_postgres_storage_contract_roundtrip(monkeypatch):
         await database.update_runway_config(enabled=True, cache_outputs=False)
         runway_config = await database.get_runway_config()
         assert runway_config.enabled is True and runway_config.cache_outputs is False
-        runway_acquisitions = await asyncio.gather(
-            *(database.acquire_runway_account() for _ in range(4))
-        )
+        runway_acquisitions = await asyncio.gather(*(database.acquire_runway_account() for _ in range(4)))
         reserved_runway = [account for account in runway_acquisitions if account is not None]
         assert len(reserved_runway) == 1
         await database.release_runway_account(reserved_runway[0].id)
@@ -265,9 +257,7 @@ async def test_postgres_storage_contract_roundtrip(monkeypatch):
         await database.update_geminigen_config(enabled=True, cache_outputs=False)
         gemini_config = await database.get_geminigen_config()
         assert gemini_config.enabled is True and gemini_config.cache_outputs is False
-        gemini_acquisitions = await asyncio.gather(
-            *(database.acquire_geminigen_account("image") for _ in range(4))
-        )
+        gemini_acquisitions = await asyncio.gather(*(database.acquire_geminigen_account("image") for _ in range(4)))
         reserved_gemini = [account for account in gemini_acquisitions if account is not None]
         assert len(reserved_gemini) == 1
         await database.release_geminigen_account(reserved_gemini[0].id, "image")
@@ -286,9 +276,12 @@ async def test_postgres_storage_contract_roundtrip(monkeypatch):
             ]
         )
         assert applied == 1
-        assert await database.apply_redis_event_batch(
-            [{"cursor": "1-0", "type": "usage_touch", "data": {"api_key_id": key_id}}]
-        ) == 0
+        assert (
+            await database.apply_redis_event_batch(
+                [{"cursor": "1-0", "type": "usage_touch", "data": {"api_key_id": key_id}}]
+            )
+            == 0
+        )
 
         health = await database.health_snapshot()
         assert health["database_backend"] == "postgres"
@@ -308,9 +301,7 @@ async def test_postgres_storage_contract_roundtrip(monkeypatch):
 
         cleanup = await AsyncConnection.connect(POSTGRES_URL)
         try:
-            await cleanup.execute(
-                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema))
-            )
+            await cleanup.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
             await cleanup.commit()
         finally:
             await cleanup.close()
@@ -330,9 +321,7 @@ async def test_postgres_16_encrypted_dump_restore_roundtrip(monkeypatch, tmp_pat
     database = PostgresDatabase(settings=settings)
     await database.init_db()
     try:
-        token_id = await database.add_token(
-            Token(st=f"backup-{uuid.uuid4().hex}", email="backup-contract@example.com")
-        )
+        token_id = await database.add_token(Token(st=f"backup-{uuid.uuid4().hex}", email="backup-contract@example.com"))
         profiles = tmp_path / "profiles"
         (profiles / "token-1" / "Default").mkdir(parents=True)
         (profiles / "token-1" / "Default" / "Cookies").write_bytes(b"profile-data")
@@ -361,18 +350,14 @@ async def test_postgres_16_encrypted_dump_restore_roundtrip(monkeypatch, tmp_pat
         assert restored is not None
         assert restored.email == "backup-contract@example.com"
         assert manifest["row_counts"] == restored_manifest["row_counts"]
-        assert (
-            extracted / "browser_profiles" / "token-1" / "Default" / "Cookies"
-        ).read_bytes() == b"profile-data"
+        assert (extracted / "browser_profiles" / "token-1" / "Default" / "Cookies").read_bytes() == b"profile-data"
     finally:
         await database.close_runtime_connections()
         from psycopg import AsyncConnection, sql
 
         cleanup = await AsyncConnection.connect(POSTGRES_URL)
         try:
-            await cleanup.execute(
-                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema))
-            )
+            await cleanup.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
             await cleanup.commit()
         finally:
             await cleanup.close()
@@ -389,22 +374,14 @@ async def test_real_redis_atomic_limits_and_maintenance_marker():
     try:
         await runtime.client.flushdb()
         await runtime.initialize_state(force=True)
-        await runtime.enforce_rate_limits(
-            key_id=1, endpoint="/contract", rpm=2, rph=10, now=1_800_000_000
-        )
-        await runtime.enforce_rate_limits(
-            key_id=1, endpoint="/contract", rpm=2, rph=10, now=1_800_000_000
-        )
+        await runtime.enforce_rate_limits(key_id=1, endpoint="/contract", rpm=2, rph=10, now=1_800_000_000)
+        await runtime.enforce_rate_limits(key_id=1, endpoint="/contract", rpm=2, rph=10, now=1_800_000_000)
         with pytest.raises(RuntimeError, match="Rate limit exceeded"):
-            await runtime.enforce_rate_limits(
-                key_id=1, endpoint="/contract", rpm=2, rph=10, now=1_800_000_000
-            )
+            await runtime.enforce_rate_limits(key_id=1, endpoint="/contract", rpm=2, rph=10, now=1_800_000_000)
 
         await runtime.touch_presence(1)
         assert await runtime.is_present(1) is True
-        maintenance = await runtime.set_maintenance(
-            True, reason="contract_test", owner="pytest"
-        )
+        maintenance = await runtime.set_maintenance(True, reason="contract_test", owner="pytest")
         assert maintenance["active"] is True
         assert maintenance["reason"] == "contract_test"
         maintenance = await runtime.set_maintenance(False)

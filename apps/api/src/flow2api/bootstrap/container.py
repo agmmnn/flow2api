@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from ..core.api_key_manager import ApiKeyManager
 from ..core.config import config
 from ..core.database import Database, create_database
+from ..persistence.repositories import Repositories
 from ..services.concurrency_manager import ConcurrencyManager
 from ..services.failed_payload_store import FailedPayloadManager, failed_payload_manager
 from ..services.flow_client import FlowClient
@@ -32,6 +33,7 @@ class AppContainer:
     """
 
     db: Database
+    repositories: Repositories
     proxy_manager: ProxyManager
     flow_client: FlowClient
     token_manager: TokenManager
@@ -52,9 +54,15 @@ def build_container(*, database: Database | None = None) -> AppContainer:
     """Build a complete, isolated application dependency graph."""
 
     db = database or create_database()
+    repositories = Repositories.from_database(db)
     proxy_manager = ProxyManager(db)
     flow_client = FlowClient(proxy_manager, db)
-    token_manager = TokenManager(db, flow_client)
+    token_manager = TokenManager(
+        db,
+        flow_client,
+        accounts=repositories.accounts,
+        projects=repositories.projects,
+    )
     concurrency_manager = ConcurrencyManager(redis_runtime=redis_runtime)
     load_balancer = LoadBalancer(token_manager, concurrency_manager)
     generation_handler = GenerationHandler(
@@ -64,6 +72,8 @@ def build_container(*, database: Database | None = None) -> AppContainer:
         db,
         concurrency_manager,
         proxy_manager,
+        cache_repository=repositories.cache,
+        request_log_repository=repositories.request_logs,
     )
     runway_service = RunwayService(db, generation_handler.file_cache, proxy_manager)
     geminigen_service = GeminiGenService(db, generation_handler.file_cache, proxy_manager)
@@ -72,9 +82,11 @@ def build_container(*, database: Database | None = None) -> AppContainer:
         db,
         legacy_api_key_provider=lambda: config.api_key,
         redis_runtime=redis_runtime,
+        repository=repositories.api_keys,
     )
     return AppContainer(
         db=db,
+        repositories=repositories,
         proxy_manager=proxy_manager,
         flow_client=flow_client,
         token_manager=token_manager,

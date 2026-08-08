@@ -1083,12 +1083,24 @@ def _needs_video_url_resolve(source_video_url: Optional[str], video_media_id: Op
 class GenerationHandler:
     """统一生成处理器"""
 
-    def __init__(self, flow_client, token_manager, load_balancer, db, concurrency_manager, proxy_manager):
+    def __init__(
+        self,
+        flow_client,
+        token_manager,
+        load_balancer,
+        db,
+        concurrency_manager,
+        proxy_manager,
+        *,
+        cache_repository=None,
+        request_log_repository=None,
+    ):
         cache_dir = get_runtime_tmp_dir()
         self.flow_client = flow_client
         self.token_manager = token_manager
         self.load_balancer = load_balancer
         self.db = db
+        self.request_logs = request_log_repository
         self.concurrency_manager = concurrency_manager
         self.file_cache = FileCache(
             cache_dir=str(cache_dir),
@@ -1096,6 +1108,7 @@ class GenerationHandler:
             proxy_manager=proxy_manager,
             flow_client=flow_client,
             db=db,
+            cache_repository=cache_repository,
         )
         self.extension_generation_service = ExtensionGenerationService()
 
@@ -3469,7 +3482,8 @@ class GenerationHandler:
             effective_api_key_id = api_key_id
             if effective_api_key_id is None and isinstance(request_log_state, dict):
                 effective_api_key_id = request_log_state.get("api_key_id")
-            await self.db.update_request_log(
+            repository = getattr(self, "request_logs", None) or self.db
+            await repository.update_request_log(
                 log_id,
                 token_id=token_id,
                 api_key_id=effective_api_key_id,
@@ -3519,7 +3533,8 @@ class GenerationHandler:
             response_body = json.dumps(effective_response_data, ensure_ascii=False)
 
             if log_id:
-                await self.db.update_request_log(
+                repository = getattr(self, "request_logs", None) or self.db
+                await repository.update_request_log(
                     log_id,
                     token_id=token_id,
                     api_key_id=api_key_id,
@@ -3544,7 +3559,8 @@ class GenerationHandler:
                 status_text=effective_status_text,
                 progress=effective_progress,
             )
-            return await self.db.add_request_log(log)
+            repository = getattr(self, "request_logs", None) or self.db
+            return await repository.add_request_log(log)
         except Exception as e:
             debug_logger.log_error(f"Failed to log request: {e}")
             return None

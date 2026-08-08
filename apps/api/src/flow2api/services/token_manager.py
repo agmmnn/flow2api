@@ -1,4 +1,5 @@
 """Token manager for Flow2API with AT auto-refresh"""
+
 import asyncio
 import time
 from datetime import datetime, timedelta, timezone
@@ -8,6 +9,7 @@ from ..core.config import config
 from ..core.models import Token, Project
 from ..core.logger import debug_logger
 from ..core.monitoring import record_token_refresh
+from ..persistence.repositories import AccountRepository, ProjectRepository
 from .flow_client import FlowClient
 from .proxy_manager import ProxyManager
 
@@ -15,8 +17,17 @@ from .proxy_manager import ProxyManager
 class TokenManager:
     """Token lifecycle manager with AT auto-refresh"""
 
-    def __init__(self, db: Database, flow_client: FlowClient):
+    def __init__(
+        self,
+        db: Database,
+        flow_client: FlowClient,
+        *,
+        accounts: AccountRepository | None = None,
+        projects: ProjectRepository | None = None,
+    ):
         self.db = db
+        self.accounts = accounts or AccountRepository(db)
+        self.projects = projects or ProjectRepository(db)
         self.flow_client = flow_client
         self._refresh_lock_guard = asyncio.Lock()
         self._project_lock_guard = asyncio.Lock()
@@ -42,16 +53,12 @@ class TokenManager:
 
     def _mark_at_valid(self, token_id: int, ttl_seconds: int = 300) -> None:
         token_key = int(token_id)
-        self._at_validation_cache[token_key] = (
-            time.monotonic() + max(30, int(ttl_seconds or 300))
-        )
+        self._at_validation_cache[token_key] = time.monotonic() + max(30, int(ttl_seconds or 300))
         self._at_validation_retry_after.pop(token_key, None)
 
     def _defer_at_validation(self, token_id: int, delay_seconds: int = 30) -> None:
         token_key = int(token_id)
-        self._at_validation_retry_after[token_key] = (
-            time.monotonic() + max(1, int(delay_seconds or 30))
-        )
+        self._at_validation_retry_after[token_key] = time.monotonic() + max(1, int(delay_seconds or 30))
 
     def _has_recent_at_validation(self, token_id: int) -> bool:
         token_key = int(token_id)
@@ -228,7 +235,7 @@ class TokenManager:
             if current_project_id:
                 candidate_ids.append(current_project_id)
 
-            projects = [project for project in await self.db.get_projects_by_token(token.id) if project.is_active]
+            projects = [project for project in await self.projects.get_projects_by_token(token.id) if project.is_active]
             for project in self._sort_projects(projects):
                 project_id = str(project.project_id or "").strip()
                 if project_id and project_id not in candidate_ids:
@@ -254,16 +261,14 @@ class TokenManager:
         """Create a new pooled project for a token and persist it."""
         project_name = self._build_project_name(pool_index, base_name)
         project_id = await self.flow_client.create_project(token.st, project_name)
-        debug_logger.log_info(
-            f"[PROJECT] Created pooled project for token {token.id}: {project_name} ({project_id})"
-        )
+        debug_logger.log_info(f"[PROJECT] Created pooled project for token {token.id}: {project_name} ({project_id})")
         project = Project(
             project_id=project_id,
             token_id=token.id,
             api_key_id=api_key_id,
             project_name=project_name,
         )
-        project.id = await self.db.add_project(project)
+        project.id = await self.projects.add_project(project)
         return project
 
     def _select_next_project(self, token: Token, projects: List[Project]) -> Project:
@@ -286,31 +291,31 @@ class TokenManager:
 
     async def get_all_tokens(self) -> List[Token]:
         """Get all tokens"""
-        return await self.db.get_all_tokens()
+        return await self.accounts.get_all_tokens()
 
     async def get_active_tokens(self) -> List[Token]:
         """Get all active tokens"""
-        return await self.db.get_active_tokens()
+        return await self.accounts.get_active_tokens()
 
     async def get_token(self, token_id: int) -> Optional[Token]:
         """Get token by ID"""
-        return await self.db.get_token(token_id)
+        return await self.accounts.get_token(token_id)
 
     async def delete_token(self, token_id: int):
         """Delete token"""
-        token = await self.db.get_token(token_id)
+        token = await self.accounts.get_token(token_id)
         project_ids: List[str] = []
         if token:
             current_project_id = str(token.current_project_id or "").strip()
             if current_project_id:
                 project_ids.append(current_project_id)
 
-        for project in await self.db.get_projects_by_token(token_id):
+        for project in await self.projects.get_projects_by_token(token_id):
             project_id = str(project.project_id or "").strip()
             if project_id and project_id not in project_ids:
                 project_ids.append(project_id)
 
-        await self.db.delete_token(token_id)
+        await self.accounts.delete_token(token_id)
         self._clear_at_validation_cache(token_id)
 
         refresh_task = self._refresh_futures.pop(token_id, None)
@@ -328,6 +333,7 @@ class TokenManager:
         if config.captcha_method == "personal" and project_ids:
             try:
                 from .browser_captcha_personal import BrowserCaptchaService
+
                 service = await BrowserCaptchaService.get_instance(self.db)
                 for project_id in project_ids:
                     await service.stop_resident_mode(project_id)
@@ -338,14 +344,14 @@ class TokenManager:
         """Enable a token and reset error count"""
         self._clear_at_validation_cache(token_id)
         # Enable the token
-        await self.db.update_token(token_id, is_active=True, ban_reason=None, banned_at=None)
+        await self.accounts.update_token(token_id, is_active=True, ban_reason=None, banned_at=None)
         # Reset error count when enabling (only reset total error_count, keep today_error_count)
-        await self.db.reset_error_count(token_id)
+        await self.accounts.reset_error_count(token_id)
 
     async def disable_token(self, token_id: int):
         """Disable a token"""
         self._clear_at_validation_cache(token_id)
-        await self.db.update_token(token_id, is_active=False)
+        await self.accounts.update_token(token_id, is_active=False)
 
     # ========== Token添加 (支持Project创建) ==========
 
@@ -370,7 +376,7 @@ class TokenManager:
         refresh_interval_minutes: int = 120,
     ) -> Token:
         """Add a new token and prepare its pooled projects."""
-        existing_token = await self.db.get_token_by_st(st)
+        existing_token = await self.accounts.get_token_by_st(st)
         if existing_token:
             raise ValueError(f"Token ??????: {existing_token.email}?")
 
@@ -387,7 +393,7 @@ class TokenManager:
             at_expires = None
             if expires:
                 try:
-                    at_expires = datetime.fromisoformat(expires.replace('Z', '+00:00'))
+                    at_expires = datetime.fromisoformat(expires.replace("Z", "+00:00"))
                 except Exception:
                     pass
         except Exception as e:
@@ -428,13 +434,14 @@ class TokenManager:
             refresh_interval_minutes=self._normalize_refresh_interval(refresh_interval_minutes),
         )
 
-        token_id = await self.db.add_token(token)
+        token_id = await self.accounts.add_token(token)
         token.id = token_id
 
         debug_logger.log_info(
             f"[ADD_TOKEN] Token added successfully (ID: {token_id}, Email: {email}, auth_mode=session_token)"
         )
         return token
+
     async def update_token(
         self,
         token_id: int,
@@ -508,12 +515,10 @@ class TokenManager:
             update_fields["refresh_interval_minutes"] = self._normalize_refresh_interval(refresh_interval_minutes)
 
         # 检查token是否因429被禁用，如果是且未过期，则清空429状态
-        token = await self.db.get_token(token_id)
+        token = await self.accounts.get_token(token_id)
         if credential_updated and token:
             if not token.is_active:
-                debug_logger.log_info(
-                    f"[UPDATE_TOKEN] Token {token_id} credentials updated; re-enabling token"
-                )
+                debug_logger.log_info(f"[UPDATE_TOKEN] Token {token_id} credentials updated; re-enabling token")
             update_fields["is_active"] = True
             update_fields["ban_reason"] = None
             update_fields["banned_at"] = None
@@ -537,7 +542,7 @@ class TokenManager:
         if update_fields:
             if credential_updated:
                 self._clear_at_validation_cache(token_id)
-            await self.db.update_token(token_id, **update_fields)
+            await self.accounts.update_token(token_id, **update_fields)
 
     # ========== AT自动刷新逻辑 (核心) ==========
 
@@ -560,8 +565,7 @@ class TokenManager:
         time_until_expiry = at_expires_aware - now
         if time_until_expiry.total_seconds() < 3600:
             debug_logger.log_info(
-                f"[AT_CHECK] Token {token.id}: AT即将过期 "
-                f"(剩余 {time_until_expiry.total_seconds():.0f} 秒),需要刷新"
+                f"[AT_CHECK] Token {token.id}: AT即将过期 (剩余 {time_until_expiry.total_seconds():.0f} 秒),需要刷新"
             )
             return True
 
@@ -583,13 +587,13 @@ class TokenManager:
                 return token
             try:
                 credits_result = await self._get_credits_for_token(token, token.at)
-                await self.db.update_token(
+                await self.accounts.update_token(
                     token.id,
                     credits=credits_result.get("credits", 0),
                     user_paygate_tier=credits_result.get("userPaygateTier"),
                 )
                 self._mark_at_valid(token.id)
-                return await self.db.get_token(token.id) or token
+                return await self.accounts.get_token(token.id) or token
             except Exception as exc:
                 if not self._is_at_authentication_error(exc):
                     self._defer_at_validation(token.id, delay_seconds=30)
@@ -599,14 +603,13 @@ class TokenManager:
                     )
                     return token
                 debug_logger.log_warning(
-                    f"[AT_CHECK] Token {token.id}: upstream rejected locally unexpired AT; "
-                    "refreshing AT/ST"
+                    f"[AT_CHECK] Token {token.id}: upstream rejected locally unexpired AT; refreshing AT/ST"
                 )
 
         if not await self._refresh_at(token.id):
             return None
 
-        return await self.db.get_token(token.id)
+        return await self.accounts.get_token(token.id)
 
     async def is_at_valid(self, token_id: int, token: Optional[Token] = None) -> bool:
         """检查AT是否有效,如果无效或即将过期则自动刷新
@@ -615,17 +618,17 @@ class TokenManager:
             True if AT is valid or refreshed successfully
             False if AT cannot be refreshed
         """
-        token_obj = token if token and token.id == token_id else await self.db.get_token(token_id)
+        token_obj = token if token and token.id == token_id else await self.accounts.get_token(token_id)
         if not token_obj:
             return False
 
         valid_token = await self.ensure_valid_token(token_obj)
         return valid_token is not None
 
-
     async def _refresh_at_inner(self, token_id: int) -> bool:
         """Perform exactly one real AT refresh attempt."""
         from ..core.config import config
+
         refresh_lock = await self._get_token_lock(
             self._refresh_locks,
             self._refresh_lock_guard,
@@ -633,7 +636,7 @@ class TokenManager:
         )
         async with refresh_lock:
             self._set_st_refresh_reason(token_id, "not_attempted")
-            token = await self.db.get_token(token_id)
+            token = await self.accounts.get_token(token_id)
             if not token:
                 self._set_st_refresh_reason(token_id, "token_not_found")
                 return False
@@ -670,7 +673,7 @@ class TokenManager:
                 self._set_st_refresh_reason(token_id, "disabled")
 
             debug_logger.log_info(f"[AT_REFRESH] Token {token_id}: starting AT refresh...")
-            current_after_st = await self.db.get_token(token_id)
+            current_after_st = await self.accounts.get_token(token_id)
             previous_expires = current_after_st.at_expires if current_after_st else token.at_expires
             result = await self._do_refresh_at(token_id, effective_st, previous_at_expires=previous_expires)
             if result:
@@ -725,7 +728,7 @@ class TokenManager:
         )
         async with refresh_lock:
             self._set_st_refresh_reason(token_id, "not_attempted")
-            token = await self.db.get_token(token_id)
+            token = await self.accounts.get_token(token_id)
             if not token:
                 self._set_st_refresh_reason(token_id, "token_not_found")
                 return False
@@ -759,7 +762,7 @@ class TokenManager:
             new_at_expires = None
             if expires:
                 try:
-                    new_at_expires = datetime.fromisoformat(expires.replace('Z', '+00:00'))
+                    new_at_expires = datetime.fromisoformat(expires.replace("Z", "+00:00"))
                 except:
                     pass
 
@@ -771,18 +774,12 @@ class TokenManager:
                     else previous_at_expires
                 )
                 new_aware = (
-                    new_at_expires.replace(tzinfo=timezone.utc)
-                    if new_at_expires.tzinfo is None
-                    else new_at_expires
+                    new_at_expires.replace(tzinfo=timezone.utc) if new_at_expires.tzinfo is None else new_at_expires
                 )
                 expiry_advanced = new_aware > prev_aware
 
             # 更新数据库
-            await self.db.update_token(
-                token_id,
-                at=new_at,
-                at_expires=new_at_expires
-            )
+            await self.accounts.update_token(token_id, at=new_at, at_expires=new_at_expires)
 
             debug_logger.log_info(f"[AT_REFRESH] Token {token_id}: AT刷新成功")
             debug_logger.log_info(f"  - 新过期时间: {new_at_expires}")
@@ -794,15 +791,17 @@ class TokenManager:
 
             # 验证 AT 有效性：通过 get_credits 测试
             try:
-                current_token = await self.db.get_token(token_id)
+                current_token = await self.accounts.get_token(token_id)
                 credits_result = await self._get_credits_for_token(current_token, new_at)
-                await self.db.update_token(
+                await self.accounts.update_token(
                     token_id,
                     credits=credits_result.get("credits", 0),
                     user_paygate_tier=credits_result.get("userPaygateTier"),
                 )
                 self._mark_at_valid(token_id)
-                debug_logger.log_info(f"[AT_REFRESH] Token {token_id}: AT 验证成功（余额: {credits_result.get('credits', 0)}）")
+                debug_logger.log_info(
+                    f"[AT_REFRESH] Token {token_id}: AT 验证成功（余额: {credits_result.get('credits', 0)}）"
+                )
                 record_token_refresh("at", "success")
                 return True
             except Exception as verify_err:
@@ -842,7 +841,7 @@ class TokenManager:
         refreshed_at = datetime.now(timezone.utc)
         if result.get("success") and result.get("session_token"):
             new_st = str(result["session_token"]).strip()
-            await self.db.update_token(
+            await self.accounts.update_token(
                 token_id,
                 st=new_st,
                 last_st_refresh_at=refreshed_at,
@@ -854,7 +853,7 @@ class TokenManager:
             return new_st
 
         safe_error = str(result.get("error") or "Protocol refresh failed")[:240]
-        await self.db.update_token(
+        await self.accounts.update_token(
             token_id,
             last_st_refresh_at=refreshed_at,
             last_st_refresh_result=safe_error,
@@ -878,6 +877,7 @@ class TokenManager:
         """
         try:
             from ..core.config import config
+
             captcha_mode = str(config.captcha_method or "").strip()
 
             if self._normalize_protocol_mode(getattr(token, "protocol_mode", "session")) == "protocol":
@@ -900,7 +900,7 @@ class TokenManager:
                         token_id,
                         retain_runtime=False,
                     )
-                    updated = await self.db.get_token(token_id)
+                    updated = await self.accounts.get_token(token_id)
                     if (
                         updated
                         and updated.st
@@ -914,19 +914,16 @@ class TokenManager:
                     record_token_refresh("st", "failure")
                     return None
                 except Exception as profile_err:
-                    resource_exhausted = (
-                        isinstance(profile_err, BrowserProfileResourceExhaustedError)
-                        or BrowserProfileService.is_resource_exhaustion_error(profile_err)
-                    )
+                    resource_exhausted = isinstance(
+                        profile_err, BrowserProfileResourceExhaustedError
+                    ) or BrowserProfileService.is_resource_exhaustion_error(profile_err)
                     debug_logger.log_warning(
                         f"[ST_REFRESH] Token {token_id}: browser profile ST refresh failed: "
                         f"{'runtime capacity exhausted' if resource_exhausted else profile_err}"
                     )
                     self._set_st_refresh_reason(
                         token_id,
-                        "browser_profile_resource_exhausted"
-                        if resource_exhausted
-                        else "browser_profile_error",
+                        "browser_profile_resource_exhausted" if resource_exhausted else "browser_profile_error",
                     )
                     record_token_refresh("st", "failure")
                     return None
@@ -936,9 +933,7 @@ class TokenManager:
                 self._set_st_refresh_reason(token_id, "project_id_missing")
                 return None
 
-            debug_logger.log_info(
-                f"[ST_REFRESH] Token {token_id}: 尝试通过浏览器刷新 ST (mode={captcha_mode})..."
-            )
+            debug_logger.log_info(f"[ST_REFRESH] Token {token_id}: 尝试通过浏览器刷新 ST (mode={captcha_mode})...")
 
             refresh_timeout_seconds = 45.0
 
@@ -955,7 +950,7 @@ class TokenManager:
                     self._set_st_refresh_reason(token_id, "same_st")
                     record_token_refresh("st", "failure")
                     return None
-                await self.db.update_token(token_id, st=candidate_st)
+                await self.accounts.update_token(token_id, st=candidate_st)
                 debug_logger.log_info(
                     f"[ST_REFRESH] Token {token_id}: ST 已自动更新 (source={source_label}, mode={captcha_mode})"
                 )
@@ -997,9 +992,7 @@ class TokenManager:
                         if persisted_extension:
                             return persisted_extension
                 except asyncio.TimeoutError:
-                    debug_logger.log_warning(
-                        f"[ST_REFRESH] Token {token_id}: dedicated extension ST refresh timeout"
-                    )
+                    debug_logger.log_warning(f"[ST_REFRESH] Token {token_id}: dedicated extension ST refresh timeout")
                     self._set_st_refresh_reason(token_id, "extension_timeout")
                 except Exception as ext_err:
                     debug_logger.log_warning(
@@ -1011,6 +1004,7 @@ class TokenManager:
 
             # 1) Always try local headed-browser refresh first.
             from .browser_captcha import BrowserCaptchaService
+
             service = await BrowserCaptchaService.get_instance(self.db)
             refresh_kwargs = {"token_id": token_id}
 
@@ -1034,9 +1028,7 @@ class TokenManager:
                 record_token_refresh("st", "failure")
                 local_st = None
             except Exception as local_err:
-                debug_logger.log_warning(
-                    f"[ST_REFRESH] Token {token_id}: 本地浏览器刷新 ST 失败: {local_err}"
-                )
+                debug_logger.log_warning(f"[ST_REFRESH] Token {token_id}: 本地浏览器刷新 ST 失败: {local_err}")
                 if extension_attempted:
                     if ext_routing_failure_code not in (
                         "extension_worker_offline",
@@ -1059,9 +1051,7 @@ class TokenManager:
             if persisted_local:
                 return persisted_local
 
-            debug_logger.log_warning(
-                f"[ST_REFRESH] Token {token_id}: 本地有头浏览器刷新 ST 失败 (mode={captcha_mode})"
-            )
+            debug_logger.log_warning(f"[ST_REFRESH] Token {token_id}: 本地有头浏览器刷新 ST 失败 (mode={captcha_mode})")
             if extension_attempted:
                 if ext_routing_failure_code in (
                     "extension_worker_offline",
@@ -1091,7 +1081,7 @@ class TokenManager:
             token_id,
         )
         async with refresh_lock:
-            latest = await self.db.get_token(token_id)
+            latest = await self.accounts.get_token(token_id)
             if (
                 not latest
                 or not latest.is_active
@@ -1133,10 +1123,10 @@ class TokenManager:
                         f"[PROTOCOL_REFRESH] Token {token_id}: credit refresh failed: {type(exc).__name__}"
                     )
 
-                await self.db.update_token(token_id, **updates)
+                await self.accounts.update_token(token_id, **updates)
                 record_token_refresh("at", "success")
             except Exception as exc:
-                await self.db.update_token(
+                await self.accounts.update_token(
                     token_id,
                     st=new_st,
                     last_st_refresh_at=datetime.now(timezone.utc),
@@ -1154,7 +1144,7 @@ class TokenManager:
             return
 
         now = datetime.now(timezone.utc)
-        for token in await self.db.get_active_tokens():
+        for token in await self.accounts.get_active_tokens():
             if (
                 not token.auto_refresh_enabled
                 or self._normalize_protocol_mode(token.protocol_mode) != "protocol"
@@ -1195,9 +1185,7 @@ class TokenManager:
                     )
                     await asyncio.sleep(300)
                     continue
-                debug_logger.log_error(
-                    f"[PROTOCOL_REFRESH] Background loop failed: {type(exc).__name__}"
-                )
+                debug_logger.log_error(f"[PROTOCOL_REFRESH] Background loop failed: {type(exc).__name__}")
 
     def start_protocol_refresher(self) -> None:
         if self._protocol_refresher_task and not self._protocol_refresher_task.done():
@@ -1228,22 +1216,20 @@ class TokenManager:
             token_id,
         )
         async with project_lock:
-            token = await self.db.get_token(token_id)
+            token = await self.accounts.get_token(token_id)
             if not token:
                 raise ValueError("Token not found")
 
             pref = (preferred_project_id or "").strip()
             if pref:
-                projects_for_pref = await self.db.get_projects_by_token(token_id, api_key_id=api_key_id)
+                projects_for_pref = await self.projects.get_projects_by_token(token_id, api_key_id=api_key_id)
                 match = next(
                     (p for p in projects_for_pref if p.is_active and p.project_id == pref),
                     None,
                 )
                 if not match:
-                    raise ValueError(
-                        f"Project not found or inactive for this token: {pref}"
-                    )
-                await self.db.update_token(
+                    raise ValueError(f"Project not found or inactive for this token: {pref}")
+                await self.accounts.update_token(
                     token_id,
                     current_project_id=match.project_id,
                     current_project_name=match.project_name,
@@ -1252,7 +1238,7 @@ class TokenManager:
 
             projects = [
                 project
-                for project in await self.db.get_projects_by_token(token_id, api_key_id=api_key_id)
+                for project in await self.projects.get_projects_by_token(token_id, api_key_id=api_key_id)
                 if project.is_active
             ]
             projects = self._sort_projects(projects)
@@ -1270,7 +1256,7 @@ class TokenManager:
 
                 selectable_projects = projects[:project_pool_size]
                 selected_project = self._select_next_project(token, selectable_projects)
-                await self.db.update_token(
+                await self.accounts.update_token(
                     token_id,
                     current_project_id=selected_project.project_id,
                     current_project_name=selected_project.project_name,
@@ -1293,14 +1279,14 @@ class TokenManager:
             token_id,
         )
         async with project_lock:
-            token = await self.db.get_token(token_id)
+            token = await self.accounts.get_token(token_id)
             if not token:
                 raise ValueError("Token not found")
             st = (token.st or "").strip()
             if not st:
                 raise ValueError("Token has no session token")
 
-            all_projects = await self.db.get_projects_by_token(token_id, api_key_id=api_key_id)
+            all_projects = await self.projects.get_projects_by_token(token_id, api_key_id=api_key_id)
             projects = self._sort_projects([p for p in all_projects if p.is_active])
             next_index = len(all_projects) + 1
 
@@ -1308,9 +1294,7 @@ class TokenManager:
             if raw:
                 project_title = raw[:120]
             else:
-                base = self._normalize_project_name_base(
-                    token.current_project_name or token.remark
-                )
+                base = self._normalize_project_name_base(token.current_project_name or token.remark)
                 project_title = self._build_project_name(next_index, base)
 
             project_id = await self.flow_client.create_project(st, project_title)
@@ -1322,10 +1306,10 @@ class TokenManager:
                 tool_name="PINHOLE",
             )
             # Enforce one active project per (api_key_id, token_id) scope.
-            await self.db.deactivate_projects_for_token_scope(token_id, api_key_id=api_key_id)
-            project.id = await self.db.add_project(project)
+            await self.projects.deactivate_projects_for_token_scope(token_id, api_key_id=api_key_id)
+            project.id = await self.projects.add_project(project)
             if set_as_current:
-                await self.db.update_token(
+                await self.accounts.update_token(
                     token_id,
                     current_project_id=project_id,
                     current_project_name=project_title,
@@ -1334,19 +1318,19 @@ class TokenManager:
 
     async def record_usage(self, token_id: int, is_video: bool = False):
         """Record token usage"""
-        await self.db.update_token(token_id, use_count=1, last_used_at=datetime.now())
+        await self.accounts.update_token(token_id, use_count=1, last_used_at=datetime.now())
 
         if is_video:
-            await self.db.increment_token_stats(token_id, "video")
+            await self.accounts.increment_token_stats(token_id, "video")
         else:
-            await self.db.increment_token_stats(token_id, "image")
+            await self.accounts.increment_token_stats(token_id, "image")
 
     async def record_error(self, token_id: int):
         """Record token error and auto-disable if threshold reached"""
-        await self.db.increment_token_stats(token_id, "error")
+        await self.accounts.increment_token_stats(token_id, "error")
 
         # Check if should auto-disable token (based on consecutive errors)
-        stats = await self.db.get_token_stats(token_id)
+        stats = await self.accounts.get_token_stats(token_id)
         admin_config = await self.db.get_admin_config()
 
         if (
@@ -1366,7 +1350,7 @@ class TokenManager:
         This method resets error_count to 0, which is used for auto-disable threshold checking.
         Note: today_error_count and historical statistics are NOT reset.
         """
-        await self.db.reset_error_count(token_id)
+        await self.accounts.reset_error_count(token_id)
 
     async def ban_token_for_429(self, token_id: int):
         """因429错误立即禁用token
@@ -1375,11 +1359,8 @@ class TokenManager:
             token_id: Token ID
         """
         debug_logger.log_warning(f"[429_BAN] 禁用Token {token_id} (原因: 429 Rate Limit)")
-        await self.db.update_token(
-            token_id,
-            is_active=False,
-            ban_reason="429_rate_limit",
-            banned_at=datetime.now(timezone.utc)
+        await self.accounts.update_token(
+            token_id, is_active=False, ban_reason="429_rate_limit", banned_at=datetime.now(timezone.utc)
         )
 
     async def auto_unban_429_tokens(self):
@@ -1390,7 +1371,7 @@ class TokenManager:
         - 仅解禁未过期的token
         - 仅解禁因429被禁用的token
         """
-        all_tokens = await self.db.get_all_tokens()
+        all_tokens = await self.accounts.get_all_tokens()
         now = datetime.now(timezone.utc)
 
         for token in all_tokens:
@@ -1432,14 +1413,9 @@ class TokenManager:
                     f"[AUTO_UNBAN] 解禁Token {token.id} (禁用时间: {banned_at_aware}, "
                     f"已过 {time_since_ban.total_seconds() / 3600:.1f} 小时)"
                 )
-                await self.db.update_token(
-                    token.id,
-                    is_active=True,
-                    ban_reason=None,
-                    banned_at=None
-                )
+                await self.accounts.update_token(token.id, is_active=True, ban_reason=None, banned_at=None)
                 # 重置错误计数
-                await self.db.reset_error_count(token.id)
+                await self.accounts.reset_error_count(token.id)
 
     # ========== 余额刷新 ==========
 
@@ -1449,7 +1425,7 @@ class TokenManager:
         Returns:
             credits
         """
-        token = await self.db.get_token(token_id)
+        token = await self.accounts.get_token(token_id)
         if not token:
             return 0
 
@@ -1464,7 +1440,7 @@ class TokenManager:
             user_paygate_tier = result.get("userPaygateTier")
 
             # 更新数据库
-            await self.db.update_token(
+            await self.accounts.update_token(
                 token_id,
                 credits=credits,
                 user_paygate_tier=user_paygate_tier,

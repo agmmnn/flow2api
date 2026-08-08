@@ -1,6 +1,6 @@
 # Flow2API Architecture Migration Plan
 
-Status: in progress; Phases 1-7 are complete and Phase 8 is underway.
+Status: in progress; Phases 1-8 are complete and Phase 9 is underway.
 
 This plan restructures Flow2API as a modular monolith in a monorepo. It avoids a full rewrite, preserves existing API contracts, and keeps these commands working throughout the migration:
 
@@ -233,8 +233,8 @@ Exit criteria:
 
 ## Phase 8: Persistence and migration baseline
 
-- [ ] Extract repositories for accounts, projects, API keys, cache, request logs, and workers.
-- [ ] Define and test behavioral parity between SQLite and PostgreSQL implementations.
+- [x] Extract repositories for accounts, projects, API keys, cache, request logs, and workers.
+- [x] Define and test behavioral parity between SQLite and PostgreSQL implementations.
 - [x] Add ordered SQL migrations for both database engines.
 - [x] Add a shared `schema_migrations` table and migration runner.
 - [x] Define an existing-schema validator.
@@ -248,8 +248,15 @@ in `schema_migrations`. Fresh SQLite databases apply the baseline before compati
 initialization; legacy files are recognized, upgraded, fully validated, and only then
 stamped. PostgreSQL validates a pre-existing untracked schema before adopting its
 baseline. Operational backup and recovery expectations are documented in
-`docs/database-migrations.md`. Repository extraction and cross-engine behavioral
-parity are the remaining Phase 8 work.
+`docs/database-migrations.md`.
+
+Capability repositories now cover accounts, projects, managed API keys, cache
+metadata, request logs, and extension workers. The application container constructs
+one repository set over the selected backend; token/project lifecycle, managed-key
+authentication, generation logging, cache metadata, and worker authentication use
+those boundaries. The same repository operations run against SQLite locally and the
+PostgreSQL 16 storage-contract job in CI, preserving the existing backend query
+implementations while giving later decomposition a narrow persistence seam.
 
 Exit criteria:
 
