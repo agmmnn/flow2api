@@ -4,6 +4,8 @@ import tomli
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
+from .settings import DeploymentSettings, OperationalSettings
+
 DEFAULT_YESCAPTCHA_TASK_TYPE = "RecaptchaV3TaskProxylessM1S9"
 DEFAULT_CAPMONSTER_MIN_SCORE = 0.9
 YESCAPTCHA_TASK_TYPE_OPTIONS = {
@@ -160,9 +162,14 @@ class Config:
     """Application configuration"""
 
     def __init__(self):
-        self._config = self._load_config()
+        self._replace_deployment_settings(self._load_config())
         self._admin_username: Optional[str] = None
         self._admin_password: Optional[str] = None
+
+    def _replace_deployment_settings(self, values: Dict[str, Any]) -> None:
+        self.deployment_settings = DeploymentSettings.from_mapping(values)
+        self.operational_settings = OperationalSettings(self.deployment_settings)
+        self._config = self.operational_settings.effective
 
     def _load_config(self) -> Dict[str, Any]:
         """Load configuration from setting.toml, falling back to the example file."""
@@ -209,11 +216,19 @@ class Config:
 
     def reload_config(self):
         """Reload configuration from file"""
-        self._config = self._load_config()
+        self._replace_deployment_settings(self._load_config())
 
     def get_raw_config(self) -> Dict[str, Any]:
         """Get raw configuration dictionary"""
         return self._config
+
+    def get_deployment_config(self):
+        """Return the immutable TOML/environment deployment seed."""
+        return self.deployment_settings.values
+
+    def get_operational_overrides(self) -> Dict[str, Any]:
+        """Return database/runtime values that differ from the deployment seed."""
+        return self.operational_settings.overrides_snapshot()
 
     @property
     def admin_username(self) -> str:
@@ -233,6 +248,7 @@ class Config:
     def set_admin_username_from_db(self, username: str):
         """Set admin username from database"""
         self._admin_username = username
+        self.operational_settings.set("global", "admin_username", username)
 
     # Flow2API specific properties
     @property
@@ -485,6 +501,7 @@ class Config:
     def set_admin_password_from_db(self, password: str):
         """Set admin password from database"""
         self._admin_password = password
+        self.operational_settings.set("global", "admin_password", password)
 
     def set_debug_enabled(self, enabled: bool):
         """Set debug mode enabled/disabled"""

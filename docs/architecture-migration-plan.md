@@ -1,6 +1,6 @@
 # Flow2API Architecture Migration Plan
 
-Status: in progress; Phases 1-8 are complete and Phase 9 is underway.
+Status: in progress; Phases 1-9 are complete and Phase 10 is next.
 
 This plan restructures Flow2API as a modular monolith in a monorepo. It avoids a full rewrite, preserves existing API contracts, and keeps these commands working throughout the migration:
 
@@ -270,8 +270,8 @@ Exit criteria:
 - [x] Split personal/browser worker pools, sessions, tabs, policies, CAPTCHA, and refresh behavior.
 - [x] Split `FlowClient` into shared transport plus auth, projects, images, videos, and model resources.
 - [x] Split `generation_handler` into an orchestrator and explicit generation pipelines.
-- [ ] Separate static deployment settings from mutable database-backed operational settings.
-- [ ] Introduce abstractions only where multiple implementations or test seams justify them.
+- [x] Separate static deployment settings from mutable database-backed operational settings.
+- [x] Introduce abstractions only where multiple implementations or test seams justify them.
 
 Phase 9 is underway. Extension worker connection/result models, the bounded
 large-generation-response upload side channel, and health-aware worker routing have
@@ -309,6 +309,12 @@ compatibility window; public capability calls no longer own resource selection.
 while `generation/state.py` owns request-local outcome transitions. `GenerationHandler`
 remains the token/project/logging orchestrator and delegates capability execution to the
 appropriate pipeline.
+
+`core/settings.py` now keeps the TOML/environment deployment seed immutable and records
+all database/runtime mutations in a distinct operational override layer while retaining
+the existing property API. Concrete browser I/O remains concrete; abstractions were
+introduced only for tested resource, routing, persistence, and orchestration seams.
+Phase 9 is complete.
 
 Exit criteria:
 
