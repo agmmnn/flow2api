@@ -219,9 +219,11 @@ The FastAPI application now owns a passive dependency graph through
 `app.state.container`, and lifespan-created recurring jobs are registered and cancelled
 by name. Authentication, WebSocket worker registration, extension account import,
 projects, cache delivery, Runway endpoints, capacity, and model catalogs resolve their
-dependencies from the request-owned container. The remaining compatibility bridge is
-limited to legacy generation helpers and admin handler bodies; those are the next
-targets before Phase 7 is marked complete.
+dependencies from the request-owned container. Public generation helpers now take
+their handler or provider service explicitly, and a regression test prevents the old
+public service globals from returning. The remaining compatibility bridge is limited
+to admin handler bodies; admin request dependencies and lifespan extraction are the
+next targets before Phase 7 is marked complete.
 
 Exit criteria:
 

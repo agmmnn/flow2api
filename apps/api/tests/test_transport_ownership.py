@@ -50,6 +50,19 @@ def test_public_routes_are_owned_by_transport_modules() -> None:
     assert set(route_paths(routes.router)) == {path for router in PUBLIC_ROUTERS for path in route_paths(router)}
 
 
+def test_public_routes_do_not_expose_mutable_service_globals() -> None:
+    forbidden = {
+        "generation_handler",
+        "runway_service",
+        "geminigen_service",
+        "set_generation_handler",
+        "set_runway_service",
+        "set_geminigen_service",
+    }
+
+    assert forbidden.isdisjoint(vars(routes))
+
+
 def test_admin_routes_are_partitioned_once_by_feature() -> None:
     feature_paths = [path for router in ADMIN_ROUTERS for path in route_paths(router)]
     aggregate_paths = route_paths(admin.router)

@@ -1025,8 +1025,8 @@ async def lifespan(app: FastAPI):
     print("OK Protocol token refresh task stopped")
 
 
-def _bind_legacy_dependencies(app: FastAPI) -> None:
-    """Bridge old route modules while their handlers move to request dependencies."""
+def _bind_legacy_admin_dependencies(app: FastAPI) -> None:
+    """Bridge admin handlers while they move to request dependencies."""
 
     container: AppContainer = app.state.container
     admin.set_dependencies(
@@ -1049,7 +1049,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 app.state.container = build_container()
-_bind_legacy_dependencies(app)
+_bind_legacy_admin_dependencies(app)
 app.add_exception_handler(sqlite3.OperationalError, sqlite_operational_error_handler)
 
 
