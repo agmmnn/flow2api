@@ -34,6 +34,7 @@ from ..core.config import config
 from ..workers.personal import (
     PersonalWorkerRouting,
     ResidentTabInfo,
+    ResidentTabRegistry,
     TokenPoolLease,
     TokenPoolTimeoutError,
 )
@@ -1458,12 +1459,7 @@ class BrowserCaptchaService:
         self._refresh_runtime_fingerprint_spoof_seed()
 
         # 常驻模式相关属性
-        self._resident_tabs: dict[str, 'ResidentTabInfo'] = {}  # slot_id -> 常驻标签页信息
-        self._token_resident_affinity: dict[str, str] = {}  # token_id -> slot_id（优先保证 token 独占 context）
-        self._project_resident_affinity: dict[str, str] = {}  # project_id -> slot_id（最近一次使用）
-        self._resident_slot_seq = 0
-        self._resident_pick_index = 0
-        self._resident_lock = asyncio.Lock()  # 保护常驻标签页操作
+        self.resident_registry = ResidentTabRegistry(slot_prefix=self._slot_id_prefix)
         self._browser_lock = asyncio.Lock()  # 保护浏览器初始化/关闭/重启，避免重复拉起实例
         self._runtime_recover_lock = asyncio.Lock()  # 串行化浏览器级恢复，避免并发重启风暴
         self._tab_build_lock = asyncio.Lock()  # 串行化冷启动/重建，降低 nodriver 抖动
@@ -1497,12 +1493,8 @@ class BrowserCaptchaService:
         self._running = False                            # 向后兼容
         self._recaptcha_ready = False                    # 向后兼容
         self._last_fingerprint: Optional[Dict[str, Any]] = None
-        self._resident_error_streaks: dict[str, int] = {}
-        self._resident_unavailable_slots: set[str] = set()
         self._resident_warmup_task: Optional[asyncio.Task] = None
         self._fresh_profile_restart_task: Optional[asyncio.Task] = None
-        self._resident_rebuild_tasks: dict[str, asyncio.Task] = {}
-        self._resident_recovery_tasks: dict[str, asyncio.Task] = {}
         self._last_runtime_restart_at = 0.0
         self._runtime_last_active_at = time.time()
         self._successful_solves_since_browser_start = 0
@@ -1528,10 +1520,60 @@ class BrowserCaptchaService:
         self._custom_lock = asyncio.Lock()
         self._refresh_runtime_tunables()
 
+    @property
+    def _resident_tabs(self) -> dict[str, ResidentTabInfo]:
+        return self.resident_registry.tabs
+
+    @property
+    def _token_resident_affinity(self) -> dict[str, str]:
+        return self.resident_registry.token_affinity
+
+    @property
+    def _project_resident_affinity(self) -> dict[str, str]:
+        return self.resident_registry.project_affinity
+
+    @property
+    def _resident_slot_seq(self) -> int:
+        return self.resident_registry.slot_sequence
+
+    @_resident_slot_seq.setter
+    def _resident_slot_seq(self, value: int) -> None:
+        self.resident_registry.slot_sequence = value
+
+    @property
+    def _resident_pick_index(self) -> int:
+        return self.resident_registry.pick_index
+
+    @_resident_pick_index.setter
+    def _resident_pick_index(self, value: int) -> None:
+        self.resident_registry.pick_index = value
+
+    @property
+    def _resident_lock(self) -> asyncio.Lock:
+        return self.resident_registry.lock
+
+    @property
+    def _resident_error_streaks(self) -> dict[str, int]:
+        return self.resident_registry.error_streaks
+
+    @property
+    def _resident_unavailable_slots(self) -> set[str]:
+        return self.resident_registry.unavailable_slots
+
+    @property
+    def _resident_rebuild_tasks(self) -> dict[str, asyncio.Task[Any]]:
+        return self.resident_registry.rebuild_tasks
+
+    @property
+    def _resident_recovery_tasks(self) -> dict[str, asyncio.Task[Any]]:
+        return self.resident_registry.recovery_tasks
+
     def _apply_browser_instance_identity(self, browser_instance_id: int) -> None:
         normalized_instance_id = max(0, int(browser_instance_id or 0))
         self._browser_instance_id = normalized_instance_id
         self._slot_id_prefix = f"b{normalized_instance_id}-" if normalized_instance_id > 0 else ""
+        if hasattr(self, "resident_registry"):
+            self.resident_registry.slot_prefix = self._slot_id_prefix
 
     def apply_pool_worker_settings(
         self,
@@ -6047,16 +6089,11 @@ class BrowserCaptchaService:
         return reserved_tab_ids
 
     def _next_resident_slot_id(self) -> str:
-        self._resident_slot_seq += 1
-        return f"{self._slot_id_prefix}slot-{self._resident_slot_seq}"
+        return self.resident_registry.next_slot_id()
 
     @staticmethod
     def _normalize_token_key(token_id: Optional[int]) -> str:
-        try:
-            normalized = int(token_id or 0)
-        except Exception:
-            normalized = 0
-        return str(normalized) if normalized > 0 else ""
+        return ResidentTabRegistry.normalize_token_key(token_id)
 
     @staticmethod
     def _normalize_cookie_signature(cookie_text: Optional[str]) -> Optional[str]:
@@ -6210,91 +6247,48 @@ class BrowserCaptchaService:
         slot_id: Optional[str],
         preserve_token_key: Optional[str] = None,
     ):
-        if not slot_id:
-            return
-        stale_tokens = [
-            token_key
-            for token_key, mapped_slot_id in self._token_resident_affinity.items()
-            if mapped_slot_id == slot_id and token_key != preserve_token_key
-        ]
-        for token_key in stale_tokens:
-            self._token_resident_affinity.pop(token_key, None)
+        self.resident_registry.forget_token_affinity(
+            slot_id,
+            preserve_token_key=preserve_token_key,
+        )
 
     def _forget_project_affinity_for_slot_locked(
         self,
         slot_id: Optional[str],
         preserve_project_id: Optional[str] = None,
     ):
-        if not slot_id:
-            return
-        stale_projects = [
-            project_id
-            for project_id, mapped_slot_id in self._project_resident_affinity.items()
-            if mapped_slot_id == slot_id and project_id != preserve_project_id
-        ]
-        for project_id in stale_projects:
-            self._project_resident_affinity.pop(project_id, None)
+        self.resident_registry.forget_project_affinity(
+            slot_id,
+            preserve_project_id=preserve_project_id,
+        )
 
     def _resident_slot_has_pending_assignment_locked(
         self,
         slot_id: Optional[str],
         resident_info: Optional[ResidentTabInfo] = None,
     ) -> bool:
-        normalized_slot_id = str(slot_id or "").strip()
-        if not normalized_slot_id:
-            return False
-        current = resident_info or self._resident_tabs.get(normalized_slot_id)
-        if current is None:
-            return False
-        return int(getattr(current, "pending_assignment_count", 0) or 0) > 0
+        return self.resident_registry.has_pending_assignment(slot_id, resident_info)
 
     def _is_resident_slot_busy_for_allocation_locked(
         self,
         slot_id: Optional[str],
         resident_info: Optional[ResidentTabInfo] = None,
     ) -> bool:
-        normalized_slot_id = str(slot_id or "").strip()
-        if not normalized_slot_id:
-            return False
-        current = resident_info or self._resident_tabs.get(normalized_slot_id)
-        if current is None:
-            return False
-        return current.solve_lock.locked() or self._resident_slot_has_pending_assignment_locked(
-            normalized_slot_id,
-            current,
-        )
+        return self.resident_registry.is_busy(slot_id, resident_info)
 
     def _reserve_resident_slot_for_solve_locked(
         self,
         slot_id: Optional[str],
         resident_info: Optional[ResidentTabInfo] = None,
     ) -> bool:
-        normalized_slot_id = str(slot_id or "").strip()
-        if not normalized_slot_id:
-            return False
-        current = resident_info or self._resident_tabs.get(normalized_slot_id)
-        if current is None or not current.tab:
-            return False
-        if self._is_resident_slot_busy_for_allocation_locked(normalized_slot_id, current):
-            return False
-        current.pending_assignment_count = int(
-            getattr(current, "pending_assignment_count", 0) or 0
-        ) + 1
-        return True
+        return self.resident_registry.reserve(slot_id, resident_info)
 
     def _release_resident_slot_reservation_locked(
         self,
         slot_id: Optional[str],
         resident_info: Optional[ResidentTabInfo] = None,
     ) -> None:
-        normalized_slot_id = str(slot_id or "").strip()
-        if not normalized_slot_id:
-            return
-        current = resident_info or self._resident_tabs.get(normalized_slot_id)
-        if current is None:
-            return
-        pending_count = int(getattr(current, "pending_assignment_count", 0) or 0)
-        current.pending_assignment_count = max(0, pending_count - 1)
+        self.resident_registry.release(slot_id, resident_info)
 
     async def _release_resident_slot_reservation(
         self,
@@ -6326,29 +6320,10 @@ class BrowserCaptchaService:
         *,
         available_only: bool = False,
     ) -> Optional[str]:
-        token_key = self._normalize_token_key(token_id)
-        if not token_key:
-            return None
-        slot_id = self._token_resident_affinity.get(token_key)
-        if slot_id:
-            resident_info = self._resident_tabs.get(slot_id)
-            if (
-                resident_info
-                and resident_info.tab
-                and slot_id not in self._resident_unavailable_slots
-                and resident_info.token_id == int(token_key)
-            ):
-                if available_only and self._is_resident_slot_busy_for_allocation_locked(
-                    slot_id,
-                    resident_info,
-                ):
-                    return None
-                return slot_id
-            if slot_id not in self._resident_tabs or (
-                resident_info is not None and resident_info.token_id != int(token_key)
-            ):
-                self._token_resident_affinity.pop(token_key, None)
-        return None
+        return self.resident_registry.resolve_token_affinity(
+            token_id,
+            available_only=available_only,
+        )
 
     def _resolve_affinity_slot_locked(
         self,
@@ -6356,66 +6331,26 @@ class BrowserCaptchaService:
         *,
         available_only: bool = False,
     ) -> Optional[str]:
-        normalized_project_id = str(project_id or "").strip()
-        if not normalized_project_id:
-            return None
-        slot_id = self._project_resident_affinity.get(normalized_project_id)
-        if slot_id:
-            resident_info = self._resident_tabs.get(slot_id)
-            if (
-                resident_info
-                and resident_info.tab
-                and slot_id not in self._resident_unavailable_slots
-                and resident_info.project_id == normalized_project_id
-            ):
-                if available_only and self._is_resident_slot_busy_for_allocation_locked(
-                    slot_id,
-                    resident_info,
-                ):
-                    return None
-                return slot_id
-            if slot_id not in self._resident_tabs or (
-                resident_info is not None and resident_info.project_id != normalized_project_id
-            ):
-                self._project_resident_affinity.pop(normalized_project_id, None)
-        return None
+        return self.resident_registry.resolve_project_affinity(
+            project_id,
+            available_only=available_only,
+        )
 
     def _remember_project_affinity(self, project_id: Optional[str], slot_id: Optional[str], resident_info: Optional[ResidentTabInfo]):
-        normalized_project_id = str(project_id or "").strip()
-        if not normalized_project_id or not slot_id or resident_info is None:
-            return
-        self._forget_project_affinity_for_slot_locked(slot_id, preserve_project_id=normalized_project_id)
-        self._project_resident_affinity[normalized_project_id] = slot_id
-        resident_info.project_id = normalized_project_id
+        self.resident_registry.remember_project(project_id, slot_id, resident_info)
 
     def _remember_token_affinity(self, token_id: Optional[int], slot_id: Optional[str], resident_info: Optional[ResidentTabInfo]):
-        token_key = self._normalize_token_key(token_id)
-        if not token_key or not slot_id or resident_info is None:
-            return
-        self._forget_token_affinity_for_slot_locked(slot_id, preserve_token_key=token_key)
-        self._token_resident_affinity[token_key] = slot_id
-        resident_info.token_id = int(token_key)
+        self.resident_registry.remember_token(token_id, slot_id, resident_info)
 
     def _mark_resident_slot_unavailable_locked(
         self,
         slot_id: Optional[str],
         resident_info: Optional[ResidentTabInfo] = None,
     ) -> None:
-        normalized_slot_id = str(slot_id or "").strip()
-        if not normalized_slot_id:
-            return
-        self._resident_unavailable_slots.add(normalized_slot_id)
-        current = self._resident_tabs.get(normalized_slot_id)
-        if current is not None:
-            current.recaptcha_ready = False
-        elif resident_info is not None:
-            resident_info.recaptcha_ready = False
+        self.resident_registry.mark_unavailable(slot_id, resident_info)
 
     def _clear_resident_slot_unavailable_locked(self, slot_id: Optional[str]) -> None:
-        normalized_slot_id = str(slot_id or "").strip()
-        if not normalized_slot_id:
-            return
-        self._resident_unavailable_slots.discard(normalized_slot_id)
+        self.resident_registry.clear_unavailable(slot_id)
 
     async def _mark_resident_slot_unavailable(
         self,

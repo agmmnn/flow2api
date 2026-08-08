@@ -290,8 +290,10 @@ binding. The extension worker decomposition item is complete; personal/browser w
 pools are the next slice. Personal-mode pool affinity, reservations, health ranking,
 round-robin state, and candidate ordering now live in `workers/personal/routing.py`;
 resident-tab and token-pool lease state now live in `workers/personal/models.py`. The
-legacy pool delegates through compatibility properties while session, tab, CAPTCHA,
-and refresh responsibilities are separated incrementally.
+resident-tab registry now owns slot identity, affinity, solve reservations,
+unavailable-state tracking, and recovery task maps. The legacy pool delegates through
+compatibility properties while browser session I/O, CAPTCHA, and refresh responsibilities
+are separated incrementally.
 
 Exit criteria:
 
