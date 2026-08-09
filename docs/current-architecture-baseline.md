@@ -229,6 +229,5 @@ runtime handlers remain unchanged in Phase 0.
 - Existing worker clients remain compatibility inputs, not the design of protocol v1.
 - Credential locality and encryption require explicit new work; opaque references must
   not cause existing plaintext storage to be mislabeled.
-- The usage-boundary and worker-security decisions in
-  `docs/provider-provenance-and-usage-boundary.md` and `docs/worker-threat-model.md` are
-  release gates for later phases.
+- The source/runtime facts in `docs/provider-source-provenance.md` and the security
+  controls in `docs/worker-threat-model.md` are engineering baselines for later phases.

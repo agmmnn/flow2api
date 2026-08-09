@@ -1,0 +1,55 @@
+# Provider Source Provenance
+
+- Status: active engineering record
+- Last verified: 2026-08-09
+
+This document records the exact external source revisions used to design the local
+ChatGPT image-generation adapter. Runtime behavior and operational constraints are
+documented here so upgrades can be reviewed and reproduced.
+
+## Pinned upstream revisions
+
+| Component | Upstream | Inspected commit | Version | License | Relationship |
+| --- | --- | --- | --- | --- | --- |
+| `chatgpt-imagegen` | [`leeguooooo/chatgpt-imagegen`](https://github.com/leeguooooo/chatgpt-imagegen) | `5b1ccb6ded09997317d35717b4b0183c268c0e9b` | `0.21.2` | MIT, copyright 2026 leeguooooo | Source candidate for `packages/provider-chatgpt`; Phase 1 invokes the pinned checkout as an external CLI |
+| `chrome-use` | [`leeguooooo/chrome-use`](https://github.com/leeguooooo/chrome-use) | `a107f7e74ee014db68bdce8d0dd8c570f858afd0` | `1.5.87` | Apache-2.0 | Version-pinned external browser runtime; it is not vendored into Flow2API |
+
+## `chatgpt-imagegen` behavior used by Flow2API
+
+- The `web` backend invokes `chrome-use`, drives an already logged-in ChatGPT browser,
+  selects or creates a ChatGPT Project, submits a prompt, retrieves image bytes, and
+  normally deletes the generated conversation.
+- The `codex` backend is a different execution and quota path. Phase 1 always passes
+  `--backend web`; it never selects `auto` and cannot silently fall back to Codex.
+- Web generation is cross-process serialized through the upstream file-lock mechanism.
+  Flow2API also adds an in-process async lock and forces
+  `CHATGPT_IMAGEGEN_WEB_CONCURRENCY=1`.
+- The upstream project/style gallery and update-check features are unrelated to the
+  spike. The harness passes `--no-style` and uses no online style input.
+- The CLI emits the saved file path on stdout and diagnostics on stderr. Phase 1 treats
+  those strings as temporary observation seams, not a stable provider interface.
+
+If the source is imported in a later phase, preserve the upstream MIT license,
+copyright notice, pinned commit, and a record of local modifications.
+
+## `chrome-use` runtime boundary
+
+- The native CLI controls Chrome through its extension, native-messaging host, and
+  per-session local daemon/socket.
+- Flow2API invokes only the commands needed by the upstream image CLI plus a best-effort
+  `close --session <id>` after wrapper timeout or cancellation.
+- The Phase 1 harness does not expose arbitrary browser commands through HTTP or
+  WebSocket routes.
+- `chrome-use` remains independently installed and upgradeable. Before changing the
+  pinned tested version, rerun doctor, text-to-image, image-to-image, timeout, and
+  cancellation checks.
+
+## Provider terminology
+
+- **Google Flow** is the existing Labs/Flow project and artifact surface.
+- **GeminiGen** is the repository's existing integration with the separate
+  `geminigen.ai` service; it is not direct Google Gemini API support.
+- **ChatGPT Web**, **ChatGPT Codex**, and the **OpenAI API** are distinct execution and
+  quota surfaces. Model IDs and routing must keep them distinct.
+- **Nano Banana** is a model/product nickname, not a credential or provider type. Its
+  model ID must remain namespaced under the provider that executes it.

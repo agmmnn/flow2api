@@ -30,6 +30,7 @@ dependencies = [
 [project.scripts]
 setup = "flow2api.local_runner:setup"
 flow2api = "flow2api.cli:main"
+flow2api-chatgpt-spike = "flow2api.spikes.chatgpt_web:main"
 
 [dependency-groups]
 dev = [

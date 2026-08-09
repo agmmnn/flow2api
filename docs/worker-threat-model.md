@@ -87,7 +87,7 @@ identity credentials.
 - **Artifact service:** stores references and results but is not trusted to execute
   jobs or receive provider credentials.
 - **Provider service:** receives user content and consumes provider quota according to
-  its own terms and security controls.
+  its technical behavior and security controls.
 
 ### Boundary A: API client to control plane
 

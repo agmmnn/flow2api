@@ -180,8 +180,10 @@ gateway is documented in
 [`docs/unified-generation-platform-plan.md`](./docs/unified-generation-platform-plan.md).
 Its Phase 0 baselines are the
 [`current architecture inventory`](./docs/current-architecture-baseline.md),
-[`provider provenance and usage boundary`](./docs/provider-provenance-and-usage-boundary.md),
+[`provider source provenance`](./docs/provider-source-provenance.md),
 and [`worker threat model`](./docs/worker-threat-model.md).
+The completed private ChatGPT browser spike and measured behavior are recorded in
+[`docs/phase1-chatgpt-web-spike.md`](./docs/phase1-chatgpt-web-spike.md).
 
 ### First visit
 

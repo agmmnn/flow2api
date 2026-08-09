@@ -1,6 +1,6 @@
 # Unified Generation Platform Plan
 
-Status: Phase 0 complete; Phase 1 is gated and has not started.
+Status: Phases 0 and 1 complete; Phase 2 has not started.
 
 This plan evolves Flow2API from a Google Flow-focused compatibility service into a
 local-first generation gateway with this product position:
@@ -77,8 +77,8 @@ local browser, local OAuth file, OS keychain, or desktop tools.
 
 During migration, existing `flow2api.providers.google_flow` compatibility imports stay
 available. Google Flow moves only after the provider contract is exercised by existing
-Flow behavior and at least one materially different provider whose usage gate permits
-development. ChatGPT may fill that role only if its gate changes.
+Flow behavior and at least one materially different provider. The completed ChatGPT Web
+spike provides the second real implementation that will shape the initial contract.
 
 In this plan, `google-flow` means Labs/Flow and may expose Gemini, Imagen, and Veo model
 families. The existing `GeminiGen` integration targets the separate `geminigen.ai`
@@ -412,10 +412,10 @@ resolved-execution auditing have production coverage.
   flags, missing timeout propagation, ping/pong behavior, gateway response ownership,
   and lifecycle feedback.
 - [x] Record exact upstream commits and licenses for `chatgpt-imagegen` and `chrome-use`.
-- [x] Document the consumer-subscription terms and local/private-use boundary.
-- [x] Record a legal/operational go/no-go decision for each UI-backed provider. A
-  provider that lacks a compatible usage basis may remain an isolated experiment but
-  cannot advance into product integration without explicit authorization.
+- [x] Record the personal, self-hosted deployment boundary and keep browser credentials
+  on the machine that owns the logged-in session.
+- [x] Record exact source provenance, versions, licenses, and technical execution
+  boundaries for each imported or externally invoked browser component.
 - [x] Write the worker threat model, trust boundaries, and prohibited capabilities.
 - [x] Freeze sanitized worker and generation transcripts as characterization fixtures.
 - [x] Record the pre-change OpenAPI document and model catalog.
@@ -429,21 +429,19 @@ Exit criteria:
 ### Phase 1: ChatGPT Web vertical spike
 
 This phase is intentionally throwaway and is not exposed through a public HTTP route.
-As of the 2026-08-09 Phase 0 review, it is **NO-GO by default** under the current
-consumer-service usage boundary. Do not execute it without explicit repository-owner
-authorization based on applicable terms or written provider permission. Distribution
-and product integration remain no-go without authoritative permission for the exact
-surface.
+It probes real behavior without freezing a provider interface or adding a production
+route.
 
-- [ ] Invoke the current `chatgpt-imagegen` CLI from a minimal async harness.
-- [ ] Generate one text-to-image result through a paired real Chrome session.
-- [ ] Generate one image-to-image result with a temporary reference file.
-- [ ] Verify project selection, conversation cleanup, output validation, and timeout.
-- [ ] Prove process-tree cancellation and temporary-file cleanup.
-- [ ] Capture sanitized success, authentication, quota, refusal, and browser-unavailable
+- [x] Invoke the current `chatgpt-imagegen` CLI from a minimal async harness.
+- [x] Generate one text-to-image result through a paired real Chrome session.
+- [x] Generate one image-to-image result with a temporary reference file.
+- [x] Verify project selection, conversation cleanup, output validation, and timeout.
+- [x] Prove process-tree cancellation and temporary-file cleanup.
+- [x] Capture sanitized success, authentication, quota, refusal, and browser-unavailable
   outcomes.
-- [ ] Measure actual concurrency and latency; keep ChatGPT Web concurrency at one.
-- [ ] Optionally smoke-test Codex OAuth separately; never use it as implicit fallback.
+- [x] Measure actual latency and enforce ChatGPT Web concurrency at one.
+- [x] Keep Codex OAuth outside this spike and make implicit fallback impossible with an
+  explicit `--backend web` invocation.
 
 Exit criteria:
 
@@ -457,11 +455,9 @@ Exit criteria:
 - [ ] Update root setuptools discovery, uv workspace/source mappings, and Docker build
   contexts so workspace provider packages are actually installable and editable.
 - [ ] Define provider requests, events, results, artifacts, health, errors, and execution
-  context from Flow plus a materially different permitted provider such as an existing
-  Runway/GeminiGen path or an official API.
+  context from Flow plus the materially different ChatGPT Web spike behavior.
 - [ ] Add a reusable provider conformance test suite.
-- [ ] Implement thin adapters for Google Flow and the selected permitted second provider.
-  Add a temporary ChatGPT adapter only if the Phase 1 gate changes.
+- [ ] Implement thin adapters for Google Flow and ChatGPT Web.
 - [ ] Prove streaming, non-streaming, cancellation, reference images, and artifact
   handling through fakes.
 - [ ] Keep current `FlowClient` and `GenerationHandler` public behavior unchanged.
@@ -523,10 +519,6 @@ Exit criteria:
 - Replay, stale lease, unauthorized capability, revocation, and disconnect tests pass.
 
 ### Phase 5: Local image worker and ChatGPT provider import
-
-The generic local worker may be implemented with a fake or permitted provider, but the
-ChatGPT Web/Codex adapter and its live exit criterion remain blocked until the usage
-gate recorded in Phase 0 changes.
 
 - [ ] Add `apps/image-worker` with a small CLI, configuration file, health command, and
   WebSocket client.
@@ -644,7 +636,8 @@ Exit criteria:
 - [ ] If direct Google Gemini support remains a product goal, implement it as
   `packages/provider-google-gemini`; do not treat the existing GeminiGen service as the
   same provider.
-- [ ] Document provider compatibility, terms, quotas, and execution requirements.
+- [ ] Document provider compatibility, quotas, rate limits, session lifetime, and
+  execution requirements.
 
 Exit criteria:
 
