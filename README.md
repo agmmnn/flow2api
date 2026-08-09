@@ -175,6 +175,10 @@ uv run flow2api
 For upgrades, database adoption, compatibility guarantees, verification evidence,
 and rollback boundaries, see [`docs/architecture-migration-release.md`](./docs/architecture-migration-release.md).
 
+The proposed roadmap for evolving Flow2API into a unified, local-first generation
+gateway is documented in
+[`docs/unified-generation-platform-plan.md`](./docs/unified-generation-platform-plan.md).
+
 ### First visit
 
 After startup, open the administration interface at **http://localhost:8000**. Change the default password immediately after your first login.
