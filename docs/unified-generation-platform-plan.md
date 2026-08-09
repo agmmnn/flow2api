@@ -1,6 +1,6 @@
 # Unified Generation Platform Plan
 
-Status: proposed; implementation has not started.
+Status: Phase 0 complete; Phase 1 is gated and has not started.
 
 This plan evolves Flow2API from a Google Flow-focused compatibility service into a
 local-first generation gateway with this product position:
@@ -67,6 +67,7 @@ packages/
 ├── provider-sdk-python/
 ├── provider-google-flow/
 ├── provider-chatgpt/
+├── provider-google-gemini/      # future direct Gemini integration
 └── worker-protocol/
 ```
 
@@ -75,8 +76,15 @@ that can execute on the server. `apps/image-worker` imports providers that requi
 local browser, local OAuth file, OS keychain, or desktop tools.
 
 During migration, existing `flow2api.providers.google_flow` compatibility imports stay
-available. Google Flow moves only after the provider contract is exercised by both the
-ChatGPT spike and existing Flow behavior.
+available. Google Flow moves only after the provider contract is exercised by existing
+Flow behavior and at least one materially different provider whose usage gate permits
+development. ChatGPT may fill that role only if its gate changes.
+
+In this plan, `google-flow` means Labs/Flow and may expose Gemini, Imagen, and Veo model
+families. The existing `GeminiGen` integration targets the separate `geminigen.ai`
+service; it is not a direct Google Gemini provider. Product copy must not claim direct
+Google Gemini support until a `provider-google-gemini` implementation passes the same
+contract and usage-boundary gates.
 
 ### 3. One protocol, multiple worker implementations
 
@@ -207,6 +215,7 @@ flow2api/
 │   ├── provider-sdk-python/
 │   ├── provider-google-flow/
 │   ├── provider-chatgpt/
+│   ├── provider-google-gemini/
 │   └── worker-protocol/
 ├── infra/
 ├── docs/
@@ -220,8 +229,8 @@ definitions are not manually duplicated.
 
 ## Core contracts
 
-The spike determines final method names, but the provider SDK must represent these
-concepts:
+The approved multi-provider spike determines final method names, but the provider SDK
+must represent these concepts:
 
 ```python
 ProviderCapabilities
@@ -328,12 +337,18 @@ plane safe. The worker therefore enforces its own policy:
 Browser extensions use an equivalent device credential appropriate to extension
 storage; mutual TLS is not required for the browser client.
 
+API-key identity received from the control plane is asserted metadata, not an
+independently authenticated caller identity. A worker may trust it for display only
+unless the job includes a separately verifiable, narrowly scoped authorization claim.
+
 ## Persistence additions
 
 Add focused repositories and ordered SQLite/PostgreSQL migrations for:
 
 - `ProviderAccountRepository`
 - `CredentialBindingRepository`
+- `GenerationJobRepository`
+- `GenerationAttemptRepository`
 - A `CredentialResolver` that resolves secret material outside repositories.
 - Typed registration, authentication, heartbeat, enablement, and capability methods on
   the existing `WorkerRepository`.
@@ -342,6 +357,10 @@ The worker record is a durable logical device with a public ID, kind, label, ena
 state, approved capabilities, hashed authentication key, and last-seen diagnostics.
 WebSocket session IDs, sockets, in-flight counts, latency estimates, leases, and routing
 cursors remain ephemeral in memory or Redis.
+
+Generation job identity, idempotency keys, attempts, dispatch state, and terminal
+execution audit are durable. They must survive API restarts even though individual
+WebSocket leases do not.
 
 Before adding new job or model tables, audit existing task, request-log, Runway,
 GeminiGen, and worker-binding tables and reuse them where their lifecycle matches.
@@ -384,29 +403,37 @@ resolved-execution auditing have production coverage.
 
 ### Phase 0: Architecture baseline and decision record
 
-- [ ] Inventory current model routing, provider account tables, task lifecycle,
+- [x] Inventory current model routing, provider account tables, task lifecycle,
   artifact storage, extension worker messages, and agent-gateway messages.
-- [ ] Freeze both legacy wire dialects as codecs and fixtures: `/captcha_ws` uses
+- [x] Freeze both legacy wire dialects as codecs and fixtures: `/captcha_ws` uses
   `req_id`, partially untyped results, refresh, CAPTCHA, and HTTP relay messages, while
   `/ws/agents` uses `job_id` and solve-only typed messages.
-- [ ] Record protocol defects that v1 must resolve: inconsistent generation capability
+- [x] Record protocol defects that v1 must resolve: inconsistent generation capability
   flags, missing timeout propagation, ping/pong behavior, gateway response ownership,
   and lifecycle feedback.
-- [ ] Record exact upstream commits and licenses for `chatgpt-imagegen` and `chrome-use`.
-- [ ] Document the consumer-subscription terms and local/private-use boundary.
-- [ ] Write the worker threat model, trust boundaries, and prohibited capabilities.
-- [ ] Freeze sanitized worker and generation transcripts as characterization fixtures.
-- [ ] Record the pre-change OpenAPI document and model catalog.
+- [x] Record exact upstream commits and licenses for `chatgpt-imagegen` and `chrome-use`.
+- [x] Document the consumer-subscription terms and local/private-use boundary.
+- [x] Record a legal/operational go/no-go decision for each UI-backed provider. A
+  provider that lacks a compatible usage basis may remain an isolated experiment but
+  cannot advance into product integration without explicit authorization.
+- [x] Write the worker threat model, trust boundaries, and prohibited capabilities.
+- [x] Freeze sanitized worker and generation transcripts as characterization fixtures.
+- [x] Record the pre-change OpenAPI document and model catalog.
 
 Exit criteria:
 
-- Architecture decisions and trust assumptions are explicit.
-- Current contracts can be compared after every later phase.
-- No live credentials or browser data exist in fixtures.
+- [x] Architecture decisions and trust assumptions are explicit.
+- [x] Current contracts can be compared after every later phase.
+- [x] No live credentials or browser data exist in fixtures.
 
 ### Phase 1: ChatGPT Web vertical spike
 
 This phase is intentionally throwaway and is not exposed through a public HTTP route.
+As of the 2026-08-09 Phase 0 review, it is **NO-GO by default** under the current
+consumer-service usage boundary. Do not execute it without explicit repository-owner
+authorization based on applicable terms or written provider permission. Distribution
+and product integration remain no-go without authoritative permission for the exact
+surface.
 
 - [ ] Invoke the current `chatgpt-imagegen` CLI from a minimal async harness.
 - [ ] Generate one text-to-image result through a paired real Chrome session.
@@ -427,11 +454,14 @@ Exit criteria:
 ### Phase 2: Provider SDK and package workspace
 
 - [ ] Add `packages/provider-sdk-python` to the uv workspace.
+- [ ] Update root setuptools discovery, uv workspace/source mappings, and Docker build
+  contexts so workspace provider packages are actually installable and editable.
 - [ ] Define provider requests, events, results, artifacts, health, errors, and execution
-  context from both the Flow implementation and ChatGPT spike.
+  context from Flow plus a materially different permitted provider such as an existing
+  Runway/GeminiGen path or an official API.
 - [ ] Add a reusable provider conformance test suite.
-- [ ] Implement a temporary ChatGPT spike adapter and a thin Google Flow adapter against
-  the contract.
+- [ ] Implement thin adapters for Google Flow and the selected permitted second provider.
+  Add a temporary ChatGPT adapter only if the Phase 1 gate changes.
 - [ ] Prove streaming, non-streaming, cancellation, reference images, and artifact
   handling through fakes.
 - [ ] Keep current `FlowClient` and `GenerationHandler` public behavior unchanged.
@@ -446,6 +476,8 @@ Exit criteria:
 
 - [ ] Add domain models for provider accounts, credential bindings, worker devices, and
   worker capabilities.
+- [ ] Add durable generation job and attempt models for idempotency, dispatch state,
+  retries, and terminal execution audit before any local provider can receive work.
 - [ ] Add focused repositories rather than waiting for complete database extraction.
 - [ ] Add paired, checksum-safe `0002` migrations for SQLite and PostgreSQL; never edit
   the applied `0001` files.
@@ -477,6 +509,9 @@ Exit criteria:
   `supported_versions` as legacy and retain the existing endpoints and authentication.
 - [ ] Resolve generation capability, timeout, fingerprint/solve-session, gateway
   response ownership, ping/pong, and upstream-feedback semantics before freezing v1.
+- [ ] Define job-scoped artifact upload grants with short expiry, worker/job ownership,
+  content-type and size limits, digest verification, single-use semantics, and cleanup;
+  a worker credential must not imply general API upload access.
 - [ ] Add golden transcript tests in both Python and TypeScript.
 - [ ] Update root Bun/uv workspaces and all relevant Docker build contexts for generated
   bindings, including the standalone agent gateway.
@@ -488,6 +523,10 @@ Exit criteria:
 - Replay, stale lease, unauthorized capability, revocation, and disconnect tests pass.
 
 ### Phase 5: Local image worker and ChatGPT provider import
+
+The generic local worker may be implemented with a fake or permitted provider, but the
+ChatGPT Web/Codex adapter and its live exit criterion remain blocked until the usage
+gate recorded in Phase 0 changes.
 
 - [ ] Add `apps/image-worker` with a small CLI, configuration file, health command, and
   WebSocket client.
@@ -602,6 +641,9 @@ Exit criteria:
   provenance, size/type validation, and local review.
 - [ ] Disable automatic gallery updates in server and worker defaults.
 - [ ] Prove a third provider through the SDK before declaring the plugin surface stable.
+- [ ] If direct Google Gemini support remains a product goal, implement it as
+  `packages/provider-google-gemini`; do not treat the existing GeminiGen service as the
+  same provider.
 - [ ] Document provider compatibility, terms, quotas, and execution requirements.
 
 Exit criteria:

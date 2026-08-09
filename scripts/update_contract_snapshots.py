@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from flow2api.contract_baseline import build_model_catalog_snapshot
 from flow2api.main import app
 
 
@@ -22,7 +23,9 @@ def write_json(path: Path, value: object) -> None:
 
 def main() -> None:
     write_json(CONTRACT_ROOT / "openapi.json", app.openapi())
+    write_json(CONTRACT_ROOT / "model-catalog.json", build_model_catalog_snapshot())
     print(f"Updated {CONTRACT_ROOT / 'openapi.json'}")
+    print(f"Updated {CONTRACT_ROOT / 'model-catalog.json'}")
 
 
 if __name__ == "__main__":
