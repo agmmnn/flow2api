@@ -1,6 +1,6 @@
 # Unified Generation Platform Plan
 
-Status: Phases 0 and 1 complete; Phase 2 has not started.
+Status: Phases 0 and 1 complete; Phase 1.5 (`sub2gen` identity cutover) is next.
 
 This plan evolves Flow2API from a Google Flow-focused compatibility service into a
 local-first generation gateway with this product position:
@@ -8,13 +8,15 @@ local-first generation gateway with this product position:
 > Unified image generation API for consumer AI subscriptions — bridge ChatGPT,
 > Flow, Gemini, and other UI-backed generation services into one local API.
 
-The change extends the completed modular-monolith migration. It is not a rewrite,
-does not require microservices, and keeps these commands working throughout:
+The change extends the completed modular-monolith migration. It is not a rewrite and
+does not require microservices. Phase 1.5 deliberately replaces the old command:
 
 ```bash
 uv run setup
-uv run flow2api
+uv run sub2gen
 ```
+
+`uv run flow2api` is not retained as an alias after the identity cutover.
 
 ## Goals
 
@@ -25,7 +27,8 @@ uv run flow2api
 - Prevent silent routing between subscription or billing pools.
 - Preserve existing model IDs, HTTP contracts, worker behavior, and database upgrades.
 - Add providers without extending `generation_handler.py` or `core/database.py` into new god modules.
-- Delay the repository, package, and product rename until compatibility is proven.
+- Establish the provider-neutral `sub2gen` repository and code identity before the
+  provider SDK and worker protocol create more old-name dependencies.
 
 ## Non-goals
 
@@ -37,6 +40,7 @@ uv run flow2api
 - Silently falling back from ChatGPT Web usage to metered Codex usage.
 - Enabling third-party online style galleries by default.
 - Combining every browser capability into one Chrome extension.
+- Maintaining `flow2api` identity aliases after the Phase 1.5 hard cutover.
 
 ## Architectural decisions
 
@@ -75,16 +79,15 @@ Applications contain only composition and runtime code. `apps/api` imports provi
 that can execute on the server. `apps/image-worker` imports providers that require a
 local browser, local OAuth file, OS keychain, or desktop tools.
 
-During migration, existing `flow2api.providers.google_flow` compatibility imports stay
-available. Google Flow moves only after the provider contract is exercised by existing
-Flow behavior and at least one materially different provider. The completed ChatGPT Web
-spike provides the second real implementation that will shape the initial contract.
+Phase 1.5 renames the application import root to `sub2gen` without an old-namespace
+shim. Google Flow moves into its provider package only after the provider contract is
+exercised by existing Flow behavior and the materially different ChatGPT Web spike.
 
 In this plan, `google-flow` means Labs/Flow and may expose Gemini, Imagen, and Veo model
 families. The existing `GeminiGen` integration targets the separate `geminigen.ai`
 service; it is not a direct Google Gemini provider. Product copy must not claim direct
 Google Gemini support until a `provider-google-gemini` implementation passes the same
-contract and usage-boundary gates.
+provider contract and technical verification.
 
 ### 3. One protocol, multiple worker implementations
 
@@ -201,7 +204,7 @@ server to a worker.
 ## Target layout
 
 ```text
-flow2api/
+sub2gen/
 ├── apps/
 │   ├── api/
 │   ├── admin-web/
@@ -449,6 +452,44 @@ Exit criteria:
 - Failure and cancellation behavior are understood before an interface is frozen.
 - No production endpoint or persistent credential model depends on spike code.
 
+### Phase 1.5: `sub2gen` identity cutover
+
+This is a deliberate breaking rename before the provider SDK and worker protocol are
+created. It does not keep compatibility aliases for the former project identity.
+Provider behavior, OpenAI-compatible HTTP shapes, databases, and existing generation
+features remain in scope and are verified independently from the identity cutover.
+
+- [ ] Move the Git history to the standalone `agmmnn/sub2gen` repository and make it the
+  only `origin`; the new repository must not remain in the former GitHub fork network.
+- [ ] Rename the Python distribution and import root from `flow2api` to `sub2gen`, move
+  all source/tests, and update setuptools discovery and package data.
+- [ ] Replace the primary executable with `uv run sub2gen`; remove the `flow2api`
+  console script rather than leaving a shim.
+- [ ] Rename `FLOW2API_*` environment variables to `SUB2GEN_*` and update configuration,
+  scripts, Compose files, Dockerfiles, CI, and documentation without old-name fallback.
+- [ ] Rename JavaScript package scopes from `@flow2api/*` to `@sub2gen/*` and update Bun
+  workspace references and lockfiles.
+- [ ] Rename application titles, extension identities and copy, generated API metadata,
+  container/service/image names, logs, and repository documentation to `sub2gen`.
+- [ ] Replace newly issued managed-key branding/prefixes with `s2g_live_` and define an
+  explicit operator migration for existing local keys instead of accepting two branded
+  key formats indefinitely.
+- [ ] Audit runtime paths and persisted identifiers. Keep neutral paths/schema fields;
+  rename branded ones with a one-time migration, not a runtime compatibility branch.
+- [ ] Remove obsolete `flow2api` source names and assert that no old import, executable,
+  environment prefix, npm scope, UI title, or container identity remains.
+- [ ] Update the architecture, setup, deployment, and extension documentation around
+  `uv run setup` and `uv run sub2gen`.
+
+Exit criteria:
+
+- `uv run setup` and `uv run sub2gen` are the only documented local startup path.
+- `import sub2gen` succeeds; `import flow2api` and `uv run flow2api` do not.
+- Fresh SQLite/PostgreSQL installs and a one-time migration of the current personal
+  runtime pass without maintaining old-name branches in application code.
+- Python, Bun, Docker/Compose, extension, OpenAPI, and live health checks use `sub2gen`.
+- The GitHub repository is standalone and `origin` points only to `agmmnn/sub2gen`.
+
 ### Phase 2: Provider SDK and package workspace
 
 - [ ] Add `packages/provider-sdk-python` to the uv workspace.
@@ -543,7 +584,8 @@ Exit criteria:
 ### Phase 6: Google Flow provider packaging and orchestration cleanup
 
 - [ ] Move reusable Google Flow provider code into `packages/provider-google-flow`.
-- [ ] Retain compatibility imports from `flow2api.providers.google_flow`.
+- [ ] Expose Google Flow only through the `sub2gen` provider package/import path; do not
+  recreate the removed application namespace.
 - [ ] Make `GenerationHandler` an orchestrator over provider execution and existing
   image/video pipelines rather than a provider selector.
 - [ ] Keep project pinning, token selection, CAPTCHA, cache, logging, and streaming
@@ -589,7 +631,7 @@ Exit criteria:
 Exit criteria:
 
 - The same normalized request can target Flow or ChatGPT explicitly.
-- Existing callers remain compatible.
+- Existing OpenAI-compatible request and response shapes remain compatible.
 - Async polling survives API or worker restarts according to documented provider limits.
 
 ### Phase 9: Provider, account, worker, and model administration
@@ -644,22 +686,21 @@ Exit criteria:
 - Remote prompt/assets cannot silently enter generation requests.
 - The provider SDK is validated beyond the two providers that shaped it.
 
-### Phase 12: Rebrand, compatibility release, and rollback
+### Phase 12: Release hardening and rollback
 
-- [ ] Select the final product, repository, Python distribution, import, CLI, container,
-  and environment-variable names.
-- [ ] Keep `flow2api` commands, imports, configuration keys, model IDs, and storage paths
-  as compatibility aliases for a documented period.
-- [ ] Add migration tooling instead of requiring users to move runtime data manually.
-- [ ] Update README, API docs, extension copy, container names, and package metadata.
+- [ ] Confirm the Phase 1.5 `sub2gen` identity remains consistent across every shipped
+  application, package, extension, container, artifact, and document.
+- [ ] Remove temporary spike code that was not promoted behind the provider SDK.
+- [ ] Add final migration and diagnostic tooling for the unified provider architecture.
 - [ ] Run fresh-install, existing-SQLite, PostgreSQL, local-worker, extension, image,
   video, cache, and rollback suites.
-- [ ] Publish a compatibility matrix and pre-upgrade backup procedure.
+- [ ] Publish a provider/worker compatibility matrix and pre-upgrade backup procedure.
 
 Exit criteria:
 
-- The new name describes the unified product rather than one provider.
-- Existing users can upgrade without changing their first startup command.
+- No former project-identity alias has been reintroduced.
+- The release contains only `sub2gen` commands, imports, environment names, and package
+  identities.
 - Code rollback and data rollback boundaries are documented and tested.
 
 ## Verification matrix
@@ -692,8 +733,8 @@ possible quota or credit consumption.
 ## Compatibility and rollback rules
 
 1. Existing Flow routes and models remain the baseline compatibility contract.
-2. New tables are additive until the rebrand release; existing provider tables are not
-   destructively rewritten.
+2. New tables are additive until their owning migration phase; existing provider tables
+   are not destructively rewritten for an identity-only change.
 3. Legacy unversioned worker endpoints remain separate from protocol v1 until
    compatibility adapters and client rollout are verified.
 4. Provider failures never trigger cross-billing fallback by accident.
@@ -711,7 +752,8 @@ Implementation proceeds one phase at a time. At each phase boundary:
 1. Update this plan with completed checklist items and any approved deviations.
 2. Run the phase-specific and repository-wide verification suites.
 3. Review security, credential locality, billing-pool behavior, and compatibility.
-4. Confirm `uv run setup` and `uv run flow2api` still work.
+4. Before Phase 1.5, confirm `uv run flow2api`; from Phase 1.5 onward, confirm
+   `uv run setup` and `uv run sub2gen` with no old command fallback.
 5. Commit and push the completed phase to `main` only after verification.
 
 The ChatGPT spike may be discarded. No later phase may depend on spike code that has not
